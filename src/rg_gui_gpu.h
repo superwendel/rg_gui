@@ -591,11 +591,44 @@ typedef struct RgGuiGpuItem
 {
 	RgGuiRect clip;
 	RgGuiTexture texture;
+	RgGuiImageMaterial material;
 	u32 first;
 	u32 count;
 	u32 type;
 	u32 clip_enabled;
 } RgGuiGpuItem;
+
+/** Result from an application image-material binding callback. */
+typedef enum RgGuiGpuImageBindResult
+{
+	/** Draw with rg_gui's stock image pipeline and the texture in the item. */
+	RG_GUI_GPU_IMAGE_BIND_DEFAULT = 0,
+	/** The callback bound a compatible pipeline and all fragment resources. */
+	RG_GUI_GPU_IMAGE_BIND_CUSTOM = 1,
+	/** Skip this image item and report an image binding failure. */
+	RG_GUI_GPU_IMAGE_BIND_FAILED = 2
+} RgGuiGpuImageBindResult;
+
+/** Resources supplied to an application image-material binding callback. */
+typedef struct RgGuiGpuImageBindInfo
+{
+	SDL_GPUCommandBuffer* command_buffer;
+	SDL_GPURenderPass* pass;
+	SDL_GPUSampler* sampler;
+	RgGuiTexture texture;
+	RgGuiImageMaterial material;
+} RgGuiGpuImageBindInfo;
+
+/**
+ * Bind an application-defined image material.
+ *
+ * RG_GUI_GPU_IMAGE_BIND_DEFAULT must not change GPU state. CUSTOM must bind a
+ * graphics pipeline compatible with RgGuiGpuVertex and all fragment resources;
+ * rg_gui binds the vertex uniforms and vertex buffer. FAILED may be returned
+ * after a partial bind because rg_gui invalidates its cached state afterward.
+ */
+typedef RgGuiGpuImageBindResult (*RgGuiGpuImageBindFn)(
+	void* user, const RgGuiGpuImageBindInfo* info);
 
 typedef struct RgGuiGpuDesc
 {
@@ -612,6 +645,8 @@ typedef struct RgGuiGpuDesc
 	u32 max_items;
 	SDL_GPUFilter min_filter;
 	SDL_GPUFilter mag_filter;
+	RgGuiGpuImageBindFn image_bind;
+	void* image_bind_user;
 } RgGuiGpuDesc;
 
 typedef RgGuiGpuRunDrawDesc RgGuiGpuDrawDesc;
@@ -635,6 +670,9 @@ typedef struct RgGuiGpuStats
 	u32 cache_upload_bytes;
 	u32 geometry_upload_bytes;
 	u32 full_cache_upload;
+	u32 image_bind_calls;
+	u32 custom_image_draw_calls;
+	u32 image_bind_failures;
 } RgGuiGpuStats;
 
 typedef struct RgGuiGpuRenderer
@@ -651,6 +689,8 @@ typedef struct RgGuiGpuRenderer
 	u32 item_count;
 	u32 item_capacity;
 	const RgGuiRendererPrepared* text_prepared;
+	RgGuiGpuImageBindFn image_bind;
+	void* image_bind_user;
 } RgGuiGpuRenderer;
 
 RGINLINE void rg_gui_gpu_destroy(RgGuiGpuRenderer* renderer);
@@ -728,6 +768,8 @@ RGINLINE int rg_gui_gpu_create(RgGuiGpuRenderer* renderer, const RgGuiGpuDesc* d
 
 	memset(renderer, 0, sizeof(*renderer));
 	renderer->device = desc->device;
+	renderer->image_bind = desc->image_bind;
+	renderer->image_bind_user = desc->image_bind_user;
 	renderer->vertex_capacity = desc->max_geometry_vertices ? desc->max_geometry_vertices : RG_GUI_GPU_DEFAULT_MAX_GEOMETRY_VERTICES;
 	renderer->item_capacity = desc->max_items ? desc->max_items : RG_GUI_GPU_DEFAULT_MAX_ITEMS;
 	if (renderer->vertex_capacity > UINT32_MAX / (u32)sizeof(RgGuiGpuVertex))
@@ -832,7 +874,8 @@ RGINLINE int rg_gui_gpu_clip_equal(RgGuiRect a, RgGuiRect b)
 }
 
 RGINLINE int rg_gui_gpu_add_item(RgGuiGpuRenderer* renderer, u32 type,
-                                 RgGuiTexture texture, u32 first, u32 count,
+                                 RgGuiTexture texture, RgGuiImageMaterial material,
+                                 u32 first, u32 count,
                                  int clip_enabled, RgGuiRect clip)
 {
 	if (!count) return 1;
@@ -840,6 +883,7 @@ RGINLINE int rg_gui_gpu_add_item(RgGuiGpuRenderer* renderer, u32 type,
 	{
 		RgGuiGpuItem* previous = &renderer->items[renderer->item_count - 1u];
 		if (previous->type == type && previous->texture == texture &&
+		    previous->material == material &&
 		    previous->clip_enabled == (u32)clip_enabled &&
 		    (!clip_enabled || rg_gui_gpu_clip_equal(previous->clip, clip)) &&
 		    previous->first + previous->count == first)
@@ -852,6 +896,7 @@ RGINLINE int rg_gui_gpu_add_item(RgGuiGpuRenderer* renderer, u32 type,
 	RgGuiGpuItem* item = &renderer->items[renderer->item_count++];
 	item->clip = clip;
 	item->texture = texture;
+	item->material = material;
 	item->first = first;
 	item->count = count;
 	item->type = type;
@@ -946,7 +991,8 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 			u32 color = rg_gui_renderer_base_pack_color(cmd->data.rect.color);
 			RgGuiRect uv = {0};
 			if (!rg_gui_gpu_add_rect_vertices(renderer, cmd->data.rect.rect, uv, color) ||
-			    !rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_SOLID, 0u, first, 6u,
+			    !rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_SOLID, 0u, 0u,
+			                         first, 6u,
 			                         clip_enabled, clip))
 				goto capacity_failure;
 			continue;
@@ -963,7 +1009,8 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 			rg_gui_gpu_set_vertex(&out[1], cmd->data.triangle.b.x, cmd->data.triangle.b.y, color, 0.0f, 0.0f);
 			rg_gui_gpu_set_vertex(&out[2], cmd->data.triangle.c.x, cmd->data.triangle.c.y, color, 0.0f, 0.0f);
 			renderer->vertex_count += 3u;
-			if (!rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_SOLID, 0u, first, 3u,
+			if (!rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_SOLID, 0u, 0u,
+			                         first, 3u,
 			                         clip_enabled, clip))
 				goto capacity_failure;
 			continue;
@@ -976,7 +1023,8 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 			if (!rg_gui_gpu_add_rect_vertices(renderer, cmd->data.image.rect,
 			                                  cmd->data.image.uv, color) ||
 			    !rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_IMAGE,
-			                         cmd->data.image.texture, first, 6u,
+			                         cmd->data.image.texture, cmd->data.image.material,
+			                         first, 6u,
 			                         clip_enabled, clip))
 				goto capacity_failure;
 			continue;
@@ -1008,7 +1056,7 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 			}
 			if (glyph_count == expected)
 			{
-				if (!rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_TEXT, 0u,
+				if (!rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_TEXT, 0u, 0u,
 				                         first_glyph, glyph_count, clip_enabled, clip))
 					goto capacity_failure;
 				run_cursor = cursor;
@@ -1178,21 +1226,56 @@ RGINLINE RgGuiGpuStats rg_gui_gpu_draw(const RgGuiGpuRenderer* renderer,
 		}
 		else
 		{
-			if (bound_type != item->type)
+			int custom_image = 0;
+			if (item->type == RG_GUI_GPU_ITEM_IMAGE && item->material != 0u &&
+			    renderer->image_bind)
 			{
-				SDL_BindGPUGraphicsPipeline(
-				    pass, item->type == RG_GUI_GPU_ITEM_IMAGE ? renderer->image_pipeline : renderer->solid_pipeline);
+				RgGuiGpuImageBindInfo bind_info = {0};
+				bind_info.command_buffer = command_buffer;
+				bind_info.pass = pass;
+				bind_info.sampler = renderer->text.sampler;
+				bind_info.texture = item->texture;
+				bind_info.material = item->material;
+				stats.image_bind_calls++;
+				RgGuiGpuImageBindResult bind_result = renderer->image_bind(
+				    renderer->image_bind_user, &bind_info);
+				if (bind_result == RG_GUI_GPU_IMAGE_BIND_CUSTOM)
+				{
+					custom_image = 1;
+					stats.custom_image_draw_calls++;
+				}
+				else if (bind_result != RG_GUI_GPU_IMAGE_BIND_DEFAULT)
+				{
+					stats.image_bind_failures++;
+					bound_type = UINT32_MAX;
+					bound_texture = 0u;
+					continue;
+				}
+			}
+
+			if (custom_image)
+			{
 				SDL_PushGPUVertexUniformData(command_buffer, 0u,
 				                             &geometry_uniforms, sizeof(geometry_uniforms));
-				bound_type = item->type;
-				bound_texture = 0u;
 			}
-			if (item->type == RG_GUI_GPU_ITEM_IMAGE && bound_texture != item->texture)
+			else
 			{
-				SDL_GPUTextureSamplerBinding image = {
-				    (SDL_GPUTexture*)(uintptr_t)item->texture, renderer->text.sampler};
-				SDL_BindGPUFragmentSamplers(pass, 0u, &image, 1u);
-				bound_texture = item->texture;
+				if (bound_type != item->type)
+				{
+					SDL_BindGPUGraphicsPipeline(
+					    pass, item->type == RG_GUI_GPU_ITEM_IMAGE ? renderer->image_pipeline : renderer->solid_pipeline);
+					SDL_PushGPUVertexUniformData(command_buffer, 0u,
+					                             &geometry_uniforms, sizeof(geometry_uniforms));
+					bound_type = item->type;
+					bound_texture = 0u;
+				}
+				if (item->type == RG_GUI_GPU_ITEM_IMAGE && bound_texture != item->texture)
+				{
+					SDL_GPUTextureSamplerBinding image = {
+					    (SDL_GPUTexture*)(uintptr_t)item->texture, renderer->text.sampler};
+					SDL_BindGPUFragmentSamplers(pass, 0u, &image, 1u);
+					bound_texture = item->texture;
+				}
 			}
 			SDL_GPUBufferBinding binding = {
 			    renderer->geometry_buffer,
@@ -1200,6 +1283,11 @@ RGINLINE RgGuiGpuStats rg_gui_gpu_draw(const RgGuiGpuRenderer* renderer,
 			SDL_BindGPUVertexBuffers(pass, 0u, &binding, 1u);
 			SDL_DrawGPUPrimitives(pass, item->count, 1u, 0u, 0u);
 			stats.geometry_vertices += item->count;
+			if (custom_image)
+			{
+				bound_type = UINT32_MAX;
+				bound_texture = 0u;
+			}
 		}
 		stats.items++;
 		stats.draw_calls++;

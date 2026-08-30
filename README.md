@@ -20,7 +20,7 @@ applications in this repository.
 - `src/rg_gui_renderer.h` - persistent page-cached text preparation with
   32-glyph pages by default.
 - `src/rg_gui_gpu.h` - SDL3 GPU rendering for rectangles, triangles, images,
-  text, clipping, and draw-list order.
+  application-defined image materials, text, clipping, and draw-list order.
 - `shaders/` - HLSL sources for the graphics and compute paths. Generated
   backend binaries are intentionally ignored.
 

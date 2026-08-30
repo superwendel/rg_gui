@@ -26,6 +26,39 @@ static void test_font_init(RgTextFont* font, RgTextGlyph glyphs[2])
 	glyphs[1].codepoint = 'A';
 }
 
+typedef struct TestImageBindState
+{
+	SDL_GPUGraphicsPipeline* pipeline;
+	SDL_GPUGraphicsPipeline* failure_pipeline;
+	u32 default_calls;
+	u32 custom_calls;
+	u32 failed_calls;
+} TestImageBindState;
+
+static RgGuiGpuImageBindResult test_image_bind(
+	void* user, const RgGuiGpuImageBindInfo* info)
+{
+	TestImageBindState* state = (TestImageBindState*)user;
+	if (!state || !info) return RG_GUI_GPU_IMAGE_BIND_FAILED;
+	if (info->material == 10u)
+	{
+		state->default_calls++;
+		return RG_GUI_GPU_IMAGE_BIND_DEFAULT;
+	}
+	if (info->material == 20u)
+	{
+		state->custom_calls++;
+		SDL_BindGPUGraphicsPipeline(info->pass, state->pipeline);
+		SDL_GPUTextureSamplerBinding image = {
+		    (SDL_GPUTexture*)(uintptr_t)info->texture, info->sampler};
+		SDL_BindGPUFragmentSamplers(info->pass, 0u, &image, 1u);
+		return RG_GUI_GPU_IMAGE_BIND_CUSTOM;
+	}
+	state->failed_calls++;
+	SDL_BindGPUGraphicsPipeline(info->pass, state->failure_pipeline);
+	return RG_GUI_GPU_IMAGE_BIND_FAILED;
+}
+
 int main(void)
 {
 	int result = 1;
@@ -36,6 +69,7 @@ int main(void)
 	SDL_GPUTexture* target_texture = NULL;
 	RgGuiGpuRenderer renderer = {0};
 	RgGpuUploadRing ring = {0};
+	TestImageBindState image_bind_state = {0};
 	void* gui_memory = NULL;
 	void* text_memory = NULL;
 
@@ -81,7 +115,11 @@ int main(void)
 	desc.max_items = 16u;
 	desc.min_filter = SDL_GPU_FILTER_NEAREST;
 	desc.mag_filter = SDL_GPU_FILTER_NEAREST;
+	desc.image_bind = test_image_bind;
+	desc.image_bind_user = &image_bind_state;
 	if (!rg_gui_gpu_create(&renderer, &desc)) goto cleanup;
+	image_bind_state.pipeline = renderer.image_pipeline;
+	image_bind_state.failure_pipeline = renderer.solid_pipeline;
 	if (!rg_gpu_upload_ring_init(&ring, device, MB(1))) goto cleanup;
 
 	RgTextFont font;
@@ -120,7 +158,23 @@ int main(void)
 	rg_gui_push_image(&gui, rg_gui_make_rect(8.0f, 0.0f, 8.0f, 8.0f),
 	                  rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f), white,
 	                  (RgGuiTexture)(uintptr_t)atlas);
-	rg_gui_push_text_static(&gui, "A", rg_vec2(16.0f, 4.0f), white);
+	rg_gui_push_image_material(&gui, rg_gui_make_rect(16.0f, 0.0f, 8.0f, 8.0f),
+	                           rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f), white,
+	                           (RgGuiTexture)(uintptr_t)atlas, 10u);
+	rg_gui_push_image_material(&gui, rg_gui_make_rect(24.0f, 0.0f, 8.0f, 8.0f),
+	                           rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f), white,
+	                           (RgGuiTexture)(uintptr_t)atlas, 20u);
+	rg_gui_push_image(&gui, rg_gui_make_rect(32.0f, 0.0f, 8.0f, 8.0f),
+	                  rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f), white,
+	                  (RgGuiTexture)(uintptr_t)atlas);
+	rg_gui_push_image_material(&gui, rg_gui_make_rect(40.0f, 0.0f, 8.0f, 8.0f),
+	                           rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f), white,
+	                           (RgGuiTexture)(uintptr_t)atlas, 30u);
+	rg_gui_push_image(&gui, rg_gui_make_rect(48.0f, 0.0f, 8.0f, 8.0f),
+	                  rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f), white,
+	                  (RgGuiTexture)(uintptr_t)atlas);
+	rg_gui_push_rect(&gui, rg_gui_make_rect(56.0f, 0.0f, 8.0f, 8.0f), white);
+	rg_gui_push_text_static(&gui, "A", rg_vec2(56.0f, 12.0f), white);
 	const RgGuiDrawList* list = rg_gui_draw_list(&gui);
 	rg_gui_renderer_begin_frame(&text_renderer);
 	if (!rg_gui_gpu_prepare(&renderer, &text_renderer, list,
@@ -167,8 +221,14 @@ int main(void)
 	RgGuiGpuStats stats = rg_gui_gpu_draw(&renderer, command_buffer, pass,
 	                                      &draw_desc, &upload);
 	SDL_EndGPURenderPass(pass);
-	int stats_valid = stats.geometry_vertices == 12u &&
-	                  stats.text_instances == 1u && stats.draw_calls == 3u;
+	int stats_valid = stats.geometry_vertices == 42u && stats.text_instances == 1u &&
+	                  stats.items == 8u && stats.draw_calls == 8u &&
+	                  stats.image_bind_calls == 3u &&
+	                  stats.custom_image_draw_calls == 1u &&
+	                  stats.image_bind_failures == 1u &&
+	                  image_bind_state.default_calls == 1u &&
+	                  image_bind_state.custom_calls == 1u &&
+	                  image_bind_state.failed_calls == 1u;
 	if (!SDL_SubmitGPUCommandBuffer(command_buffer)) goto cleanup;
 	if (!stats_valid)
 	{

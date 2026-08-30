@@ -72,6 +72,18 @@ int main(void)
 	rg_gui_push_image(&gui, rg_gui_make_rect(10.0f, 0.0f, 8.0f, 8.0f),
 	                  rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f), white,
 	                  (RgGuiTexture)(uintptr_t)1u);
+	rg_gui_push_image_material(&gui, rg_gui_make_rect(18.0f, 0.0f, 8.0f, 8.0f),
+	                           rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f), white,
+	                           (RgGuiTexture)(uintptr_t)1u, 11u);
+	rg_gui_image_ex_material(&gui, (RgGuiTexture)(uintptr_t)1u,
+	                         rg_gui_make_rect(26.0f, 0.0f, 8.0f, 8.0f),
+	                         rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f), white, 11u);
+	rg_gui_push_image_material(&gui, rg_gui_make_rect(34.0f, 0.0f, 8.0f, 8.0f),
+	                           rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f), white,
+	                           (RgGuiTexture)(uintptr_t)1u, 22u);
+	rg_gui_push_image_material(&gui, rg_gui_make_rect(42.0f, 0.0f, 8.0f, 8.0f),
+	                           rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f), white,
+	                           (RgGuiTexture)(uintptr_t)2u, 11u);
 	char mutable_text[8] = "A";
 	u32 mutable_command = rg_gui_draw_list(&gui)->count;
 	rg_gui_label(&gui, mutable_text, rg_gui_make_rect(20.0f, 0.0f, 24.0f, 10.0f));
@@ -86,7 +98,7 @@ int main(void)
 	}
 	rg_gui_push_text_static(&gui, "A", rg_vec2(20.0f, 4.0f), white);
 
-	RgGuiGpuVertex vertices[32];
+	RgGuiGpuVertex vertices[64];
 	RgGuiGpuItem items[16];
 	RgGuiGpuRenderer gpu = {0};
 	gpu.vertices = vertices;
@@ -97,19 +109,25 @@ int main(void)
 	rg_gui_renderer_begin_frame(&text_renderer);
 	const RgGuiDrawList* list = rg_gui_draw_list(&gui);
 	if (!rg_gui_gpu_prepare(&gpu, &text_renderer, list, list->count) ||
-	    gpu.vertex_count != 15u || gpu.item_count != 4u ||
+	    gpu.vertex_count != 39u || gpu.item_count != 7u ||
 	    gpu.items[0].type != RG_GUI_GPU_ITEM_SOLID ||
 	    gpu.items[1].type != RG_GUI_GPU_ITEM_SOLID ||
 	    !gpu.items[1].clip_enabled ||
 	    gpu.items[2].type != RG_GUI_GPU_ITEM_IMAGE ||
-	    gpu.items[3].type != RG_GUI_GPU_ITEM_TEXT ||
-	    gpu.items[3].count != 2u)
+	    gpu.items[2].material != 0u ||
+	    gpu.items[3].type != RG_GUI_GPU_ITEM_IMAGE ||
+	    gpu.items[3].material != 11u || gpu.items[3].count != 12u ||
+	    gpu.items[4].material != 22u || gpu.items[4].count != 6u ||
+	    gpu.items[5].material != 11u || gpu.items[5].texture != 2u ||
+	    gpu.items[6].type != RG_GUI_GPU_ITEM_TEXT ||
+	    gpu.items[6].count != 2u)
 	{
 		fprintf(stderr, "ordered draw-list preparation failed (vertices=%u items=%u",
 		        gpu.vertex_count, gpu.item_count);
 		for (u32 i = 0u; i < gpu.item_count; i++)
-			fprintf(stderr, " item[%u]={type=%u,count=%u}", i,
-			        gpu.items[i].type, gpu.items[i].count);
+			fprintf(stderr, " item[%u]={type=%u,material=%llu,count=%u}", i,
+			        gpu.items[i].type,
+			        (unsigned long long)gpu.items[i].material, gpu.items[i].count);
 		fprintf(stderr, ")\n");
 		return 1;
 	}

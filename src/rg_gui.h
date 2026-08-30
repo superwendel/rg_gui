@@ -392,6 +392,7 @@
 
 typedef u64 RgGuiId;
 typedef uintptr_t RgGuiTexture;
+typedef u64 RgGuiImageMaterial;
 
 typedef struct RgGuiContext RgGuiContext;
 typedef struct RgGuiTableColumn RgGuiTableColumn;
@@ -409,6 +410,7 @@ typedef struct RgGuiIcon
 	RgGuiTexture texture;
 	RgGuiRect uv;
 	rg_vec4 tint;
+	RgGuiImageMaterial material;
 } RgGuiIcon;
 
 typedef struct RgGuiAnchor
@@ -621,6 +623,7 @@ typedef struct RgGuiDrawCmd
 			RgGuiRect uv;
 			rg_vec4 color;
 			RgGuiTexture texture;
+			RgGuiImageMaterial material;
 		} image;
 		struct
 		{
@@ -2436,9 +2439,24 @@ RGINLINE void rg_gui_label_icon_static(RgGuiContext* ctx, const char* text, cons
 RGINLINE void rg_gui_image(RgGuiContext* ctx, RgGuiTexture texture, RgGuiRect rect);
 
 /**
+ * @brief Image widget with an application-defined renderer material
+ * @details A zero material is identical to rg_gui_image.
+ */
+RGINLINE void rg_gui_image_material(RgGuiContext* ctx, RgGuiTexture texture,
+                                    RgGuiRect rect, RgGuiImageMaterial material);
+
+/**
  * @brief Image widget with custom UV rect and tint
  */
 RGINLINE void rg_gui_image_ex(RgGuiContext* ctx, RgGuiTexture texture, RgGuiRect rect, RgGuiRect uv, rg_vec4 tint);
+
+/**
+ * @brief Image widget with custom UV rect, tint, and application-defined material
+ * @details A zero material is identical to rg_gui_image_ex.
+ */
+RGINLINE void rg_gui_image_ex_material(RgGuiContext* ctx, RgGuiTexture texture,
+                                       RgGuiRect rect, RgGuiRect uv, rg_vec4 tint,
+                                       RgGuiImageMaterial material);
 
 /**
  * @brief Image button widget
@@ -2447,10 +2465,26 @@ RGINLINE void rg_gui_image_ex(RgGuiContext* ctx, RgGuiTexture texture, RgGuiRect
 RGINLINE int rg_gui_image_button(RgGuiContext* ctx, RgGuiTexture texture, RgGuiRect rect, RgGuiId id);
 
 /**
+ * @brief Image button widget with an application-defined renderer material
+ * @return 1 if clicked, 0 otherwise
+ */
+RGINLINE int rg_gui_image_button_material(RgGuiContext* ctx, RgGuiTexture texture,
+                                          RgGuiRect rect, RgGuiId id,
+                                          RgGuiImageMaterial material);
+
+/**
  * @brief Image button widget with custom UV rect and tint
  * @return 1 if clicked, 0 otherwise
  */
 RGINLINE int rg_gui_image_button_ex(RgGuiContext* ctx, RgGuiTexture texture, RgGuiRect rect, RgGuiRect uv, rg_vec4 tint, RgGuiId id);
+
+/**
+ * @brief Image button widget with custom UV rect, tint, and application-defined material
+ * @return 1 if clicked, 0 otherwise
+ */
+RGINLINE int rg_gui_image_button_ex_material(RgGuiContext* ctx, RgGuiTexture texture,
+                                             RgGuiRect rect, RgGuiRect uv, rg_vec4 tint,
+                                             RgGuiId id, RgGuiImageMaterial material);
 
 /**
  * @brief Selectable row widget
@@ -3448,6 +3482,21 @@ RGINLINE RgGuiIcon rg_gui_icon_make(RgGuiTexture texture, RgGuiRect uv, rg_vec4 
 {
 	RgGuiIcon icon;
 	icon.texture = texture;
+	icon.material = 0u;
+	icon.uv = uv;
+	icon.tint = tint;
+	return icon;
+}
+
+/**
+ * @brief Build an icon description with an application-defined renderer material
+ */
+RGINLINE RgGuiIcon rg_gui_icon_make_material(RgGuiTexture texture, RgGuiRect uv,
+                                             rg_vec4 tint, RgGuiImageMaterial material)
+{
+	RgGuiIcon icon;
+	icon.texture = texture;
+	icon.material = material;
 	icon.uv = uv;
 	icon.tint = tint;
 	return icon;
@@ -5573,6 +5622,9 @@ RGINLINE void rg_gui_push_triangle_to(RgGuiContext* ctx, RgGuiDrawList* list, rg
 
 RGINLINE void rg_gui_push_image_to(RgGuiContext* ctx, RgGuiDrawList* list, RgGuiRect rect,
                                    RgGuiRect uv, rg_vec4 color, RgGuiTexture texture);
+RGINLINE void rg_gui_push_image_material_to(RgGuiContext* ctx, RgGuiDrawList* list,
+                                            RgGuiRect rect, RgGuiRect uv, rg_vec4 color,
+                                            RgGuiTexture texture, RgGuiImageMaterial material);
 
 /**
  * @brief Draw a centered filled directional arrow into a specific draw list
@@ -5611,7 +5663,8 @@ RGINLINE void rg_gui_push_arrow_to(RgGuiContext* ctx, RgGuiDrawList* list,
 		                       icon->tint.y * color.y,
 		                       icon->tint.z * color.z,
 		                       icon->tint.w * color.w);
-		rg_gui_push_image_to(ctx, list, icon_rect, icon->uv, tint, icon->texture);
+		rg_gui_push_image_material_to(ctx, list, icon_rect, icon->uv, tint,
+		                              icon->texture, icon->material);
 		return;
 	}
 
@@ -5663,6 +5716,13 @@ RGINLINE void rg_gui_push_arrow(RgGuiContext* ctx, RgGuiRect bounds,
 
 RGINLINE void rg_gui_push_image_to(RgGuiContext* ctx, RgGuiDrawList* list, RgGuiRect rect, RgGuiRect uv, rg_vec4 color, RgGuiTexture texture)
 {
+	rg_gui_push_image_material_to(ctx, list, rect, uv, color, texture, 0u);
+}
+
+RGINLINE void rg_gui_push_image_material_to(RgGuiContext* ctx, RgGuiDrawList* list,
+                                            RgGuiRect rect, RgGuiRect uv, rg_vec4 color,
+                                            RgGuiTexture texture, RgGuiImageMaterial material)
+{
 	if (texture == 0)
 	{
 		return;
@@ -5683,6 +5743,7 @@ RGINLINE void rg_gui_push_image_to(RgGuiContext* ctx, RgGuiDrawList* list, RgGui
 	cmd->data.image.uv = uv;
 	cmd->data.image.color = rg_gui_apply_disabled_color(ctx, color);
 	cmd->data.image.texture = texture;
+	cmd->data.image.material = material;
 }
 
 RGINLINE int rg_gui_icon_valid(const RgGuiIcon* icon)
@@ -5726,7 +5787,8 @@ RGINLINE void rg_gui_push_icon_to(RgGuiContext* ctx, RgGuiDrawList* list, const 
 		tint.y *= k;
 		tint.z *= k;
 	}
-	rg_gui_push_image_to(ctx, list, rect, icon->uv, tint, icon->texture);
+	rg_gui_push_image_material_to(ctx, list, rect, icon->uv, tint,
+	                              icon->texture, icon->material);
 }
 
 RGINLINE void rg_gui_push_icon(RgGuiContext* ctx, const RgGuiIcon* icon, RgGuiRect rect, int dimmed)
@@ -5826,6 +5888,14 @@ RGINLINE void rg_gui_push_triangle(RgGuiContext* ctx, rg_vec2 a, rg_vec2 b, rg_v
 RGINLINE void rg_gui_push_image(RgGuiContext* ctx, RgGuiRect rect, RgGuiRect uv, rg_vec4 color, RgGuiTexture texture)
 {
 	rg_gui_push_image_to(ctx, rg_gui_draw_list_target(ctx), rect, uv, color, texture);
+}
+
+RGINLINE void rg_gui_push_image_material(RgGuiContext* ctx, RgGuiRect rect, RgGuiRect uv,
+                                         rg_vec4 color, RgGuiTexture texture,
+                                         RgGuiImageMaterial material)
+{
+	rg_gui_push_image_material_to(ctx, rg_gui_draw_list_target(ctx), rect, uv,
+	                              color, texture, material);
 }
 
 RGINLINE void rg_gui_push_text_ex(RgGuiContext* ctx, const char* text, rg_vec2 pos, rg_vec4 color, int copy)
@@ -16547,26 +16617,48 @@ RGINLINE void rg_gui_label_icon_static(RgGuiContext* ctx, const char* text, cons
 
 RGINLINE void rg_gui_image(RgGuiContext* ctx, RgGuiTexture texture, RgGuiRect rect)
 {
-	if (!ctx)
-	{
-		return;
-	}
-
-	RgGuiRect uv = rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f);
-	rg_gui_push_image(ctx, rect, uv, rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f), texture);
+	rg_gui_image_material(ctx, texture, rect, 0u);
 }
 
-RGINLINE void rg_gui_image_ex(RgGuiContext* ctx, RgGuiTexture texture, RgGuiRect rect, RgGuiRect uv, rg_vec4 tint)
+RGINLINE void rg_gui_image_material(RgGuiContext* ctx, RgGuiTexture texture,
+                                    RgGuiRect rect, RgGuiImageMaterial material)
 {
 	if (!ctx)
 	{
 		return;
 	}
 
-	rg_gui_push_image(ctx, rect, uv, tint, texture);
+	RgGuiRect uv = rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f);
+	rg_gui_push_image_material(ctx, rect, uv,
+	                           rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f),
+	                           texture, material);
+}
+
+RGINLINE void rg_gui_image_ex(RgGuiContext* ctx, RgGuiTexture texture, RgGuiRect rect, RgGuiRect uv, rg_vec4 tint)
+{
+	rg_gui_image_ex_material(ctx, texture, rect, uv, tint, 0u);
+}
+
+RGINLINE void rg_gui_image_ex_material(RgGuiContext* ctx, RgGuiTexture texture,
+                                       RgGuiRect rect, RgGuiRect uv, rg_vec4 tint,
+                                       RgGuiImageMaterial material)
+{
+	if (!ctx)
+	{
+		return;
+	}
+
+	rg_gui_push_image_material(ctx, rect, uv, tint, texture, material);
 }
 
 RGINLINE int rg_gui_image_button_ex(RgGuiContext* ctx, RgGuiTexture texture, RgGuiRect rect, RgGuiRect uv, rg_vec4 tint, RgGuiId id)
+{
+	return rg_gui_image_button_ex_material(ctx, texture, rect, uv, tint, id, 0u);
+}
+
+RGINLINE int rg_gui_image_button_ex_material(RgGuiContext* ctx, RgGuiTexture texture,
+                                             RgGuiRect rect, RgGuiRect uv, rg_vec4 tint,
+                                             RgGuiId id, RgGuiImageMaterial material)
 {
 	id = rg_gui_id_scoped(ctx, id);
 	rg_gui_register_focusable(ctx, id);
@@ -16634,15 +16726,23 @@ RGINLINE int rg_gui_image_button_ex(RgGuiContext* ctx, RgGuiTexture texture, RgG
 	                                   rect.w - inset * 2.0f, rect.h - inset * 2.0f);
 	if (inner.w < 0.0f) inner.w = 0.0f;
 	if (inner.h < 0.0f) inner.h = 0.0f;
-	rg_gui_push_image(ctx, inner, uv, tint, texture);
+	rg_gui_push_image_material(ctx, inner, uv, tint, texture, material);
 
 	return pressed;
 }
 
 RGINLINE int rg_gui_image_button(RgGuiContext* ctx, RgGuiTexture texture, RgGuiRect rect, RgGuiId id)
 {
+	return rg_gui_image_button_material(ctx, texture, rect, id, 0u);
+}
+
+RGINLINE int rg_gui_image_button_material(RgGuiContext* ctx, RgGuiTexture texture,
+                                          RgGuiRect rect, RgGuiId id,
+                                          RgGuiImageMaterial material)
+{
 	RgGuiRect uv = rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f);
-	return rg_gui_image_button_ex(ctx, texture, rect, uv, rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f), id);
+	return rg_gui_image_button_ex_material(
+	    ctx, texture, rect, uv, rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f), id, material);
 }
 
 RGINLINE int rg_gui_selectable_internal(RgGuiContext* ctx, const char* label, const RgGuiIcon* icon,

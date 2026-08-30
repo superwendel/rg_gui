@@ -135,6 +135,64 @@ device. The fixed shader layout is:
 
 Backend selection and shader entry points are handled by `rg_gpu.h`.
 
+## Image materials
+
+`RgGuiTexture` remains a direct `SDL_GPUTexture*` stored through `uintptr_t`.
+The ordinary image, image-button, icon, and push APIs emit material zero and
+therefore retain the stock image-pipeline behavior. Applications that need an
+alternate fragment path can use `rg_gui_image_material`,
+`rg_gui_image_ex_material`, `rg_gui_image_button_material`,
+`rg_gui_image_button_ex_material`, `rg_gui_icon_make_material`,
+`rg_gui_push_image_material`, or `rg_gui_push_image_material_to` with an
+application-defined `RgGuiImageMaterial` value.
+
+Materials are opaque 64-bit values. They are stored in image draw commands and
+included in GPU item batching: adjacent images combine only when texture,
+material, clip, and geometry continuity all match. A nonzero material still
+uses the stock image path when no callback is installed.
+
+Install the optional callback when creating the GPU renderer:
+
+```c
+static RgGuiGpuImageBindResult bind_image_material(
+    void* user, const RgGuiGpuImageBindInfo* info)
+{
+    AppImagePipelines* app = (AppImagePipelines*)user;
+    if (!app || info->material != APP_IMAGE_MATERIAL_PALETTE)
+        return RG_GUI_GPU_IMAGE_BIND_DEFAULT;
+
+    SDL_BindGPUGraphicsPipeline(info->pass, app->palette_pipeline);
+    SDL_GPUTextureSamplerBinding bindings[2] = {
+        {(SDL_GPUTexture*)(uintptr_t)info->texture, info->sampler},
+        {app->palette_texture, info->sampler}
+    };
+    SDL_BindGPUFragmentSamplers(info->pass, 0, bindings, 2);
+    SDL_PushGPUFragmentUniformData(
+        info->command_buffer, 0, &app->palette_uniforms,
+        sizeof(app->palette_uniforms));
+    return RG_GUI_GPU_IMAGE_BIND_CUSTOM;
+}
+
+RgGuiGpuDesc gpu_desc = {0};
+// Fill the normal required fields first.
+gpu_desc.image_bind = bind_image_material;
+gpu_desc.image_bind_user = &app_image_pipelines;
+```
+
+The callback runs once per prepared item with a nonzero material. Return
+`RG_GUI_GPU_IMAGE_BIND_DEFAULT` without changing GPU state to have rg_gui bind
+its stock image pipeline and the item's texture at fragment sampler slot zero.
+Return `RG_GUI_GPU_IMAGE_BIND_CUSTOM` after binding a graphics pipeline
+compatible with `RgGuiGpuVertex` and all of its fragment resources; rg_gui
+still supplies vertex uniform slot zero and the geometry vertex buffer. Return
+`RG_GUI_GPU_IMAGE_BIND_FAILED` to skip the item. CUSTOM and FAILED invalidate
+rg_gui's cached pipeline and texture state, so following stock solid, image, or
+text items rebind correctly even if the callback partially changed GPU state.
+
+`RgGuiGpuStats.image_bind_calls`, `custom_image_draw_calls`, and
+`image_bind_failures` expose the callback decisions. Treat failures as a
+diagnostic condition in validation or telemetry builds.
+
 ## Ordered input
 
 Use `rg_gui_begin_frame_ex` with an `RgInputEventQueue` for text editors. Reset
