@@ -1,0 +1,10 @@
+{
+  "name": "rg-gui",
+  "version-string": "0.1.0",
+  "description": "Development, shader, and demo dependencies for rg_gui.",
+  "builtin-baseline": "91e8cb4be8195112ea3a9c7e5846bd0b3ff74673",
+  "dependencies": [
+    "sdl3",
+    "sdl3-shadercross"
+  ]
+}

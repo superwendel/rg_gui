@@ -53,3 +53,20 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Generated shader binaries
+shaders/Compiled/
+
+# Local dependency/test fixtures
+.deps/
+_deps/
+vcpkg_installed/
+
+# IDE and out-of-tree build directories
+.vs/
+build/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json

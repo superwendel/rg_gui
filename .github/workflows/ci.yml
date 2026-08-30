@@ -1,0 +1,249 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows / MSVC hosted CI gate
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      RG_CORE_DIR: ${{ github.workspace }}\_deps\rg_core
+      RG_TEXT_DIR: ${{ github.workspace }}\_deps\rg_text
+      VCPKG_ROOT: ${{ github.workspace }}\_deps\vcpkg
+      VCPKG_DISABLE_METRICS: 1
+
+    steps:
+      - name: Check out rg_gui
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out pinned rg_core
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: superwendel/rg_core
+          ref: 27d5475a4af221813977f4b7d62e4e3f88cffab2
+          path: _deps/rg_core
+          persist-credentials: false
+
+      - name: Check out rg_text dependency
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: superwendel/rg_text
+          # Bootstrap ref: replace with the first immutable public release commit.
+          ref: main
+          path: _deps/rg_text
+          persist-credentials: false
+
+      - name: Check out pinned vcpkg
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: microsoft/vcpkg
+          ref: 91e8cb4be8195112ea3a9c7e5846bd0b3ff74673
+          path: _deps/vcpkg
+          persist-credentials: false
+
+      - name: Initialize vcpkg paths
+        shell: pwsh
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value "VCPKG_INSTALLED_DIR=$env:RUNNER_TEMP\vcpkg-installed"
+          Add-Content -Path $env:GITHUB_ENV -Value "VCPKG_BINARY_CACHE=$env:RUNNER_TEMP\vcpkg-binary-cache"
+          Add-Content -Path $env:GITHUB_ENV -Value "VCPKG_BINARY_SOURCES=clear;files,$env:RUNNER_TEMP\vcpkg-binary-cache,readwrite"
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ runner.temp }}\vcpkg-binary-cache
+          key: vcpkg-${{ runner.os }}-x64-windows-${{ hashFiles('vcpkg.json') }}
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_BINARY_CACHE | Out-Null
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+
+      - name: Install pinned SDL development tools
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet x64-windows "--x-install-root=$env:VCPKG_INSTALLED_DIR"
+
+      - name: Configure explicit dependency paths
+        shell: pwsh
+        run: |
+          $prefix = Join-Path $env:VCPKG_INSTALLED_DIR 'x64-windows'
+          $shadercross = @(
+            (Join-Path $prefix 'tools\sdl3-shadercross\shadercross.exe'),
+            (Join-Path $prefix 'tools\sdl3_shadercross\shadercross.exe')
+          ) | Where-Object {
+            Test-Path -LiteralPath $_ -PathType Leaf
+          } | Select-Object -First 1
+          if (-not $shadercross) {
+            throw 'shadercross.exe was not found in either vcpkg tool directory spelling.'
+          }
+          $required = @(
+            (Join-Path $prefix 'include\SDL3\SDL.h'),
+            (Join-Path $prefix 'lib\SDL3.lib'),
+            (Join-Path $prefix 'bin\SDL3.dll'),
+            $shadercross,
+            (Join-Path $env:RG_CORE_DIR 'src\rg_defs.h'),
+            (Join-Path $env:RG_TEXT_DIR 'src\rg_text.h')
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Required dependency output is missing: $path"
+            }
+          }
+
+          Add-Content -Path $env:GITHUB_ENV -Value "SDL3_INCLUDE_DIR=$(Join-Path $prefix 'include')"
+          Add-Content -Path $env:GITHUB_ENV -Value "SDL3_LIB_DIR=$(Join-Path $prefix 'lib')"
+          Add-Content -Path $env:GITHUB_ENV -Value "SDL3_BIN_DIR=$(Join-Path $prefix 'bin')"
+          Add-Content -Path $env:GITHUB_ENV -Value "SHADERCROSS_EXE=$shadercross"
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $prefix 'bin')
+          Add-Content -Path $env:GITHUB_PATH -Value (Split-Path -Parent $shadercross)
+
+      - name: Build tests, validate assets, compile shaders, device target, and all demos
+        shell: pwsh
+        run: cmd.exe /d /c build.bat test_ci
+
+      - name: Verify shader formats, demos, and compile-only device binary
+        shell: pwsh
+        run: |
+          $formats = @{
+            DXIL = '*.dxil'
+            SPIRV = '*.spv'
+            MSL = '*.msl'
+          }
+          foreach ($entry in $formats.GetEnumerator()) {
+            $directory = Join-Path $env:GITHUB_WORKSPACE "shaders\Compiled\$($entry.Key)"
+            $files = @(Get-ChildItem -LiteralPath $directory -File -Filter $entry.Value)
+            if ($files.Count -ne 6) {
+              throw "Expected 6 $($entry.Key) shaders, found $($files.Count)."
+            }
+            if ($files | Where-Object { $_.Length -eq 0 }) {
+              throw "$($entry.Key) contains an empty shader output."
+            }
+          }
+
+          foreach ($artifact in @(
+            'test_assets.exe',
+            'test_gui_no_string_ids.exe',
+            'test_gui.exe',
+            'test_renderer.exe',
+            'test_gui_gpu.exe',
+            'test_gui_gpu_device.exe',
+            'rg_gui_demo_minimal.exe',
+            'rg_gui_demo_full.exe',
+            'rg_gui_demo_tearout.exe'
+          )) {
+            $path = Join-Path $env:GITHUB_WORKSPACE $artifact
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
+                (Get-Item -LiteralPath $path).Length -eq 0) {
+              throw "Expected build artifact is missing or empty: $artifact"
+            }
+          }
+          Write-Host 'GPU device execution is intentionally excluded on GitHub-hosted runners.'
+
+  sanitizers:
+    name: Linux / Clang ASan + UBSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      RG_CORE_DIR: ${{ github.workspace }}/_deps/rg_core
+      RG_TEXT_DIR: ${{ github.workspace }}/_deps/rg_text
+
+    steps:
+      - name: Check out rg_gui
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out pinned rg_core
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: superwendel/rg_core
+          ref: 27d5475a4af221813977f4b7d62e4e3f88cffab2
+          path: _deps/rg_core
+          persist-credentials: false
+
+      - name: Check out rg_text dependency
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: superwendel/rg_text
+          # Bootstrap ref: replace with the first immutable public release commit.
+          ref: main
+          path: _deps/rg_text
+          persist-credentials: false
+
+      - name: Build pinned SDL for sanitizer tests
+        id: sdl
+        uses: libsdl-org/setup-sdl@afd98199e97f9c2aa739474be7e0886d149a5e47 # Node 24 main, 2026-08-29
+        with:
+          version: 147a8ee32dbf9ac02f3794964490687b6bbda1bc # release-3.4.14
+          build-type: Release
+          install-linux-dependencies: true
+          add-to-environment: true
+
+      - name: Build and run host-side sanitizer tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          SANITIZER_DIR="$RUNNER_TEMP/rg-gui-sanitize"
+          mkdir -p "$SANITIZER_DIR"
+          sdl_prefix='${{ steps.sdl.outputs.prefix }}'
+          export PKG_CONFIG_PATH="$sdl_prefix/lib/pkgconfig:$sdl_prefix/lib64/pkgconfig:$sdl_prefix/share/pkgconfig:${PKG_CONFIG_PATH:-}"
+          test -f "$sdl_prefix/include/SDL3/SDL.h"
+          pkg-config --modversion sdl3
+          read -r -a sdl_libs <<< "$(pkg-config --libs sdl3)"
+
+          common=(
+            -std=gnu11
+            -O1
+            -g
+            -Wall
+            -Wextra
+            -Werror
+            -fno-omit-frame-pointer
+            -fno-sanitize-recover=all
+            -fsanitize=address,undefined
+            -D_CRT_SECURE_NO_WARNINGS
+            -I "$RG_CORE_DIR/src"
+            -I "$RG_TEXT_DIR/src"
+          )
+          sdl_common=(
+            "${common[@]}"
+            -isystem "$sdl_prefix/include"
+          )
+
+          clang "${common[@]}" tests/test_assets.c -lm -o "$SANITIZER_DIR/test_assets"
+          clang "${sdl_common[@]}" tests/test_gui_no_string_ids.c "${sdl_libs[@]}" -lm -o "$SANITIZER_DIR/test_gui_no_string_ids"
+          if clang "${sdl_common[@]}" -DRG_GUI_TEST_EXPECT_STRING_ID_FAILURE \
+              tests/test_gui_no_string_ids.c "${sdl_libs[@]}" -lm \
+              -o "$SANITIZER_DIR/test_gui_no_string_ids_negative" >/dev/null 2>&1; then
+            echo 'RG_GUI_NO_STRING_IDS unexpectedly allowed a disabled string-ID API.' >&2
+            exit 1
+          fi
+          for target in test_gui test_renderer test_gui_gpu; do
+            clang "${sdl_common[@]}" "tests/$target.c" "${sdl_libs[@]}" -lm -o "$SANITIZER_DIR/$target"
+          done
+          clang "${sdl_common[@]}" tests/test_gui_gpu_device.c "${sdl_libs[@]}" -lm -o "$SANITIZER_DIR/test_gui_gpu_device"
+
+          export ASAN_OPTIONS='detect_leaks=1:halt_on_error=1:strict_string_checks=1'
+          export UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1'
+          export SDL_VIDEODRIVER=dummy
+          "$SANITIZER_DIR/test_assets"
+          "$SANITIZER_DIR/test_gui_no_string_ids"
+          "$SANITIZER_DIR/test_gui"
+          "$SANITIZER_DIR/test_renderer"
+          "$SANITIZER_DIR/test_gui_gpu"
+          echo 'The sanitizer-instrumented GPU device binary was compiled but not run.'
