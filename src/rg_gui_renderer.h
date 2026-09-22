@@ -52,6 +52,7 @@ typedef struct RgGuiRendererBaseInitDesc
 {
 	const RgTextFont* font;
 	RgGuiRendererBaseLimits limits;
+	const RgGuiTextLookup* text_lookup;
 } RgGuiRendererBaseInitDesc;
 
 /** Compact renderer-facing glyph record. RGBA occupies low-to-high bytes. */
@@ -205,8 +206,8 @@ typedef struct RgGuiRendererBaseContext
 	RgGuiRendererBaseCachedQuad* cache_quads;
 	RgGuiRendererBaseInstance* frame_instances;
 	RgGuiRendererBaseBatch* frame_batches;
-	const RgTextGlyph** ascii_glyphs;
-	i32* ascii_kerning;
+	const RgTextGlyph* const* ascii_glyphs;
+	const i32* ascii_kerning;
 	u32 run_count;
 	u32 hash_slot_mask;
 	size_t text_used;
@@ -300,7 +301,8 @@ RGINLINE int rg_gui_renderer_base_size_add_array(size_t* total, size_t count, si
 	return 1;
 }
 
-RGINLINE size_t rg_gui_renderer_base_memory_required(const RgGuiRendererBaseLimits* supplied)
+RGINLINE size_t rg_gui_renderer_base_memory_required_internal(
+    const RgGuiRendererBaseLimits* supplied, int own_lookup)
 {
 	RgGuiRendererBaseLimits limits = rg_gui_renderer_base_limits_resolve(supplied);
 	size_t total = 0u;
@@ -311,12 +313,17 @@ RGINLINE size_t rg_gui_renderer_base_memory_required(const RgGuiRendererBaseLimi
 	    !rg_gui_renderer_base_size_add_array(&total, limits.max_cached_quads, sizeof(RgGuiRendererBaseCachedQuad), RG_ALIGNOF(RgGuiRendererBaseCachedQuad)) ||
 	    !rg_gui_renderer_base_size_add_array(&total, limits.max_frame_instances, sizeof(RgGuiRendererBaseInstance), RG_ALIGNOF(RgGuiRendererBaseInstance)) ||
 	    !rg_gui_renderer_base_size_add_array(&total, limits.max_batches, sizeof(RgGuiRendererBaseBatch), RG_ALIGNOF(RgGuiRendererBaseBatch)) ||
-	    !rg_gui_renderer_base_size_add_array(&total, 128u, sizeof(RgTextGlyph*), RG_ALIGNOF(RgTextGlyph*)) ||
-	    !rg_gui_renderer_base_size_add_array(&total, 128u * 128u, sizeof(i32), RG_ALIGNOF(i32)))
+	    (own_lookup && !rg_gui_renderer_base_size_add_array(
+	        &total, 1u, sizeof(RgGuiTextLookup), RG_ALIGNOF(RgGuiTextLookup))))
 	{
 		return SIZE_MAX;
 	}
 	return total;
+}
+
+RGINLINE size_t rg_gui_renderer_base_memory_required(const RgGuiRendererBaseLimits* supplied)
+{
+	return rg_gui_renderer_base_memory_required_internal(supplied, 1);
 }
 
 RGINLINE int rg_gui_renderer_base_font_supported(const RgTextFont* font)
@@ -342,16 +349,6 @@ RGINLINE int rg_gui_renderer_base_font_supported(const RgTextFont* font)
 	return 1;
 }
 
-RGINLINE void* rg_gui_renderer_base_arena_array(RgArena* arena, size_t count, size_t element_size,
-                                                size_t alignment)
-{
-	if (count > SIZE_MAX / element_size)
-	{
-		return NULL;
-	}
-	return rg_arena_alloc_aligned(arena, count * element_size, alignment);
-}
-
 static int rg_gui_renderer_base_init(RgGuiRendererBaseContext* ctx, RgArena* arena, const RgGuiRendererBaseInitDesc* desc)
 {
 	if (!ctx || !arena || !arena->memory || !desc || !rg_gui_renderer_base_font_supported(desc->font))
@@ -362,7 +359,9 @@ static int rg_gui_renderer_base_init(RgGuiRendererBaseContext* ctx, RgArena* are
 
 	size_t arena_used = arena->used;
 	RgGuiRendererBaseLimits limits = rg_gui_renderer_base_limits_resolve(&desc->limits);
-	if (rg_gui_renderer_base_memory_required(&limits) == SIZE_MAX)
+	const RgGuiTextLookup* lookup = desc->text_lookup;
+	int own_lookup = !lookup || lookup->font != desc->font;
+	if (rg_gui_renderer_base_memory_required_internal(&limits, own_lookup) == SIZE_MAX)
 	{
 		memset(ctx, 0, sizeof(*ctx));
 		return 0;
@@ -372,24 +371,28 @@ static int rg_gui_renderer_base_init(RgGuiRendererBaseContext* ctx, RgArena* are
 	ctx->font = desc->font;
 	ctx->limits = limits;
 	ctx->hash_slot_mask = (limits.hash_slot_count & (limits.hash_slot_count - 1u)) == 0u ? limits.hash_slot_count - 1u : UINT32_MAX;
-	ctx->runs = (RgGuiRendererBaseCachedRun*)rg_gui_renderer_base_arena_array(arena, limits.max_cached_runs,
-	                                                                          sizeof(RgGuiRendererBaseCachedRun), RG_ALIGNOF(RgGuiRendererBaseCachedRun));
-	ctx->run_generations = (u8*)rg_gui_renderer_base_arena_array(arena, limits.max_cached_runs,
-	                                                             sizeof(u8), RG_ALIGNOF(u8));
-	ctx->hash_slots = (u32*)rg_gui_renderer_base_arena_array(arena, limits.hash_slot_count,
-	                                                         sizeof(u32), RG_ALIGNOF(u32));
-	ctx->cache_text = (char*)rg_gui_renderer_base_arena_array(arena, limits.text_capacity,
-	                                                          sizeof(char), RG_ALIGNOF(char));
-	ctx->cache_quads = (RgGuiRendererBaseCachedQuad*)rg_gui_renderer_base_arena_array(arena, limits.max_cached_quads,
-	                                                                                  sizeof(RgGuiRendererBaseCachedQuad), RG_ALIGNOF(RgGuiRendererBaseCachedQuad));
-	ctx->frame_instances = (RgGuiRendererBaseInstance*)rg_gui_renderer_base_arena_array(arena, limits.max_frame_instances,
-	                                                                                    sizeof(RgGuiRendererBaseInstance), RG_ALIGNOF(RgGuiRendererBaseInstance));
-	ctx->frame_batches = (RgGuiRendererBaseBatch*)rg_gui_renderer_base_arena_array(arena, limits.max_batches,
-	                                                                               sizeof(RgGuiRendererBaseBatch), RG_ALIGNOF(RgGuiRendererBaseBatch));
-	ctx->ascii_glyphs = (const RgTextGlyph**)rg_gui_renderer_base_arena_array(arena, 128u,
-	                                                                          sizeof(RgTextGlyph*), RG_ALIGNOF(RgTextGlyph*));
-	ctx->ascii_kerning = (i32*)rg_gui_renderer_base_arena_array(arena, 128u * 128u,
-	                                                            sizeof(i32), RG_ALIGNOF(i32));
+	ctx->runs = (RgGuiRendererBaseCachedRun*)rg_arena_alloc_array(
+	    arena, sizeof(RgGuiRendererBaseCachedRun), limits.max_cached_runs, RG_ALIGNOF(RgGuiRendererBaseCachedRun));
+	ctx->run_generations = (u8*)rg_arena_alloc_array(
+	    arena, sizeof(u8), limits.max_cached_runs, RG_ALIGNOF(u8));
+	ctx->hash_slots = (u32*)rg_arena_alloc_array(
+	    arena, sizeof(u32), limits.hash_slot_count, RG_ALIGNOF(u32));
+	ctx->cache_text = (char*)rg_arena_alloc_array(
+	    arena, sizeof(char), limits.text_capacity, RG_ALIGNOF(char));
+	ctx->cache_quads = (RgGuiRendererBaseCachedQuad*)rg_arena_alloc_array(
+	    arena, sizeof(RgGuiRendererBaseCachedQuad), limits.max_cached_quads, RG_ALIGNOF(RgGuiRendererBaseCachedQuad));
+	ctx->frame_instances = (RgGuiRendererBaseInstance*)rg_arena_alloc_array(
+	    arena, sizeof(RgGuiRendererBaseInstance), limits.max_frame_instances, RG_ALIGNOF(RgGuiRendererBaseInstance));
+	ctx->frame_batches = (RgGuiRendererBaseBatch*)rg_arena_alloc_array(
+	    arena, sizeof(RgGuiRendererBaseBatch), limits.max_batches, RG_ALIGNOF(RgGuiRendererBaseBatch));
+	if (own_lookup)
+	{
+		RgGuiTextLookup* owned = (RgGuiTextLookup*)rg_arena_alloc_array(
+		    arena, sizeof(RgGuiTextLookup), 1u, RG_ALIGNOF(RgGuiTextLookup));
+		lookup = owned && rg_gui_text_lookup_init(owned, desc->font) ? owned : NULL;
+	}
+	ctx->ascii_glyphs = lookup ? lookup->ascii_glyphs : NULL;
+	ctx->ascii_kerning = lookup ? lookup->ascii_kerning : NULL;
 
 	if (!ctx->runs || !ctx->run_generations || !ctx->hash_slots ||
 	    !ctx->cache_text || !ctx->cache_quads ||
@@ -401,32 +404,6 @@ static int rg_gui_renderer_base_init(RgGuiRendererBaseContext* ctx, RgArena* are
 	}
 
 	memset(ctx->hash_slots, 0, sizeof(u32) * limits.hash_slot_count);
-	memset(ctx->ascii_glyphs, 0, sizeof(*ctx->ascii_glyphs) * 128u);
-	memset(ctx->ascii_kerning, 0, sizeof(*ctx->ascii_kerning) * 128u * 128u);
-	const RgTextGlyph* fallback = NULL;
-	/* Reverse traversal preserves the first matching record in manually supplied
-	 * unsorted fonts, including duplicate kerning pairs whose advance is zero. */
-	for (u32 i = ctx->font->glyph_count; i > 0u; i--)
-	{
-		const RgTextGlyph* glyph = &ctx->font->glyphs[i - 1u];
-		if (glyph->codepoint < 128u) ctx->ascii_glyphs[glyph->codepoint] = glyph;
-		if (glyph->codepoint == ctx->font->fallback_codepoint) fallback = glyph;
-	}
-	for (u32 cp = 0u; cp < 128u; cp++)
-	{
-		if (!ctx->ascii_glyphs[cp]) ctx->ascii_glyphs[cp] = fallback;
-	}
-	if (ctx->font->kernings)
-	{
-		for (u32 i = ctx->font->kerning_count; i > 0u; i--)
-		{
-			const RgTextKerning* pair = &ctx->font->kernings[i - 1u];
-			if (pair->left < 128u && pair->right < 128u)
-			{
-				ctx->ascii_kerning[pair->left * 128u + pair->right] = pair->x_advance;
-			}
-		}
-	}
 
 #if defined(RG_GUI_RENDERER_TEST_REFERENCE)
 	ctx->prepared.instances = ctx->frame_instances;
@@ -1306,6 +1283,10 @@ typedef struct RgGuiRendererInitDesc
 	const RgTextFont* font;
 	RgGuiRendererLimits limits;
 	u32 page_quads;
+	/* Optional initialized table for this exact font; borrowed, never modified.
+	 * Keep the table, font, and its arrays alive and unchanged while in use.
+	 * Null or a different font selects a private table allocated in the arena. */
+	const RgGuiTextLookup* text_lookup;
 } RgGuiRendererInitDesc;
 
 typedef struct RgGuiRendererRange
@@ -1370,16 +1351,15 @@ RGINLINE u32 rg_gui_renderer_page_quads_resolve(u32 supplied,
 	return page_quads;
 }
 
-/** Return a safe upper bound for arena bytes, or SIZE_MAX on invalid input. */
-RGINLINE size_t rg_gui_renderer_memory_required(const RgGuiRendererLimits* supplied,
-                                                u32 supplied_page_quads)
+RGINLINE size_t rg_gui_renderer_memory_required_internal(
+    const RgGuiRendererLimits* supplied, u32 supplied_page_quads, int own_lookup)
 {
 	RgGuiRendererLimits limits = rg_gui_renderer_base_limits_resolve(supplied);
 	u32 page_quads = rg_gui_renderer_page_quads_resolve(
 	    supplied_page_quads, limits.max_cached_quads);
 	if (!page_quads) return SIZE_MAX;
 	u32 total_pages = limits.max_cached_quads / page_quads;
-	size_t total = rg_gui_renderer_base_memory_required(&limits);
+	size_t total = rg_gui_renderer_base_memory_required_internal(&limits, own_lookup);
 	if (!total_pages || total == SIZE_MAX ||
 	    !rg_gui_renderer_base_size_add_array(&total, limits.max_cached_runs,
 	                                         sizeof(u32), RG_ALIGNOF(u32)) ||
@@ -1393,6 +1373,25 @@ RGINLINE size_t rg_gui_renderer_memory_required(const RgGuiRendererLimits* suppl
 		return SIZE_MAX;
 	}
 	return total;
+}
+
+/** Safe arena bound including a private lookup, or SIZE_MAX on invalid limits.
+ * This remains sufficient whether or not a shared table is attached later. */
+RGINLINE size_t rg_gui_renderer_memory_required(const RgGuiRendererLimits* supplied,
+                                                u32 supplied_page_quads)
+{
+	return rg_gui_renderer_memory_required_internal(supplied, supplied_page_quads, 1);
+}
+
+/** Safe arena bound for this descriptor, excluding a matching borrowed lookup.
+ * Includes padding for any arena base alignment. Returns SIZE_MAX for a missing
+ * descriptor/font, invalid page configuration, or overflow. Font contents are
+ * validated by init. Use the same descriptor and immutable table when initializing. */
+RGINLINE size_t rg_gui_renderer_memory_required_ex(const RgGuiRendererInitDesc* desc)
+{
+	if (!desc || !desc->font) return SIZE_MAX;
+	int own_lookup = !desc->text_lookup || desc->text_lookup->font != desc->font;
+	return rg_gui_renderer_memory_required_internal(&desc->limits, desc->page_quads, own_lookup);
 }
 
 RGINLINE void rg_gui_renderer_sync_allocator_stats(RgGuiRenderer* ctx)
@@ -1424,24 +1423,25 @@ RGINLINE int rg_gui_renderer_init(RgGuiRenderer* ctx, RgArena* arena,
 	RgGuiRendererLimits limits = rg_gui_renderer_base_limits_resolve(&desc->limits);
 	u32 page_quads = rg_gui_renderer_page_quads_resolve(
 	    desc->page_quads, limits.max_cached_quads);
-	if (!page_quads || rg_gui_renderer_memory_required(&limits, page_quads) == SIZE_MAX)
+	if (!page_quads || rg_gui_renderer_memory_required_ex(desc) == SIZE_MAX)
 		return 0;
 
 	RgGuiRendererBaseInitDesc core_desc;
 	core_desc.font = desc->font;
 	core_desc.limits = limits;
+	core_desc.text_lookup = desc->text_lookup;
 	if (!rg_gui_renderer_base_init(&ctx->core, arena, &core_desc)) return 0;
 
 	ctx->page_quads = page_quads;
 	ctx->total_pages = limits.max_cached_quads / page_quads;
-	ctx->run_first_pages = (u32*)rg_gui_renderer_base_arena_array(
-	    arena, limits.max_cached_runs, sizeof(u32), RG_ALIGNOF(u32));
-	ctx->page_next = (u32*)rg_gui_renderer_base_arena_array(
-	    arena, ctx->total_pages, sizeof(u32), RG_ALIGNOF(u32));
-	ctx->free_pages = (u32*)rg_gui_renderer_base_arena_array(
-	    arena, ctx->total_pages, sizeof(u32), RG_ALIGNOF(u32));
-	ctx->dirty_pages = (RgGuiRendererRange*)rg_gui_renderer_base_arena_array(
-	    arena, ctx->total_pages, sizeof(RgGuiRendererRange), RG_ALIGNOF(RgGuiRendererRange));
+	ctx->run_first_pages = (u32*)rg_arena_alloc_array(
+	    arena, sizeof(u32), limits.max_cached_runs, RG_ALIGNOF(u32));
+	ctx->page_next = (u32*)rg_arena_alloc_array(
+	    arena, sizeof(u32), ctx->total_pages, RG_ALIGNOF(u32));
+	ctx->free_pages = (u32*)rg_arena_alloc_array(
+	    arena, sizeof(u32), ctx->total_pages, RG_ALIGNOF(u32));
+	ctx->dirty_pages = (RgGuiRendererRange*)rg_arena_alloc_array(
+	    arena, sizeof(RgGuiRendererRange), ctx->total_pages, RG_ALIGNOF(RgGuiRendererRange));
 	if (!ctx->run_first_pages || !ctx->page_next || !ctx->free_pages ||
 	    !ctx->dirty_pages)
 	{

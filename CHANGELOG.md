@@ -19,6 +19,14 @@ between 0.x releases.
 - Add Mailbox presentation to the full and tear-out demos. The full showcase
   exposes it as **View > Fast, no tearing**. Normal launches keep VSync enabled;
   `--no-vsync` continues to request Immediate presentation.
+- Share the frontend ASCII lookup with text renderers, with descriptor-aware
+  arena sizing and an owned fallback for existing callers.
+- Reuse `rg_algo` selection for paired demo frame percentiles, copying the
+  history once. Use `rg_snprintf` for demo integer/string telemetry and status;
+  retain SDL decimal formatting to preserve its rounding behavior.
+- Update the `rg_core` baseline to `d478715`; demo input loops now call
+  `rg_input_begin_frame` before event polling and `rg_input_sample` afterward.
+  Integrations using the removed `rg_input_update` must migrate likewise.
 - Pin `rg_core`, `rg_text`, and CI tooling revisions for reproducible builds.
 
 The demos enable the optional ASCII lookup and SSE2 paths on supported targets.

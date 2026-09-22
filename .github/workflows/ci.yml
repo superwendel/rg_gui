@@ -33,7 +33,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: superwendel/rg_core
-          ref: 27d5475a4af221813977f4b7d62e4e3f88cffab2
+          ref: d4787158faa3366357d16ba2e1e466ee40276749
           path: _deps/rg_core
           persist-credentials: false
 
@@ -138,6 +138,8 @@ jobs:
 
           foreach ($artifact in @(
             'test_assets.exe',
+            'test_demo_profile.exe',
+            'test_demo_format.exe',
             'test_gui_no_string_ids.exe',
             'test_gui.exe',
             'test_renderer.exe',
@@ -175,7 +177,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: superwendel/rg_core
-          ref: 27d5475a4af221813977f4b7d62e4e3f88cffab2
+          ref: d4787158faa3366357d16ba2e1e466ee40276749
           path: _deps/rg_core
           persist-credentials: false
 
@@ -236,7 +238,7 @@ jobs:
             echo 'RG_GUI_NO_STRING_IDS unexpectedly allowed a disabled string-ID API.' >&2
             exit 1
           fi
-          for target in test_gui test_renderer test_gui_gpu; do
+          for target in test_gui test_renderer test_gui_gpu test_demo_profile test_demo_format; do
             clang "${sdl_common[@]}" "tests/$target.c" "${sdl_libs[@]}" -lm -o "$SANITIZER_DIR/$target"
           done
           clang "${sdl_common[@]}" -DRG_GUI_GPU_USE_SSE2=1 tests/test_gui_gpu.c "${sdl_libs[@]}" -lm -o "$SANITIZER_DIR/test_gui_gpu_sse2"
@@ -247,6 +249,8 @@ jobs:
           export SDL_VIDEODRIVER=dummy
           "$SANITIZER_DIR/test_assets"
           "$SANITIZER_DIR/test_gui_no_string_ids"
+          "$SANITIZER_DIR/test_demo_profile"
+          "$SANITIZER_DIR/test_demo_format"
           "$SANITIZER_DIR/test_gui"
           "$SANITIZER_DIR/test_renderer"
           "$SANITIZER_DIR/test_gui_gpu"

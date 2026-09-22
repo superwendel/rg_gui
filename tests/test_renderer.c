@@ -352,6 +352,177 @@ static void test_renderer_single_page_recycles_directly(void)
 	TEST_PASS();
 }
 
+static void test_renderer_shared_lookup_geometry_and_ownership(void)
+{
+	RgGuiTextLookup* lookup = (RgGuiTextLookup*)malloc(sizeof(*lookup));
+	RgGuiTextLookup* saved = (RgGuiTextLookup*)malloc(sizeof(*saved));
+	TEST_ASSERT(lookup && saved, "shared lookup storage");
+	for (u32 variant = 0u; variant < 3u; variant++)
+	{
+		TestRendererBaseFixture font_owner = {0};
+		test_layout_font_init(&font_owner, variant);
+		TEST_ASSERT(rg_gui_text_lookup_init(lookup, &font_owner.font), "shared lookup init");
+		memcpy(saved, lookup, sizeof(*saved));
+		RgGuiRendererInitDesc desc = {0};
+		desc.font = &font_owner.font;
+		desc.limits = (RgGuiRendererLimits){4u, 8u, 256u, 32u, 32u, 4u};
+		desc.page_quads = 2u;
+		size_t owned_size = rg_gui_renderer_memory_required_ex(&desc);
+		desc.text_lookup = lookup;
+		size_t shared_size = rg_gui_renderer_memory_required_ex(&desc);
+		TEST_ASSERT(owned_size != SIZE_MAX && shared_size < owned_size, "shared arena bound is smaller");
+		void* owned_memory = malloc(owned_size);
+		void* shared_memory = malloc(shared_size);
+		TEST_ASSERT(owned_memory && shared_memory, "renderer storage");
+		RgArena owned_arena = {(char*)owned_memory, owned_size, 0u, owned_size};
+		RgArena shared_arena = {(char*)shared_memory, shared_size, 0u, shared_size};
+		RgGuiRenderer owned, shared;
+		TEST_ASSERT(rg_gui_renderer_init(&shared, &shared_arena, &desc), "borrowed renderer init");
+		desc.text_lookup = NULL;
+		TEST_ASSERT(rg_gui_renderer_init(&owned, &owned_arena, &desc), "private renderer init");
+		TEST_ASSERT(shared.core.ascii_glyphs == lookup->ascii_glyphs &&
+		                shared.core.ascii_kerning == lookup->ascii_kerning,
+		            "renderer directly borrows both immutable tables");
+		TEST_ASSERT(owned.core.ascii_glyphs != lookup->ascii_glyphs &&
+		                owned.core.ascii_kerning != lookup->ascii_kerning,
+		            "default renderer owns separate tables");
+		TEST_ASSERT(memcmp(owned.core.ascii_glyphs, lookup->ascii_glyphs, sizeof(lookup->ascii_glyphs)) == 0 &&
+		                memcmp(owned.core.ascii_kerning, lookup->ascii_kerning, sizeof(lookup->ascii_kerning)) == 0,
+		            "private and borrowed initialization have equal lookup contents");
+		for (u32 t = 0u; t < RG_ARRAY_COUNT(test_layout_texts); t++)
+		for (u32 s = 0u; s < RG_ARRAY_COUNT(test_layout_scales); s++)
+		{
+			RgGuiDrawCmd cmd = test_text_cmd(test_layout_texts[t], 3.5f, -2.25f,
+			                                  test_layout_scales[s], 0.25f, 0.5f, 1.0f, 0.75f);
+			RgGuiDrawList list = test_draw_list(&cmd, 1u);
+			rg_gui_renderer_clear_cache(&owned);
+			rg_gui_renderer_clear_cache(&shared);
+			for (u32 pass = 0u; pass < 2u; pass++)
+			{
+				rg_gui_renderer_begin_frame(&owned);
+				rg_gui_renderer_begin_frame(&shared);
+				TEST_ASSERT(rg_gui_renderer_prepare(&owned, &list, list.count) &&
+				                rg_gui_renderer_prepare(&shared, &list, list.count),
+				            "private and shared text prepare");
+				const RgGuiRendererPrepared* expected = rg_gui_renderer_prepared(&owned);
+				const RgGuiRendererPrepared* actual = rg_gui_renderer_prepared(&shared);
+				TEST_ASSERT(expected->glyph_count == actual->glyph_count && actual->glyph_count <= 8u,
+				            "shared lookup preserves glyph counts");
+				RgGuiRendererGlyph expected_glyphs[8] = {0}, actual_glyphs[8] = {0};
+				test_renderer_expand(&owned, expected, expected_glyphs);
+				test_renderer_expand(&shared, actual, actual_glyphs);
+				TEST_ASSERT(memcmp(expected_glyphs, actual_glyphs, sizeof(actual_glyphs)) == 0,
+				            "ASCII, Unicode, fallback, malformed UTF-8 and scale geometry match");
+				TEST_ASSERT(shared.core.stats.frame_cache_hits == owned.core.stats.frame_cache_hits &&
+				                shared.dirty_page_count == owned.dirty_page_count,
+				            "shared lookup preserves cold and warm cache behavior");
+			}
+		}
+		free(owned_memory);
+		rg_gui_renderer_clear_cache(&shared);
+		RgGuiDrawCmd cmd = test_text_cmd("AB", 0, 0, 1, 1, 1, 1, 1);
+		RgGuiDrawList list = test_draw_list(&cmd, 1u);
+		rg_gui_renderer_begin_frame(&shared);
+		TEST_ASSERT(rg_gui_renderer_prepare(&shared, &list, list.count),
+		            "borrowed table remains usable after another renderer's arena is freed");
+		free(shared_memory);
+		TEST_ASSERT(memcmp(lookup, saved, sizeof(*lookup)) == 0,
+		            "init, prepare, cache clear and arena release never modify the borrowed table");
+	}
+	free(saved);
+	free(lookup);
+	TEST_PASS();
+}
+
+static void test_renderer_lookup_memory_alignment_and_rollback(void)
+{
+	TestRendererBaseFixture font_owner = {0};
+	test_font_init(&font_owner);
+	RgTextFont other_font = font_owner.font;
+	RgGuiTextLookup* lookup = (RgGuiTextLookup*)malloc(sizeof(*lookup));
+	RgGuiTextLookup* other_lookup = (RgGuiTextLookup*)malloc(sizeof(*other_lookup));
+	TEST_ASSERT(lookup && other_lookup, "memory-test lookup storage");
+	TEST_ASSERT(rg_gui_text_lookup_init(lookup, &font_owner.font) &&
+	                rg_gui_text_lookup_init(other_lookup, &other_font), "memory-test lookups init");
+	RgGuiRendererInitDesc desc = {0};
+	desc.font = &font_owner.font;
+	desc.limits = (RgGuiRendererLimits){3u, 7u, 35u, 32u, 17u, 3u};
+	desc.page_quads = 2u;
+	size_t conservative = rg_gui_renderer_memory_required(&desc.limits, desc.page_quads);
+	TEST_ASSERT(rg_gui_renderer_memory_required_ex(&desc) == conservative,
+	            "legacy sizing covers the default private table");
+	desc.text_lookup = lookup;
+	size_t shared_bound = rg_gui_renderer_memory_required_ex(&desc);
+	TEST_ASSERT(conservative - shared_bound == sizeof(RgGuiTextLookup) + RG_ALIGNOF(RgGuiTextLookup) - 1u,
+	            "descriptor sizing excludes only lookup storage and its alignment allowance");
+	for (u32 variant = 0u; variant < 3u; variant++)
+	{
+		desc.text_lookup = variant == 0u ? lookup : variant == 1u ? NULL : other_lookup;
+		size_t budget = rg_gui_renderer_memory_required_ex(&desc);
+		TEST_ASSERT(budget == (variant == 0u ? shared_bound : conservative),
+		            "a different font uses the private-table budget");
+		for (size_t offset = 0u; offset < 16u; offset++)
+		{
+			size_t prefix = offset % 3u;
+			size_t capacity = prefix + budget;
+			size_t allocation_size = offset + capacity + 16u;
+			unsigned char* memory = (unsigned char*)malloc(allocation_size);
+			TEST_ASSERT(memory != NULL, "misaligned arena storage");
+			memset(memory, 0xA5, allocation_size);
+			RgArena arena = {(char*)memory + offset, capacity, prefix, capacity};
+			RgGuiRenderer renderer;
+			TEST_ASSERT(rg_gui_renderer_init(&renderer, &arena, &desc),
+			            "advertised budget fits misaligned bases and existing arena prefixes");
+			TEST_ASSERT(arena.used <= capacity, "initialization stays within its advertised bound");
+			TEST_ASSERT((uintptr_t)renderer.core.runs % RG_ALIGNOF(RgGuiRendererBaseCachedRun) == 0u &&
+			                (uintptr_t)renderer.core.cache_quads % RG_ALIGNOF(RgGuiRendererCachedQuad) == 0u &&
+			                (uintptr_t)renderer.core.frame_instances % RG_ALIGNOF(RgGuiRendererGlyph) == 0u &&
+			                (uintptr_t)renderer.run_first_pages % RG_ALIGNOF(u32) == 0u &&
+			                (uintptr_t)renderer.dirty_pages % RG_ALIGNOF(RgGuiRendererRange) == 0u,
+			            "shared arena helper preserves allocation alignment");
+			TEST_ASSERT((renderer.core.ascii_glyphs == lookup->ascii_glyphs) == (variant == 0u),
+			            "only an exact-font match borrows table storage");
+			TEST_ASSERT(renderer.core.ascii_glyphs != other_lookup->ascii_glyphs &&
+			                renderer.core.ascii_kerning != other_lookup->ascii_kerning,
+			            "a lookup for a different font is never borrowed");
+			for (size_t i = 0u; i < offset + prefix; i++)
+				TEST_ASSERT(memory[i] == 0xA5, "initialization preserves the arena prefix");
+			for (size_t i = offset + capacity; i < allocation_size; i++)
+				TEST_ASSERT(memory[i] == 0xA5, "initialization preserves the allocation suffix");
+			size_t exact_used = arena.used;
+			arena.capacity = exact_used;
+			arena.used = prefix;
+			TEST_ASSERT(rg_gui_renderer_init(&renderer, &arena, &desc) && arena.used == exact_used,
+			            "exact actual allocation size succeeds");
+			arena.capacity = exact_used - 1u;
+			arena.used = prefix;
+			memset(&renderer, 0xA5, sizeof(renderer));
+			TEST_ASSERT(!rg_gui_renderer_init(&renderer, &arena, &desc) && arena.used == prefix,
+			            "one-byte short arena fails and rolls back all allocations");
+			RgGuiRenderer cleared;
+			memset(&cleared, 0, sizeof(cleared));
+			TEST_ASSERT(memcmp(&renderer, &cleared, sizeof(renderer)) == 0,
+			            "failed initialization clears borrowed and owned pointers");
+			free(memory);
+		}
+	}
+	TEST_ASSERT(rg_gui_renderer_memory_required_ex(NULL) == SIZE_MAX, "null descriptor rejected");
+	desc.font = NULL;
+	TEST_ASSERT(rg_gui_renderer_memory_required_ex(&desc) == SIZE_MAX, "missing font rejected");
+	desc.font = &font_owner.font;
+	desc.text_lookup = lookup;
+	desc.page_quads = 3u;
+	TEST_ASSERT(rg_gui_renderer_memory_required_ex(&desc) == SIZE_MAX, "invalid descriptor pages rejected");
+	desc.page_quads = 2u;
+	desc.limits.text_capacity = SIZE_MAX;
+	TEST_ASSERT(rg_gui_renderer_memory_required_ex(&desc) == SIZE_MAX, "shared descriptor overflow rejected");
+	desc.text_lookup = NULL;
+	TEST_ASSERT(rg_gui_renderer_memory_required_ex(&desc) == SIZE_MAX, "private descriptor overflow rejected");
+	free(other_lookup);
+	free(lookup);
+	TEST_PASS();
+}
+
 int main(int argc, char** argv)
 {
 	if (test_renderer_reference_main(argc, argv) != 0) return 1;
@@ -365,6 +536,8 @@ int main(int argc, char** argv)
 	test_renderer_zero_quad_run_uses_no_page();
 	test_renderer_clear_is_lazy_and_reuses_from_zero();
 	test_renderer_single_page_recycles_directly();
+	test_renderer_shared_lookup_geometry_and_ownership();
+	test_renderer_lookup_memory_alignment_and_rollback();
 	printf("\nResults: %d passed, %d failed\n", g_tests_passed, g_tests_failed);
 	return g_tests_failed ? 1 : 0;
 }

@@ -30,6 +30,7 @@ if /I "%TARGET%"=="test_release" goto test_release
 if /I "%TARGET%"=="test_assets" goto test_assets
 if /I "%TARGET%"=="test_no_string_ids" goto test_no_string_ids
 if /I "%TARGET%"=="test_gui" goto test_gui
+if /I "%TARGET%"=="test_demo_helpers" goto test_demo_helpers
 if /I "%TARGET%"=="test_renderer" goto test_renderer
 if /I "%TARGET%"=="test_gpu" goto test_gpu
 if /I "%TARGET%"=="test_gpu_prepare" goto test_gpu_prepare
@@ -135,6 +136,9 @@ exit /b 0
 call "%~f0" test_no_string_ids
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
+call "%~f0" test_demo_helpers
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
 call "%~f0" test_gui
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
@@ -235,6 +239,22 @@ if not errorlevel 0 exit /b 1
 test_gui.exe
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
+exit /b 0
+
+
+:test_demo_helpers
+call :setup
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+echo Building CPU-only demo statistics and formatting checks...
+for %%t in (test_demo_profile test_demo_format) do (
+	cl %GUI_FLAGS% tests\%%t.c /Fe:%%t.exe /link /LIBPATH:"%SDL3_LIB_DIR%" SDL3.lib
+	if errorlevel 1 exit /b 1
+	if not errorlevel 0 exit /b 1
+	%%t.exe
+	if errorlevel 1 exit /b 1
+	if not errorlevel 0 exit /b 1
+)
 exit /b 0
 
 :test_renderer
@@ -526,6 +546,7 @@ if not errorlevel 0 exit /b 1
 exit /b 0
 
 :clean
+del /q "%RG_GUI_ROOT%test_demo_profile.exe" "%RG_GUI_ROOT%test_demo_profile.obj" "%RG_GUI_ROOT%test_demo_format.exe" "%RG_GUI_ROOT%test_demo_format.obj" 2>nul
 rem Every target below is rooted at this batch file's verified repository path.
 del /q "%RG_GUI_ROOT%test_demo_tearout.exe" "%RG_GUI_ROOT%test_demo_tearout.obj" 2>nul
 del /q "%RG_GUI_ROOT%test_assets.exe" "%RG_GUI_ROOT%test_gui_no_string_ids.exe" "%RG_GUI_ROOT%test_gui.exe" "%RG_GUI_ROOT%test_renderer.exe" "%RG_GUI_ROOT%test_gui_gpu.exe" "%RG_GUI_ROOT%test_gui_gpu_sse2.exe" "%RG_GUI_ROOT%test_gui_gpu_device.exe" 2>nul
@@ -534,7 +555,7 @@ del /q "%RG_GUI_ROOT%test_assets.obj" "%RG_GUI_ROOT%test_gui_no_string_ids.obj" 
 del /q "%RG_GUI_ROOT%rg_gui_demo_minimal.obj" "%RG_GUI_ROOT%rg_gui_demo_full.obj" "%RG_GUI_ROOT%rg_gui_demo_tearout.obj" 2>nul
 del /q "%RG_GUI_ROOT%bake_demo_font.obj" "%RG_GUI_ROOT%bake_ui_font.obj" 2>nul
 if exist "%RG_GUI_ROOT%shaders\Compiled" rmdir /s /q "%RG_GUI_ROOT%shaders\Compiled"
-for %%f in (test_assets.exe test_gui_no_string_ids.exe test_gui.exe test_renderer.exe test_gui_gpu.exe test_gui_gpu_sse2.exe test_gui_gpu_device.exe test_demo_tearout.exe rg_gui_demo_minimal.exe rg_gui_demo_full.exe rg_gui_demo_tearout.exe test_assets.obj test_gui_no_string_ids.obj test_gui_no_string_ids_negative.obj test_gui.obj test_renderer.obj test_gui_gpu.obj test_gui_gpu_sse2.obj test_gui_gpu_device.obj test_demo_tearout.obj rg_gui_demo_minimal.obj rg_gui_demo_full.obj rg_gui_demo_tearout.obj bake_demo_font.obj bake_ui_font.obj) do if exist "%RG_GUI_ROOT%%%f" (
+for %%f in (test_demo_profile.exe test_demo_profile.obj test_demo_format.exe test_demo_format.obj test_assets.exe test_gui_no_string_ids.exe test_gui.exe test_renderer.exe test_gui_gpu.exe test_gui_gpu_sse2.exe test_gui_gpu_device.exe test_demo_tearout.exe rg_gui_demo_minimal.exe rg_gui_demo_full.exe rg_gui_demo_tearout.exe test_assets.obj test_gui_no_string_ids.obj test_gui_no_string_ids_negative.obj test_gui.obj test_renderer.obj test_gui_gpu.obj test_gui_gpu_sse2.obj test_gui_gpu_device.obj test_demo_tearout.obj rg_gui_demo_minimal.obj rg_gui_demo_full.obj rg_gui_demo_tearout.obj bake_demo_font.obj bake_ui_font.obj) do if exist "%RG_GUI_ROOT%%%f" (
 	echo Failed to remove build artifact: %%f
 	exit /b 1
 )

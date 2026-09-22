@@ -36,8 +36,10 @@ arena exactly; the demos do this rather than relying on a guessed reserve.
 
 Changing text can opt into a shared `RgGuiTextLookup` through
 `RgGuiInitDesc.text_lookup`. It costs about 65 KiB per font and accelerates ASCII
-measurement; the default needs no additional arena storage. The demos enable
-it. See the [lookup ownership rules](docs/rg_gui.md#include-and-initialize).
+measurement. The renderer can borrow the same table via
+`RgGuiRendererInitDesc.text_lookup`; use `rg_gui_renderer_memory_required_ex`
+to omit its duplicate storage. The demos share one table per font. See the
+[lookup ownership rules](docs/rg_gui.md#include-and-initialize).
 
 See [the API and integration notes](docs/rg_gui.md) for the complete lifecycle,
 capacity behavior, platform output, and ownership rules.
@@ -48,7 +50,7 @@ Use these pinned dependency revisions for reproducible builds:
 
 | Dependency | Revision or version |
 | --- | --- |
-| `rg_core` | `27d5475a4af221813977f4b7d62e4e3f88cffab2` |
+| `rg_core` | `d4787158faa3366357d16ba2e1e466ee40276749` |
 | `rg_text` | `4b98c6d38d4de1398ebb0970fc8e0e3db01bafa5` |
 | vcpkg ports | baseline `91e8cb4be8195112ea3a9c7e5846bd0b3ff74673` |
 | SDL3 | 3.4.10 used for local Windows release validation; 3.4.14 configured in Linux sanitizer CI |
@@ -73,7 +75,7 @@ git clone https://github.com/superwendel/rg_text.git
 git clone https://github.com/superwendel/rg_gui.git
 git clone https://github.com/microsoft/vcpkg.git
 
-git -C rg_core checkout 27d5475a4af221813977f4b7d62e4e3f88cffab2
+git -C rg_core checkout d4787158faa3366357d16ba2e1e466ee40276749
 git -C rg_text checkout 4b98c6d38d4de1398ebb0970fc8e0e3db01bafa5
 git -C vcpkg checkout 91e8cb4be8195112ea3a9c7e5846bd0b3ff74673
 call vcpkg\bootstrap-vcpkg.bat -disableMetrics

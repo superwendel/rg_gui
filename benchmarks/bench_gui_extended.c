@@ -4,10 +4,6 @@
 #undef main
 #include "rg_gui_gpu.h"
 
-#ifndef RG_GUI_BENCH_LOOKUP
-#define RG_GUI_BENCH_LOOKUP 0
-#endif
-
 static int extended_selected(const char* name) {
     const char* filter = getenv("RG_GUI_BENCH_CASES");
     if (!filter || !*filter) return 1;
@@ -166,10 +162,11 @@ static void extended_case(Bench* b, ExtendedBench* e, const char* font, int mode
     extended_frame(b, e, mode);
     u64 hash = extended_signature(b, e, mode);
     const RgGuiRendererStats* stats = rg_gui_renderer_stats(&b->renderer);
-    printf("{\"kind\":\"result\",\"font\":\"%s\",\"case\":\"%s\",\"median_ns_per_frame\":%.3f,\"min_ns_per_frame\":%.3f,\"max_ns_per_frame\":%.3f,\"width_checksum\":%.3f,\"geometry_checksum\":\"%llu\",\"cache_hits\":%u,\"cache_misses\":%u,\"glyphs\":%u}\n",
+    printf("{\"kind\":\"result\",\"font\":\"%s\",\"case\":\"%s\",\"median_ns_per_frame\":%.3f,\"min_ns_per_frame\":%.3f,\"max_ns_per_frame\":%.3f,\"width_checksum\":%.3f,\"geometry_checksum\":\"%llu\",\"cache_hits\":%u,\"cache_misses\":%u,\"glyphs\":%u,\"renderer_arena_bytes\":%zu,\"renderer_lookup_shared\":%u,\"fixture_bytes\":%zu,\"frontend_lookup_count\":%u}\n",
         font, names[mode], times[3], times[0], times[6], mode >= 3 ? (double)e->document_length : 0.0,
         hash, mode < 3 ? stats->frame_cache_hits : 0u, mode < 3 ? stats->frame_cache_misses : 0u,
-        mode < 3 ? stats->frame_glyphs : 0u);
+        mode < 3 ? stats->frame_glyphs : 0u, b->renderer_memory_size,
+        (unsigned)RG_GUI_BENCH_RENDERER_LOOKUP, sizeof(*b), (unsigned)RG_GUI_BENCH_HAS_LOOKUP);
     fflush(stdout);
 }
 
@@ -183,15 +180,8 @@ int main(void) {
     timer_scale = 1.0 / (double)frequency.QuadPart;
     Bench* b = (Bench*)allocate(sizeof(Bench));
     ExtendedBench* e = (ExtendedBench*)allocate(sizeof(ExtendedBench));
-#if RG_GUI_BENCH_LOOKUP && defined(RG_GUI_HAS_TEXT_LOOKUP)
-    RgGuiTextLookup* lookup = (RgGuiTextLookup*)allocate(sizeof(RgGuiTextLookup));
-#endif
     for (int synthetic = 0; synthetic <= 1; synthetic++) {
         init_bench(b, synthetic);
-#if RG_GUI_BENCH_LOOKUP && defined(RG_GUI_HAS_TEXT_LOOKUP)
-        if (!rg_gui_text_lookup_init(lookup, &b->font)) fail("text lookup initialization");
-        b->gui.text_lookup = lookup;
-#endif
         extended_init(b, e);
         const char* font = synthetic ? "synthetic4096_mixed_utf8" : "inter95_ascii";
         printf("{\"kind\":\"font\",\"font\":\"%s\",\"glyph_count\":%u,\"kerning_count\":%u,\"label_copy_default\":%u}\n",
@@ -202,9 +192,6 @@ int main(void) {
         free(e->gpu.items);
         free(b->gui_memory); free(b->renderer_memory); free(b->glyphs); free(b->kernings);
     }
-#if RG_GUI_BENCH_LOOKUP && defined(RG_GUI_HAS_TEXT_LOOKUP)
-    free(lookup);
-#endif
     free(e); free(b);
     return sink == 0.0 ? 1 : 0;
 }

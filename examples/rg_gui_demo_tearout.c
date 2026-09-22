@@ -331,7 +331,7 @@ static void tearout_draw_main_shell(RgGuiContext* gui, TearoutDemoState* state,
 		if (state->native.window && state->panel_host[TEAROUT_PANEL_INSPECTOR] == 1)
 		{
 			if (!SDL_RaiseWindow(state->native.window))
-				SDL_snprintf(state->status, sizeof(state->status),
+				rg_snprintf(state->status, sizeof(state->status),
 				             "Could not raise tear-out: %s", SDL_GetError());
 		}
 		else
@@ -542,7 +542,7 @@ static int tearout_open_for_panel(SDL_GPUDevice* device, SDL_Window* main_window
 	state->dock_request.panel = panel;
 	state->panel_host[panel] = 1;
 	if (!hidden) SDL_RaiseWindow(state->native.window);
-	SDL_snprintf(state->status, sizeof(state->status), "%s moved to a native tear-out.",
+	rg_snprintf(state->status, sizeof(state->status), "%s moved to a native tear-out.",
 	             tearout_panel_titles[panel]);
 	return 1;
 
@@ -705,7 +705,11 @@ int main(int argc, char** argv)
 	RgGuiRendererLimits limits = rg_gui_renderer_limits_default();
 	limits.max_frame_instances = 32768u;
 	limits.max_batches = 4096u;
-	size_t text_memory_size = rg_gui_renderer_memory_required(&limits, 0u);
+	RgGuiRendererInitDesc text_desc = {0};
+	text_desc.font = &demo_font.font;
+	text_desc.limits = limits;
+	text_desc.text_lookup = &demo_font.text_lookup;
+	size_t text_memory_size = rg_gui_renderer_memory_required_ex(&text_desc);
 	if (text_memory_size == SIZE_MAX)
 	{
 		SDL_SetError("Invalid text-renderer limits");
@@ -719,9 +723,6 @@ int main(int argc, char** argv)
 	}
 	RgArena text_arena = {(char*)text_memory, text_memory_size, 0u, text_memory_size};
 	RgGuiRenderer text_renderer;
-	RgGuiRendererInitDesc text_desc = {0};
-	text_desc.font = &demo_font.font;
-	text_desc.limits = limits;
 	if (!rg_gui_renderer_init(&text_renderer, &text_arena, &text_desc))
 	{
 		SDL_SetError("Text-renderer initialization rejected the demo arena or limits");
@@ -779,7 +780,7 @@ int main(int argc, char** argv)
 			profile_frame.frame_interval_ms = (double)(frame_start - previous_frame_start) / 1000000.0;
 			previous_frame_start = frame_start;
 		}
-		rg_input_update(&input);
+		rg_input_begin_frame(&input);
 		rg_input_event_queue_reset(&input_events, SDL_GetModState());
 		SDL_Event event;
 		while (SDL_PollEvent(&event))
@@ -804,6 +805,7 @@ int main(int argc, char** argv)
 			demo_platform_process_event(&platform_state, &event);
 			rg_input_process_event_ex(&input, &event, &input_events);
 		}
+		rg_input_sample(&input);
 		if (rg_input_is_key_pressed(&input, SDL_SCANCODE_ESCAPE)) running = 0;
 		if (!running) break;
 		/* Exercise the same requests as the buttons, with 180 steady frames in
@@ -1091,7 +1093,7 @@ int main(int argc, char** argv)
 				int pos_y = (int)(global_y - 32.0f);
 				if (!tearout_open_for_panel(device, main_window, &state, state.drag.panel,
 				                            hidden, pos_x, pos_y, width, height))
-					SDL_snprintf(state.status, sizeof(state.status),
+					rg_snprintf(state.status, sizeof(state.status),
 					             "Could not create tear-out: %s", SDL_GetError());
 			}
 			state.drag.active = 0;
@@ -1114,7 +1116,7 @@ int main(int argc, char** argv)
 			                            main_x + main_w + 20, main_y + 40, 520, 460))
 			{
 				if (profile_options.path) goto cleanup;
-				SDL_snprintf(state.status, sizeof(state.status),
+				rg_snprintf(state.status, sizeof(state.status),
 				             "Could not create tear-out: %s", SDL_GetError());
 			}
 			state.spawn_panel = -1;

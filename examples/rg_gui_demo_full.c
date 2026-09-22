@@ -217,10 +217,9 @@ static void full_update_stats(FullDemoState* state, f32 frame_time, f32 delta_ti
 	f32 frame_ms = frame_time * 1000.0f;
 	state->frame_ms[FULL_PLOT_SAMPLES - 1u] = frame_ms;
 	if (state->plot_count < FULL_PLOT_SAMPLES) state->plot_count++;
-	state->frame_p95 = demo_profile_percentile(
-	    state->frame_ms + FULL_PLOT_SAMPLES - state->plot_count, state->plot_count, 95u);
-	state->frame_p99 = demo_profile_percentile(
-	    state->frame_ms + FULL_PLOT_SAMPLES - state->plot_count, state->plot_count, 99u);
+	demo_profile_percentiles(
+	    state->frame_ms + FULL_PLOT_SAMPLES - state->plot_count, state->plot_count,
+	    &state->frame_p95, &state->frame_p99);
 	state->activity += delta_time * 0.22f;
 	if (state->activity > 1.0f) state->activity -= 1.0f;
 }
@@ -246,7 +245,7 @@ static void full_node_content(RgGuiContext* gui, u32 index, RgGuiId node_id, voi
 static void full_apply_menu_action(FullDemoState* state, int group, int item)
 {
 	if (group < 0 || group >= FULL_MENU_COUNT || item < 0 || item >= (int)full_menu_counts[group]) return;
-	SDL_snprintf(state->last_action, sizeof(state->last_action), "%s > %s",
+	rg_snprintf(state->last_action, sizeof(state->last_action), "%s > %s",
 	             full_menu_labels[group], full_menu_groups[group][item]);
 	if (group == FULL_MENU_FILE && item == FULL_FILE_CLEAR_NOTES)
 	{
@@ -398,7 +397,7 @@ static void full_draw_stats(RgGuiContext* gui, FullDemoState* state, u32 window_
 	SDL_snprintf(frame_text, sizeof(frame_text), "Frame %.2f ms / %.0f FPS",
 	             latest_ms, latest_ms > 0.0f ? 1000.0f / latest_ms : 0.0f);
 	rg_gui_label(gui, frame_text, rg_gui_layout_next(gui, 26.0f));
-	SDL_snprintf(present_text, sizeof(present_text), "Present: %s",
+	rg_snprintf(present_text, sizeof(present_text), "Present: %s",
 	             state->present_mode == SDL_GPU_PRESENTMODE_MAILBOX ? "Mailbox (no tearing)" :
 	             state->present_mode == SDL_GPU_PRESENTMODE_IMMEDIATE ? "Immediate (may tear)" :
 	                                                                   "VSync");
@@ -413,7 +412,7 @@ static void full_draw_stats(RgGuiContext* gui, FullDemoState* state, u32 window_
 	                      state->plot_count, 0.0f, 34.0f, rg_gui_layout_next(gui, 105.0f));
 
 	char cache_text[96];
-	SDL_snprintf(cache_text, sizeof(cache_text), "Draw commands (previous frame): %u",
+	rg_snprintf(cache_text, sizeof(cache_text), "Draw commands (previous frame): %u",
 	             state->previous_draw_command_count);
 	rg_gui_label(gui, cache_text, rg_gui_layout_next(gui, 24.0f));
 	const DemoProfileFrame* p = &state->previous_profile;
@@ -429,13 +428,13 @@ static void full_draw_stats(RgGuiContext* gui, FullDemoState* state, u32 window_
 	SDL_snprintf(cache_text, sizeof(cache_text), "Present wait %.3f / submit %.3f ms",
 	             p->main.swapchain_wait_ms, p->main.submit_ms);
 	rg_gui_label(gui, cache_text, rg_gui_layout_next(gui, 22.0f));
-	SDL_snprintf(cache_text, sizeof(cache_text), "Draws %u / dispatches %u / glyphs %u",
+	rg_snprintf(cache_text, sizeof(cache_text), "Draws %u / dispatches %u / glyphs %u",
 	             g->draw_calls, g->dispatches, g->text_instances);
 	rg_gui_label(gui, cache_text, rg_gui_layout_next(gui, 22.0f));
-	SDL_snprintf(cache_text, sizeof(cache_text), "Upload run/cache/geometry: %u / %u / %u B",
+	rg_snprintf(cache_text, sizeof(cache_text), "Upload run/cache/geometry: %u / %u / %u B",
 	             g->run_upload_bytes, g->cache_upload_bytes, g->geometry_upload_bytes);
 	rg_gui_label(gui, cache_text, rg_gui_layout_next(gui, 22.0f));
-	SDL_snprintf(cache_text, sizeof(cache_text), "Text cache hits %u / misses %u / evictions %u",
+	rg_snprintf(cache_text, sizeof(cache_text), "Text cache hits %u / misses %u / evictions %u",
 	             p->main.text_stats.frame_cache_hits, p->main.text_stats.frame_cache_misses,
 	             p->main.text_stats.frame_cache_evictions);
 	rg_gui_label(gui, cache_text, rg_gui_layout_next(gui, 22.0f));
@@ -573,12 +572,12 @@ static int full_apply_present_mode(SDL_GPUDevice* device, SDL_Window* window, Fu
 
 	if (!demo_present_apply(device, window, state->requested_present_mode))
 	{
-		SDL_snprintf(state->last_action, sizeof(state->last_action),
+		rg_snprintf(state->last_action, sizeof(state->last_action),
 		             "Present mode change failed: %s", SDL_GetError());
 		return 0;
 	}
 	state->present_mode = state->requested_present_mode;
-	SDL_snprintf(state->last_action, sizeof(state->last_action), "Presentation: %s",
+	rg_snprintf(state->last_action, sizeof(state->last_action), "Presentation: %s",
 	             state->present_mode == SDL_GPU_PRESENTMODE_MAILBOX ? "Fast, no tearing" :
 	             state->present_mode == SDL_GPU_PRESENTMODE_IMMEDIATE ? "Uncapped, may tear" :
 	                                                                   "VSync");
@@ -825,7 +824,11 @@ int main(int argc, char** argv)
 	RgGuiRendererLimits limits = rg_gui_renderer_limits_default();
 	limits.max_frame_instances = 32768u;
 	limits.max_batches = 4096u;
-	size_t text_memory_size = rg_gui_renderer_memory_required(&limits, 0u);
+	RgGuiRendererInitDesc text_desc = {0};
+	text_desc.font = &demo_font.font;
+	text_desc.limits = limits;
+	text_desc.text_lookup = &demo_font.text_lookup;
+	size_t text_memory_size = rg_gui_renderer_memory_required_ex(&text_desc);
 	if (text_memory_size == SIZE_MAX)
 	{
 		SDL_SetError("Invalid text-renderer limits");
@@ -839,9 +842,6 @@ int main(int argc, char** argv)
 	}
 	RgArena text_arena = {(char*)text_memory, text_memory_size, 0u, text_memory_size};
 	RgGuiRenderer text_renderer;
-	RgGuiRendererInitDesc text_desc = {0};
-	text_desc.font = &demo_font.font;
-	text_desc.limits = limits;
 	if (!rg_gui_renderer_init(&text_renderer, &text_arena, &text_desc))
 	{
 		SDL_SetError("Text-renderer initialization rejected the demo arena or limits");
@@ -905,7 +905,7 @@ int main(int argc, char** argv)
 		sample.frame = (u32)submitted_frames;
 		sample.frame_interval_ms = (double)(frame_start - previous_frame_start) / 1000000.0;
 		previous_frame_start = frame_start;
-		rg_input_update(&input);
+		rg_input_begin_frame(&input);
 		rg_input_event_queue_reset(&input_events, SDL_GetModState());
 		SDL_Event event;
 		while (SDL_PollEvent(&event))
@@ -915,6 +915,7 @@ int main(int argc, char** argv)
 			demo_platform_process_event(&platform_state, &event);
 			rg_input_process_event_ex(&input, &event, &input_events);
 		}
+		rg_input_sample(&input);
 		if (rg_input_is_key_pressed(&input, SDL_SCANCODE_ESCAPE)) running = 0;
 		if (!running) break;
 		if (profile_scenario == FULL_PROFILE_RESIZE && sample.frame % 30u == 0u)

@@ -15,6 +15,24 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef RG_GUI_BENCH_LOOKUP
+#define RG_GUI_BENCH_LOOKUP 0
+#endif
+#ifndef RG_GUI_BENCH_RENDERER_LOOKUP
+#define RG_GUI_BENCH_RENDERER_LOOKUP 0
+#endif
+#if RG_GUI_BENCH_RENDERER_LOOKUP && !RG_GUI_BENCH_LOOKUP
+#error RG_GUI_BENCH_RENDERER_LOOKUP requires RG_GUI_BENCH_LOOKUP=1
+#endif
+#if RG_GUI_BENCH_RENDERER_LOOKUP && !defined(RG_GUI_HAS_TEXT_LOOKUP)
+#error RG_GUI_BENCH_RENDERER_LOOKUP requires GUI text lookup support
+#endif
+#if RG_GUI_BENCH_LOOKUP && defined(RG_GUI_HAS_TEXT_LOOKUP)
+#define RG_GUI_BENCH_HAS_LOOKUP 1
+#else
+#define RG_GUI_BENCH_HAS_LOOKUP 0
+#endif
+
 #define LABEL_COUNT 128u
 #define LABEL_BYTES 160u
 #define SAMPLE_COUNT 7u
@@ -37,6 +55,11 @@ typedef struct Bench {
     RgGuiDrawCmd commands[LABEL_COUNT];
     RgGuiDrawList list;
     double width_sum;
+#if RG_GUI_BENCH_HAS_LOOKUP
+    /* One frontend table per font, initialized outside timing in every variant.
+     * The renderer option changes borrowing, not fixture layout/allocation. */
+    RgGuiTextLookup frontend_lookup;
+#endif
 } Bench;
 
 static volatile double sink;
@@ -110,6 +133,9 @@ static void init_renderer(Bench* b) {
     desc.limits = (RgGuiRendererLimits){512u, 1024u, 128u * 1024u,
                                        32768u, 32768u, 16u};
     desc.page_quads = 32u;
+#if RG_GUI_BENCH_RENDERER_LOOKUP
+    desc.text_lookup = b->gui.text_lookup;
+#endif
     RgArena arena = {(char*)b->renderer_memory, b->renderer_memory_size, 0u,
                     b->renderer_memory_size};
     if (!rg_gui_renderer_init(&b->renderer, &arena, &desc)) fail("renderer init");
@@ -135,20 +161,40 @@ static void init_bench(Bench* b, int synthetic) {
     gui_desc.text_buffer_size = 64u * 1024u;
     gui_desc.text_measure_cache_size = 1024u;
     gui_desc.text_length_cache_size = 1024u;
+#if RG_GUI_BENCH_HAS_LOOKUP
+    if (!rg_gui_text_lookup_init(&b->frontend_lookup, &b->font))
+        fail("frontend lookup initialization");
+    gui_desc.text_lookup = &b->frontend_lookup;
+#endif
     size_t gui_size = rg_gui_memory_required(&gui_desc);
     b->gui_memory = allocate(gui_size);
     RgArena gui_arena = {(char*)b->gui_memory, gui_size, 0u, gui_size};
     if (!rg_gui_init(&b->gui, &gui_arena, &gui_desc)) fail("GUI init");
+#if RG_GUI_BENCH_HAS_LOOKUP
+    if (b->gui.text_lookup != &b->frontend_lookup)
+        fail("GUI did not borrow the fixture lookup");
+#endif
 
     RgGuiRendererInitDesc renderer_desc = {0};
+    renderer_desc.font = &b->font;
     renderer_desc.limits = (RgGuiRendererLimits){512u, 1024u, 128u * 1024u,
                                                32768u, 32768u, 16u};
     renderer_desc.page_quads = 32u;
+#if RG_GUI_BENCH_RENDERER_LOOKUP
+    renderer_desc.text_lookup = b->gui.text_lookup;
+    size_t renderer_size = rg_gui_renderer_memory_required_ex(&renderer_desc);
+#else
     size_t renderer_size = rg_gui_renderer_memory_required(&renderer_desc.limits, 32u);
+#endif
     if (renderer_size == SIZE_MAX) fail("renderer size");
     b->renderer_memory = allocate(renderer_size);
     b->renderer_memory_size = renderer_size;
     init_renderer(b);
+#if RG_GUI_BENCH_RENDERER_LOOKUP
+    if (b->renderer.core.ascii_glyphs != b->gui.text_lookup->ascii_glyphs ||
+        b->renderer.core.ascii_kerning != b->gui.text_lookup->ascii_kerning)
+        fail("renderer did not borrow the initialized lookup");
+#endif
 
     for (u32 i = 0; i < LABEL_COUNT; ++i) {
         size_t n;
@@ -326,11 +372,13 @@ static void run_case(Bench* b, const char* font_name, int mode) {
     if (mode >= 2 && mode <= 4 && ((mode == 4 && stats->frame_cache_misses != LABEL_COUNT) ||
                      (mode != 4 && stats->frame_cache_hits != LABEL_COUNT)))
         fail("unexpected cache state");
-    printf("{\"kind\":\"result\",\"font\":\"%s\",\"case\":\"%s\",\"median_ns_per_frame\":%.3f,\"min_ns_per_frame\":%.3f,\"max_ns_per_frame\":%.3f,\"width_checksum\":%.3f,\"geometry_checksum\":\"%llu\",\"cache_hits\":%u,\"cache_misses\":%u,\"glyphs\":%u}\n",
+    /* Allocation/options are metadata, not geometry/workload signatures. */
+    printf("{\"kind\":\"result\",\"font\":\"%s\",\"case\":\"%s\",\"median_ns_per_frame\":%.3f,\"min_ns_per_frame\":%.3f,\"max_ns_per_frame\":%.3f,\"width_checksum\":%.3f,\"geometry_checksum\":\"%llu\",\"cache_hits\":%u,\"cache_misses\":%u,\"glyphs\":%u,\"renderer_arena_bytes\":%zu,\"renderer_lookup_shared\":%u,\"fixture_bytes\":%zu,\"frontend_lookup_count\":%u}\n",
         font_name, names[mode], times[SAMPLE_COUNT / 2u], times[0], times[SAMPLE_COUNT - 1u],
         width_checksum, mode == 5 ? lookup_checksum(b) : (mode >= 2 ? geometry_checksum(b) : 0ull),
         mode >= 2 ? stats->frame_cache_hits : 0u, mode >= 2 ? stats->frame_cache_misses : 0u,
-        mode >= 2 ? stats->frame_glyphs : 0u);
+        mode >= 2 ? stats->frame_glyphs : 0u, b->renderer_memory_size,
+        (unsigned)RG_GUI_BENCH_RENDERER_LOOKUP, sizeof(*b), (unsigned)RG_GUI_BENCH_HAS_LOOKUP);
     fflush(stdout);
 }
 

@@ -99,7 +99,12 @@ Initialize the persistent text renderer with the same font:
 
 ```c
 RgGuiRendererLimits limits = rg_gui_renderer_limits_default();
-size_t renderer_bytes = rg_gui_renderer_memory_required(&limits, 0);
+RgGuiRendererInitDesc renderer_desc = {0};
+renderer_desc.font = &font;
+renderer_desc.limits = limits;
+renderer_desc.page_quads = 0; // 32-glyph default
+renderer_desc.text_lookup = &text_lookup; // Optional: share the frontend table.
+size_t renderer_bytes = rg_gui_renderer_memory_required_ex(&renderer_desc);
 if (renderer_bytes == SIZE_MAX)
 {
 	return 1;
@@ -114,16 +119,25 @@ RgArena renderer_arena = {
 };
 
 RgGuiRenderer text_renderer;
-RgGuiRendererInitDesc renderer_desc = {0};
-renderer_desc.font = &font;
-renderer_desc.limits = limits;
-renderer_desc.page_quads = 0; // 32-glyph default
 if (!rg_gui_renderer_init(&text_renderer, &renderer_arena, &renderer_desc))
 {
 	free(renderer_memory);
 	return 1;
 }
 ```
+
+The renderer borrows `renderer_desc.text_lookup` when its `font` pointer equals
+`renderer_desc.font`: both must reference the same font object. Initialize the
+table with `rg_gui_text_lookup_init` first, then keep the table, font, and its
+glyph/kerning arrays alive at stable addresses and unchanged for the renderer
+lifetime. A null or mismatched lookup selects an arena-owned table initialized
+by the renderer; the font and its arrays remain caller-owned in either case.
+
+Use the same descriptor for `rg_gui_renderer_memory_required_ex` and
+`rg_gui_renderer_init`. The size accounts for whether the lookup is borrowed;
+it returns `SIZE_MAX` for an invalid descriptor or size overflow. The original
+`rg_gui_renderer_memory_required(limits, page_quads)` remains a conservative
+bound for either case. Sharing saves about 65 KiB per renderer on x64.
 
 The page size must be a power of two and divide `max_cached_quads`. Zero selects
 the 32-glyph default. Cache storage remains at stable addresses until a page is
@@ -133,8 +147,13 @@ reclaimed; ordinary allocation does not relocate live glyph geometry.
 
 Run `build.bat shaders` and deploy the resulting `shaders/Compiled` directory
 with the application. `shader_root` is the directory containing `Compiled`.
-The atlas may come from `rg_text_gpu.h` or from a caller-created SDL GPU
-texture; it remains caller-owned and must outlive `RgGuiGpuRenderer`.
+Upload the font's straight-alpha RGBA8 atlas to a caller-created SDL GPU
+texture, as the demos do. It remains caller-owned and must outlive
+`RgGuiGpuRenderer`. The text shader and blend state expect straight-alpha
+pixels. Do not directly reuse a texture uploaded by
+`rg_text_gpu_upload_atlas`: that uploader premultiplies RGB, which would darken
+translucent edges with this renderer. The original atlas pixel bytes can be
+shared between the two upload paths.
 
 ```c
 RgGuiGpuRenderer gpu;
@@ -235,12 +254,13 @@ the queue before polling each frame, feed every SDL event through
 transitions that a keyboard snapshot cannot represent:
 
 ```c
-rg_input_update(&input);
+rg_input_begin_frame(&input);
 rg_input_event_queue_reset(&input_events, SDL_GetModState());
 while (SDL_PollEvent(&event))
 {
 	rg_input_process_event_ex(&input, &event, &input_events);
 }
+rg_input_sample(&input); // Sample current keyboard/mouse after SDL pumps events.
 
 rg_gui_begin_frame_ex(&gui, &input, &input_events,
 	                   SDL_GetWindowID(window), delta_time);

@@ -112,7 +112,8 @@ def cpu_metadata(pin):
 def source_snapshot(args, scenarios):
     files = [Path(__file__), REPO / "src/rg_gui.h", REPO / "src/rg_gui_renderer.h",
              REPO / "src/rg_gui_gpu.h", REPO / "examples/rg_gui_demo_common.h",
-             REPO / "examples/rg_gui_demo_profile.h", REPO / "examples/rg_gui_demo_present.h"]
+             REPO / "examples/rg_gui_demo_profile.h", REPO / "examples/rg_gui_demo_stats.h",
+             REPO / "examples/rg_gui_demo_present.h"]
     if any(case != "tearout" for case in scenarios):
         files.append(REPO / "examples/rg_gui_demo_full.c")
     if "tearout" in scenarios:
@@ -359,7 +360,7 @@ def run(args):
     # source/dependency snapshots but do not claim to reconstruct compiler flags.
     for case, binary in executables.items():
         related = [value for name, value in snapshot.items()
-                   if name.startswith("src/") or name in ("examples/rg_gui_demo_common.h", "examples/rg_gui_demo_profile.h",
+                   if name.startswith("src/") or name in ("examples/rg_gui_demo_common.h", "examples/rg_gui_demo_profile.h", "examples/rg_gui_demo_stats.h",
                        "examples/rg_gui_demo_present.h",
                        "examples/rg_gui_demo_tearout.c" if case == "tearout" else "examples/rg_gui_demo_full.c")]
         if binary.stat().st_mtime_ns < max(value["modified_ns"] for value in related):

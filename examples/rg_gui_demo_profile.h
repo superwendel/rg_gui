@@ -1,5 +1,7 @@
 // Demo-only recording. Capture into preallocated memory; write after rendering.
 // Include after rg_gui_demo_common.h. All durations here are CPU wall time.
+#include "rg_gui_demo_stats.h"
+
 typedef struct DemoProfileOptions
 {
 	const char* path;
@@ -166,21 +168,4 @@ RGINLINE void demo_profile_capture_destroy(DemoProfileCapture* capture)
 {
 	free(capture->frames);
 	memset(capture, 0, sizeof(*capture));
-}
-
-static int demo_profile_compare_f32(const void* left, const void* right)
-{
-	f32 a = *(const f32*)left, b = *(const f32*)right;
-	return (a > b) - (a < b);
-}
-
-RGINLINE f32 demo_profile_percentile(const f32* values, u32 count, u32 percent)
-{
-	f32 sorted[120];
-	if (count == 0u) return 0.0f;
-	if (count > RG_ARRAY_COUNT(sorted)) count = RG_ARRAY_COUNT(sorted);
-	memcpy(sorted, values, count * sizeof(*values));
-	qsort(sorted, count, sizeof(*sorted), demo_profile_compare_f32);
-	u32 rank = (count * percent + 99u) / 100u;
-	return sorted[rank ? rank - 1u : 0u];
 }

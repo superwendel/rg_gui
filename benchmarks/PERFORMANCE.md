@@ -1,5 +1,9 @@
 # Measured demo performance
 
+For the subsequent rg_core update, shared renderer lookup, and demo helper
+changes, see [rg_core reuse measurements](CORE_REUSE.md). The captures below
+retain their original dependency baseline.
+
 The full showcase retained sub-millisecond median frame production with Mailbox
 presentation on the tested Windows/D3D12 system. Reusing the tear-out window also
 reduced the large frame stalls caused by repeated swapchain destruction.

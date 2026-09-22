@@ -60,7 +60,7 @@ static void demo_build_ui(RgGuiContext* gui, int width, int height,
 		rg_gui_layout_row_end(gui);
 
 		char status[96];
-		SDL_snprintf(status, sizeof(status), "Clicks: %d / Hello, %s", *click_count, name);
+		rg_snprintf(status, sizeof(status), "Clicks: %d / Hello, %s", *click_count, name);
 		rg_gui_label(gui, status, rg_gui_layout_next(gui, 28.0f));
 	}
 	else
@@ -166,7 +166,11 @@ int main(int argc, char** argv)
 	}
 
 	RgGuiRendererLimits limits = rg_gui_renderer_limits_default();
-	size_t text_memory_size = rg_gui_renderer_memory_required(&limits, 0u);
+	RgGuiRendererInitDesc text_desc = {0};
+	text_desc.font = &demo_font.font;
+	text_desc.limits = limits;
+	text_desc.text_lookup = &demo_font.text_lookup;
+	size_t text_memory_size = rg_gui_renderer_memory_required_ex(&text_desc);
 	if (text_memory_size == SIZE_MAX)
 	{
 		SDL_SetError("Invalid text-renderer limits");
@@ -180,9 +184,6 @@ int main(int argc, char** argv)
 	}
 	RgArena text_arena = {(char*)text_memory, text_memory_size, 0u, text_memory_size};
 	RgGuiRenderer text_renderer;
-	RgGuiRendererInitDesc text_desc = {0};
-	text_desc.font = &demo_font.font;
-	text_desc.limits = limits;
 	if (!rg_gui_renderer_init(&text_renderer, &text_arena, &text_desc))
 	{
 		SDL_SetError("Text-renderer initialization rejected the demo arena or limits");
@@ -233,7 +234,7 @@ int main(int argc, char** argv)
 
 	while (running)
 	{
-		rg_input_update(&input);
+		rg_input_begin_frame(&input);
 		rg_input_event_queue_reset(&input_events, SDL_GetModState());
 		SDL_Event event;
 		while (SDL_PollEvent(&event))
@@ -243,6 +244,7 @@ int main(int argc, char** argv)
 			demo_platform_process_event(&platform_state, &event);
 			rg_input_process_event_ex(&input, &event, &input_events);
 		}
+		rg_input_sample(&input);
 		if (rg_input_is_key_pressed(&input, SDL_SCANCODE_ESCAPE))
 			running = 0;
 		if (!running)

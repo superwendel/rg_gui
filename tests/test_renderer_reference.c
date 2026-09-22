@@ -330,7 +330,7 @@ static void test_defaults_init_and_rollback(void)
 	fixture.arena.capacity = sizeof(tiny_memory);
 	fixture.arena.used = 7u;
 	fixture.arena.committed = sizeof(tiny_memory);
-	RgGuiRendererBaseInitDesc desc = {&fixture.font, defaults};
+	RgGuiRendererBaseInitDesc desc = {&fixture.font, defaults, NULL};
 	TEST_ASSERT(!rg_gui_renderer_base_init(&fixture.gui4, &fixture.arena, &desc), "small arena rejected");
 	TEST_ASSERT(fixture.arena.used == 7u, "arena usage rolled back");
 

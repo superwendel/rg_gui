@@ -7,6 +7,8 @@ Checks use explicit error exits, so `/DNDEBUG` does not disable validation.
 For measured application frames, see the [demo performance summary](PERFORMANCE.md)
 and its [selected data and provenance](performance.json). The CPU harness below
 supports new comparisons using source trees or executables that you preserve.
+See [rg_core reuse measurements](CORE_REUSE.md) for the shared-table and helper
+results, including the large-font cold-preparation tradeoff.
 
 ## Extended GUI workloads
 
@@ -20,6 +22,30 @@ ASCII lookup tables when the header supports them. The default build leaves
 the option off. Lookup initialization and its 66,568-byte allocation are outside
 the measured intervals; before headers without this API still use ordinary
 measurement. Record this option when reporting results.
+
+To measure renderer lookup sharing, also add
+`--define RG_GUI_BENCH_RENDERER_LOOKUP=1` and select `--case renderer_init`.
+This requires `RG_GUI_BENCH_LOOKUP=1` and headers with
+`RgGuiRendererInitDesc.text_lookup` and `rg_gui_renderer_memory_required_ex`.
+Its default is off, retaining compatibility with older renderer headers.
+Build the private and shared variants separately, then compare their binaries:
+
+```powershell
+python benchmarks/run.py build --suite extended --gui-root src --define RG_GUI_BENCH_LOOKUP=1 --output out/renderer-private.exe
+python benchmarks/run.py build --suite extended --gui-root src --define RG_GUI_BENCH_LOOKUP=1 --define RG_GUI_BENCH_RENDERER_LOOKUP=1 --output out/renderer-shared.exe
+python benchmarks/run.py compare --suite extended --case renderer_init --before-bin out/renderer-private.exe --after-bin out/renderer-shared.exe --output out/renderer-lookup
+```
+
+These commands use the dependency environment variables described below. The
+shared table is initialized outside timing; the renderer uses the smaller
+descriptor-sized arena. Result fields `renderer_arena_bytes` and
+`renderer_lookup_shared` record that choice separately from output signatures.
+These fields describe the renderer arena, not total fixture memory. With
+`RG_GUI_BENCH_LOOKUP=1`, both variants keep one frontend lookup in the benchmark
+fixture. `fixture_bytes` and `frontend_lookup_count` verify that setup; sharing
+changes the renderer descriptor and its arena allocation.
+
+For a complete extended-suite comparison against a preserved baseline:
 
 ```powershell
 python benchmarks/run.py compare --suite extended --define RG_GUI_BENCH_LOOKUP=1 --before-root out/baseline/src --after-root src --core-root ../rg_core --text-root ../rg_text --sdl-root C:/deps/SDL3 --output out/perf-extended
@@ -142,3 +168,33 @@ The [demo performance summary](PERFORMANCE.md) covers presentation modes and
 native-window reuse, including frame-time variation and the memory/cleanup
 tradeoff. Its historical snapshots are distinct from a new comparison of the
 current source tree.
+
+## Demo helper experiments
+
+`bench_demo_helpers.c` compares paired p95/p99 calculation using two `qsort`
+calls or `rg_algo`, and formatting the Full demo's ten telemetry lines using
+all-SDL formatting or the demos' mixed strategy: `rg_snprintf` for five
+integer/string lines and SDL for five decimal lines. Decimal rounding stays
+with SDL because the rg backends round some exact halfway values differently.
+The fixed 256-input corpus validates matching outputs before timing.
+
+From the repository root in an x64 Developer Command Prompt, set `RG_CORE_DIR`
+and `SDL3_DIR` to your dependency roots. For the SDL3 VC development package:
+
+```bat
+if not exist out mkdir out
+cl /nologo /std:c11 /O2 /DNDEBUG /W4 /WX /D_CRT_SECURE_NO_WARNINGS /I "%RG_CORE_DIR%\src" /I "%SDL3_DIR%\include" benchmarks\bench_demo_helpers.c /Foout\bench_demo_helpers.obj /Feout\bench_demo_helpers.exe /link /LIBPATH:"%SDL3_DIR%\lib\x64" SDL3.lib
+set "PATH=%SDL3_DIR%\lib\x64;%SDL3_DIR%\bin;%PATH%"
+out\bench_demo_helpers.exe --validate
+out\bench_demo_helpers.exe --kernel percentile_qsort --iterations 100000
+out\bench_demo_helpers.exe --kernel percentile_rg_algo --iterations 100000
+out\bench_demo_helpers.exe --kernel format_sdl --iterations 100000
+out\bench_demo_helpers.exe --kernel format_rg --iterations 100000
+```
+
+For a vcpkg SDL3 installation, use `%SDL3_DIR%\lib` for `/LIBPATH`.
+Each timed batch calculates both percentiles over 120 samples or formats all
+ten lines. Each invocation emits one JSON measurement and a checksum; repeat
+serial process trials in alternating order and compare checksums within each
+pair. Record the compiler, dependency revision, flags, and trial ranges.
+This helper does not set CPU affinity or produce application frame timings.
