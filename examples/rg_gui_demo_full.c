@@ -1,6 +1,8 @@
 // Full rg_gui widget and docking showcase.
 
 #include "rg_gui_demo_common.h"
+#include "rg_gui_demo_profile.h"
+#include "rg_gui_demo_present.h"
 
 #define FULL_PLOT_SAMPLES 120u
 #define FULL_CURVE_CAPACITY 8u
@@ -24,6 +26,8 @@ typedef enum FullViewMenuItem
 {
 	FULL_VIEW_RESET_CONTROLS = 0,
 	FULL_VIEW_VSYNC,
+	FULL_VIEW_MAILBOX,
+	FULL_VIEW_IMMEDIATE,
 	FULL_VIEW_TOGGLE_LIVE_STATS,
 	FULL_VIEW_NEXT_ACCENT,
 	FULL_VIEW_ITEM_COUNT
@@ -50,8 +54,10 @@ typedef struct FullDemoState
 	int menu_scroll[FULL_MENU_COUNT];
 	char last_action[96];
 	int request_quit;
-	int vsync_enabled;
+	SDL_GPUPresentMode present_mode;
+	SDL_GPUPresentMode requested_present_mode;
 	int immediate_present_supported;
+	int mailbox_present_supported;
 	int present_mode_dirty;
 
 	u32 inspector_tab;
@@ -87,6 +93,9 @@ typedef struct FullDemoState
 	f32 frame_ms[FULL_PLOT_SAMPLES];
 	u32 plot_count;
 	u32 previous_draw_command_count;
+	DemoProfileFrame previous_profile;
+	RgGuiRect profile_notes_rect;
+	f32 frame_p95, frame_p99;
 
 	RgGuiNodeEditorState node_editor;
 	RgGuiNodeGraphState node_state;
@@ -96,7 +105,9 @@ typedef struct FullDemoState
 
 static const char* full_menu_labels[] = {"File", "View", "Help"};
 static const char* full_file_items[] = {"Clear notes", "Quit"};
-static const char* full_view_items[] = {"Reset controls", "VSync", "Toggle frame stats", "Next accent"};
+static const char* full_view_items[] = {
+	"Reset controls", "VSync", "Fast, no tearing", "Uncapped, may tear",
+	"Toggle frame stats", "Next accent"};
 static const char* full_help_items[] = {"Describe demo", "Keyboard shortcuts"};
 static const char* const* full_menu_groups[] =
     {
@@ -162,7 +173,8 @@ static void full_state_init(FullDemoState* state)
 	state->scene_open = 1;
 	state->environment_open = 1;
 	state->stats_live = 1;
-	state->vsync_enabled = 1;
+	state->present_mode = SDL_GPU_PRESENTMODE_VSYNC;
+	state->requested_present_mode = SDL_GPU_PRESENTMODE_VSYNC;
 
 	state->curve_points[0] = rg_vec2(0.0f, 0.0f);
 	state->curve_points[1] = rg_vec2(0.25f, 0.72f);
@@ -205,6 +217,10 @@ static void full_update_stats(FullDemoState* state, f32 frame_time, f32 delta_ti
 	f32 frame_ms = frame_time * 1000.0f;
 	state->frame_ms[FULL_PLOT_SAMPLES - 1u] = frame_ms;
 	if (state->plot_count < FULL_PLOT_SAMPLES) state->plot_count++;
+	state->frame_p95 = demo_profile_percentile(
+	    state->frame_ms + FULL_PLOT_SAMPLES - state->plot_count, state->plot_count, 95u);
+	state->frame_p99 = demo_profile_percentile(
+	    state->frame_ms + FULL_PLOT_SAMPLES - state->plot_count, state->plot_count, 99u);
 	state->activity += delta_time * 0.22f;
 	if (state->activity > 1.0f) state->activity -= 1.0f;
 }
@@ -239,9 +255,12 @@ static void full_apply_menu_action(FullDemoState* state, int group, int item)
 	}
 	else if (group == FULL_MENU_FILE && item == FULL_FILE_QUIT) state->request_quit = 1;
 	else if (group == FULL_MENU_VIEW && item == FULL_VIEW_RESET_CONTROLS) full_reset_controls(state);
-	else if (group == FULL_MENU_VIEW && item == FULL_VIEW_VSYNC)
+	else if (group == FULL_MENU_VIEW &&
+	         (item == FULL_VIEW_VSYNC || item == FULL_VIEW_MAILBOX || item == FULL_VIEW_IMMEDIATE))
 	{
-		state->vsync_enabled = !state->vsync_enabled;
+		state->requested_present_mode = item == FULL_VIEW_VSYNC ? SDL_GPU_PRESENTMODE_VSYNC :
+		                                item == FULL_VIEW_MAILBOX ? SDL_GPU_PRESENTMODE_MAILBOX :
+		                                                           SDL_GPU_PRESENTMODE_IMMEDIATE;
 		state->present_mode_dirty = 1;
 	}
 	else if (group == FULL_MENU_VIEW && item == FULL_VIEW_TOGGLE_LIVE_STATS)
@@ -282,10 +301,18 @@ static void full_draw_menu(RgGuiContext* gui, FullDemoState* state, int width)
 		int group = state->menu_active;
 		RgGuiMenuItemFlags view_flags[FULL_VIEW_ITEM_COUNT] = {RG_GUI_MENU_ITEM_NONE};
 		view_flags[FULL_VIEW_VSYNC] = RG_GUI_MENU_ITEM_CHECKABLE;
-		if (state->vsync_enabled)
+		view_flags[FULL_VIEW_MAILBOX] = RG_GUI_MENU_ITEM_CHECKABLE;
+		view_flags[FULL_VIEW_IMMEDIATE] = RG_GUI_MENU_ITEM_CHECKABLE;
+		if (state->present_mode == SDL_GPU_PRESENTMODE_VSYNC)
 			view_flags[FULL_VIEW_VSYNC] |= RG_GUI_MENU_ITEM_CHECKED;
+		else if (state->present_mode == SDL_GPU_PRESENTMODE_MAILBOX)
+			view_flags[FULL_VIEW_MAILBOX] |= RG_GUI_MENU_ITEM_CHECKED;
+		else
+			view_flags[FULL_VIEW_IMMEDIATE] |= RG_GUI_MENU_ITEM_CHECKED;
+		if (!state->mailbox_present_supported)
+			view_flags[FULL_VIEW_MAILBOX] |= RG_GUI_MENU_ITEM_DISABLED;
 		if (!state->immediate_present_supported)
-			view_flags[FULL_VIEW_VSYNC] |= RG_GUI_MENU_ITEM_DISABLED;
+			view_flags[FULL_VIEW_IMMEDIATE] |= RG_GUI_MENU_ITEM_DISABLED;
 		const RgGuiMenuItemFlags* item_flags =
 		    (group == FULL_MENU_VIEW) ? view_flags : NULL;
 		RgGuiRect popup = rg_gui_make_rect(active_rect.x, active_rect.y + active_rect.h,
@@ -371,12 +398,10 @@ static void full_draw_stats(RgGuiContext* gui, FullDemoState* state, u32 window_
 	SDL_snprintf(frame_text, sizeof(frame_text), "Frame %.2f ms / %.0f FPS",
 	             latest_ms, latest_ms > 0.0f ? 1000.0f / latest_ms : 0.0f);
 	rg_gui_label(gui, frame_text, rg_gui_layout_next(gui, 26.0f));
-	if (state->vsync_enabled && !state->immediate_present_supported)
-		SDL_strlcpy(present_text, "Present: VSync (Immediate unavailable)",
-		            sizeof(present_text));
-	else
-		SDL_snprintf(present_text, sizeof(present_text), "Present: %s",
-		             state->vsync_enabled ? "VSync" : "Immediate (VSync off)");
+	SDL_snprintf(present_text, sizeof(present_text), "Present: %s",
+	             state->present_mode == SDL_GPU_PRESENTMODE_MAILBOX ? "Mailbox (no tearing)" :
+	             state->present_mode == SDL_GPU_PRESENTMODE_IMMEDIATE ? "Immediate (may tear)" :
+	                                                                   "VSync");
 	rg_gui_label(gui, present_text, rg_gui_layout_next(gui, 24.0f));
 	rg_gui_checkbox_static(gui, "Live capture", &state->stats_live,
 	                       rg_gui_layout_next(gui, 25.0f), rg_gui_id_str("stats_live"));
@@ -391,6 +416,29 @@ static void full_draw_stats(RgGuiContext* gui, FullDemoState* state, u32 window_
 	SDL_snprintf(cache_text, sizeof(cache_text), "Draw commands (previous frame): %u",
 	             state->previous_draw_command_count);
 	rg_gui_label(gui, cache_text, rg_gui_layout_next(gui, 24.0f));
+	const DemoProfileFrame* p = &state->previous_profile;
+	const RgGuiGpuStats* g = &p->main.draw_stats;
+	SDL_snprintf(cache_text, sizeof(cache_text), "Frame p95 %.2f / p99 %.2f ms (last %u)",
+	             state->frame_p95, state->frame_p99, state->plot_count);
+	rg_gui_label(gui, cache_text, rg_gui_layout_next(gui, 22.0f));
+	SDL_snprintf(cache_text, sizeof(cache_text), "CPU UI %.3f / prepare %.3f ms", p->ui_ms, p->main.prepare_ms);
+	rg_gui_label(gui, cache_text, rg_gui_layout_next(gui, 22.0f));
+	SDL_snprintf(cache_text, sizeof(cache_text), "CPU upload %.3f / encode %.3f ms", p->main.stage_upload_ms,
+	             p->main.encode_ms + p->main.draw_encode_ms);
+	rg_gui_label(gui, cache_text, rg_gui_layout_next(gui, 22.0f));
+	SDL_snprintf(cache_text, sizeof(cache_text), "Present wait %.3f / submit %.3f ms",
+	             p->main.swapchain_wait_ms, p->main.submit_ms);
+	rg_gui_label(gui, cache_text, rg_gui_layout_next(gui, 22.0f));
+	SDL_snprintf(cache_text, sizeof(cache_text), "Draws %u / dispatches %u / glyphs %u",
+	             g->draw_calls, g->dispatches, g->text_instances);
+	rg_gui_label(gui, cache_text, rg_gui_layout_next(gui, 22.0f));
+	SDL_snprintf(cache_text, sizeof(cache_text), "Upload run/cache/geometry: %u / %u / %u B",
+	             g->run_upload_bytes, g->cache_upload_bytes, g->geometry_upload_bytes);
+	rg_gui_label(gui, cache_text, rg_gui_layout_next(gui, 22.0f));
+	SDL_snprintf(cache_text, sizeof(cache_text), "Text cache hits %u / misses %u / evictions %u",
+	             p->main.text_stats.frame_cache_hits, p->main.text_stats.frame_cache_misses,
+	             p->main.text_stats.frame_cache_evictions);
+	rg_gui_label(gui, cache_text, rg_gui_layout_next(gui, 22.0f));
 	// last_action is rewritten by menu handlers, so it must be copied into this
 	// frame instead of using pointer identity as an immutable text-cache key.
 	rg_gui_label(gui, state->last_action, rg_gui_layout_next(gui, 28.0f));
@@ -455,8 +503,9 @@ static void full_draw_assets(RgGuiContext* gui, FullDemoState* state, u32 window
 	}
 	else
 	{
+		state->profile_notes_rect = rg_gui_layout_next(gui, 205.0f);
 		rg_gui_text_area(gui, &state->notes_area, state->notes, sizeof(state->notes),
-		                 rg_gui_layout_next(gui, 205.0f), rg_gui_id_str("notes"));
+		                 state->profile_notes_rect, rg_gui_id_str("notes"));
 	}
 	rg_gui_window_end(gui, &state->assets_window);
 }
@@ -516,26 +565,144 @@ static void full_build_ui(RgGuiContext* gui, FullDemoState* state, int width, in
 	full_draw_graph(gui, state, window_flags);
 }
 
-static void full_apply_present_mode(SDL_GPUDevice* device, SDL_Window* window, FullDemoState* state)
+static int full_apply_present_mode(SDL_GPUDevice* device, SDL_Window* window, FullDemoState* state)
 {
-	if (!state->present_mode_dirty) return;
+	if (!state->present_mode_dirty) return 1;
+	state->present_mode_dirty = 0;
+	if (state->requested_present_mode == state->present_mode) return 1;
 
-	SDL_GPUPresentMode present_mode = state->vsync_enabled
-	                                      ? SDL_GPU_PRESENTMODE_VSYNC
-	                                      : SDL_GPU_PRESENTMODE_IMMEDIATE;
-	if (!SDL_SetGPUSwapchainParameters(device, window, SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
-	                                   present_mode))
+	if (!demo_present_apply(device, window, state->requested_present_mode))
 	{
-		state->vsync_enabled = !state->vsync_enabled;
 		SDL_snprintf(state->last_action, sizeof(state->last_action),
 		             "Present mode change failed: %s", SDL_GetError());
+		return 0;
 	}
-	else
+	state->present_mode = state->requested_present_mode;
+	SDL_snprintf(state->last_action, sizeof(state->last_action), "Presentation: %s",
+	             state->present_mode == SDL_GPU_PRESENTMODE_MAILBOX ? "Fast, no tearing" :
+	             state->present_mode == SDL_GPU_PRESENTMODE_IMMEDIATE ? "Uncapped, may tear" :
+	                                                                   "VSync");
+	return 1;
+}
+
+typedef enum FullProfileScenario
+{
+	FULL_PROFILE_MANUAL, FULL_PROFILE_IDLE, FULL_PROFILE_TEXT_IDLE,
+	FULL_PROFILE_EDIT, FULL_PROFILE_SCROLL, FULL_PROFILE_RESIZE, FULL_PROFILE_IMAGES,
+	FULL_PROFILE_IMAGES_GROUPED
+} FullProfileScenario;
+
+static int full_profile_scenario(const char* name)
+{
+	static const char* names[] = {"manual", "idle", "text-idle", "edit", "scroll", "resize", "images", "images-grouped"};
+	for (u32 i = 0u; i < RG_ARRAY_COUNT(names); i++)
+		if (strcmp(name, names[i]) == 0) return (int)i;
+	return -1;
+}
+
+static void full_profile_seed_notes(FullDemoState* state)
+{
+	static const char line[] = "The quick brown fox jumps over the lazy dog. Text layout and selection profiling.\n";
+	size_t used = 0u;
+	while (used + sizeof(line) < KB(8))
 	{
-		SDL_snprintf(state->last_action, sizeof(state->last_action), "VSync: %s",
-		             state->vsync_enabled ? "On" : "Off");
+		memcpy(state->notes + used, line, sizeof(line) - 1u);
+		used += sizeof(line) - 1u;
 	}
-	state->present_mode_dirty = 0;
+	state->notes[used] = '\0';
+	state->assets_tab = 2u;
+}
+
+// Feed scripted events through the same ordered input path as SDL events.
+// No OS input is injected; normal input remains available in the manual scenario.
+static u32 full_profile_input(int scenario, u32 frame, FullDemoState* state,
+                               RgGuiContext* gui, RgInputState* input,
+                               RgInputEventQueue* events, SDL_WindowID window_id)
+{
+	if (scenario == FULL_PROFILE_MANUAL) return 0u;
+	memset(input->current_keyboard, 0, sizeof(input->current_keyboard));
+	memset(input->previous_keyboard, 0, sizeof(input->previous_keyboard));
+	memset(input->current_mouse, 0, sizeof(input->current_mouse));
+	memset(input->previous_mouse, 0, sizeof(input->previous_mouse));
+	input->mouse_x = input->mouse_y = -10000;
+	input->mouse_scroll_y = 0.0f;
+	input->has_text_input = false;
+	rg_input_event_queue_reset(events, SDL_KMOD_NONE);
+	if (scenario < FULL_PROFILE_TEXT_IDLE || scenario > FULL_PROFILE_SCROLL) return 0u;
+	if (state->assets_window.dock_node > 0u && state->assets_window.dock_node <= gui->dock_node_capacity)
+		gui->dock_nodes[state->assets_window.dock_node].active_tab = state->assets_window.dock_tab;
+	if (scenario == FULL_PROFILE_TEXT_IDLE) return 0u;
+	RgGuiRect rect = state->profile_notes_rect;
+	if (frame < 2u || rect.w <= 0.0f || rect.h <= 0.0f) return 0u;
+	f32 x = rect.x + 24.0f, y = rect.y + 20.0f;
+	input->mouse_x = (int)x; input->mouse_y = (int)y;
+	SDL_Event event;
+	memset(&event, 0, sizeof(event));
+	if (frame == 2u || frame == 3u)
+	{
+		input->current_mouse[RG_MOUSE_BUTTON_LEFT] = frame == 2u;
+		input->previous_mouse[RG_MOUSE_BUTTON_LEFT] = frame == 3u;
+		event.type = frame == 2u ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+		event.button.windowID = window_id;
+		event.button.button = SDL_BUTTON_LEFT;
+		event.button.down = frame == 2u;
+		event.button.clicks = 1u;
+		event.button.x = x; event.button.y = y;
+		rg_input_process_event_ex(input, &event, events);
+		return 1u;
+	}
+	if (scenario == FULL_PROFILE_SCROLL)
+	{
+		// A wheel event every frame, reversing direction every 120 frames.
+		event.type = SDL_EVENT_MOUSE_WHEEL;
+		event.wheel.windowID = window_id;
+		event.wheel.y = (frame / 120u) % 2u ? 1.0f : -1.0f;
+		event.wheel.mouse_x = x; event.wheel.mouse_y = y;
+		rg_input_process_event_ex(input, &event, events);
+		return 1u;
+	}
+	if (frame % 4u == 0u)
+	{
+		event.type = SDL_EVENT_TEXT_INPUT;
+		event.text.windowID = window_id;
+		event.text.text = "x";
+		rg_input_process_event_ex(input, &event, events);
+		return 1u;
+	}
+	if (frame % 4u == 2u)
+	{
+		event.type = SDL_EVENT_KEY_DOWN;
+		event.key.windowID = window_id;
+		event.key.scancode = SDL_SCANCODE_BACKSPACE;
+		event.key.key = SDLK_BACKSPACE;
+		event.key.down = true;
+		rg_input_process_event_ex(input, &event, events);
+		event.type = SDL_EVENT_KEY_UP;
+		event.key.down = false;
+		rg_input_process_event_ex(input, &event, events);
+		return 1u;
+	}
+	return 0u;
+}
+
+static void full_profile_images(RgGuiContext* gui, int width, int height,
+                                 SDL_GPUTexture* first, SDL_GPUTexture* second, int grouped)
+{
+	f32 cell_w = ((f32)width - 32.0f) / 32.0f;
+	f32 cell_h = ((f32)height - 90.0f) / 16.0f;
+	RgGuiRect clip = rg_gui_make_rect(12.0f, 62.0f, (f32)width - 24.0f, (f32)height - 74.0f);
+	rg_gui_push_rect(gui, clip, rg_gui_color(0.06f, 0.07f, 0.09f, 1.0f));
+	rg_gui_push_clip(gui, clip);
+	for (u32 i = 0u; i < 512u; i++)
+	{
+		SDL_GPUTexture* texture = (grouped ? i >= 256u : i % 2u != 0u) ? second : first;
+		rg_gui_push_image(gui, rg_gui_make_rect(16.0f + (f32)(i % 32u) * cell_w,
+		                                      66.0f + (f32)(i / 32u) * cell_h,
+		                                      cell_w - 2.0f, cell_h - 2.0f),
+		                  rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f),
+		                  rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f), (RgGuiTexture)(uintptr_t)texture);
+	}
+	rg_gui_pop_clip(gui);
 }
 
 int main(int argc, char** argv)
@@ -543,29 +710,59 @@ int main(int argc, char** argv)
 	int result = 1;
 	int hidden = 0;
 	int frame_limit = 0;
-	int start_without_vsync = 0;
+	SDL_GPUPresentMode start_present_mode = SDL_GPU_PRESENTMODE_VSYNC;
 	int smoke_test = 0;
+	int capture_wait_ms = 0;
+	DemoProfileOptions profile_options;
+	demo_profile_options_init(&profile_options);
+	DemoProfileCapture profile_capture = {0};
 	for (int i = 1; i < argc; i++)
 	{
+		int profile_arg = demo_profile_parse_arg(&profile_options, argc, argv, &i);
+		if (profile_arg < 0) return 1;
+		if (profile_arg > 0) continue;
+		int present_arg = demo_present_parse_arg(argc, argv, &i, &start_present_mode);
+		if (present_arg < 0)
+		{
+			fprintf(stderr, "%s\n", SDL_GetError());
+			return 1;
+		}
+		if (present_arg > 0) continue;
 		if (strcmp(argv[i], "--hidden") == 0) hidden = 1;
-		else if (strcmp(argv[i], "--no-vsync") == 0) start_without_vsync = 1;
 		else if (strcmp(argv[i], "--smoke-test") == 0) smoke_test = 1;
+		else if (strcmp(argv[i], "--capture-wait-ms") == 0 && i + 1 < argc)
+		{
+			capture_wait_ms = atoi(argv[++i]);
+			if (capture_wait_ms < 0 || capture_wait_ms > 10000) return 1;
+		}
 		else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc)
 		{
 			frame_limit = atoi(argv[++i]);
 			if (frame_limit < 1) frame_limit = 1;
 		}
+		else
+		{
+			fprintf(stderr, "Unknown or incomplete option: %s\n", argv[i]);
+			return 1;
+		}
 	}
+	int profile_scenario = full_profile_scenario(profile_options.scenario);
+	if (profile_scenario < 0)
+	{
+		fprintf(stderr, "Unknown full-demo scenario: %s\n", profile_options.scenario);
+		return 1;
+	}
+	if (profile_options.path && frame_limit == 0) frame_limit = (int)profile_options.warmup + 1200;
 	if (smoke_test)
 	{
 		hidden = 0;
 		frame_limit = 3;
-		start_without_vsync = 0;
 	}
 
 	SDL_Window* window = NULL;
 	SDL_GPUDevice* device = NULL;
 	SDL_GPUTexture* atlas = NULL;
+	SDL_GPUTexture* profile_atlas = NULL;
 	RgGuiGpuRenderer gpu = {0};
 	RgGpuUploadRing upload_ring = {0};
 	DemoFontAssets demo_font = {0};
@@ -576,6 +773,7 @@ int main(int argc, char** argv)
 	int window_claimed = 0;
 
 	if (!SDL_Init(SDL_INIT_VIDEO)) goto cleanup;
+	if (!demo_profile_capture_begin(&profile_capture, &profile_options, (u32)frame_limit)) goto cleanup;
 	demo_platform_init(&platform_state);
 	SDL_WindowFlags window_flags = SDL_WINDOW_RESIZABLE;
 	if (hidden) window_flags |= SDL_WINDOW_HIDDEN;
@@ -593,10 +791,16 @@ int main(int argc, char** argv)
 	atlas = demo_atlas_create(device, demo_font.pixels,
 	                          demo_font.atlas_width, demo_font.atlas_height);
 	if (!atlas) goto cleanup;
+	if (profile_scenario == FULL_PROFILE_IMAGES || profile_scenario == FULL_PROFILE_IMAGES_GROUPED)
+	{
+		profile_atlas = demo_atlas_create(device, demo_font.pixels, demo_font.atlas_width, demo_font.atlas_height);
+		if (!profile_atlas) goto cleanup;
+	}
 
 	RgGuiContext gui;
 	RgGuiInitDesc gui_desc = {0};
 	gui_desc.font = &demo_font.font;
+	gui_desc.text_lookup = &demo_font.text_lookup;
 	gui_desc.max_draw_cmds = 16384u;
 	gui_desc.text_buffer_size = KB(256);
 	size_t gui_memory_size = rg_gui_memory_required(&gui_desc);
@@ -673,31 +877,34 @@ int main(int argc, char** argv)
 	SDL_WindowID window_id = SDL_GetWindowID(window);
 	FullDemoState state;
 	full_state_init(&state);
+	if (profile_scenario >= FULL_PROFILE_TEXT_IDLE && profile_scenario <= FULL_PROFILE_SCROLL)
+		full_profile_seed_notes(&state);
 	state.immediate_present_supported = SDL_WindowSupportsGPUPresentMode(
 	                                        device, window, SDL_GPU_PRESENTMODE_IMMEDIATE)
 	                                        ? 1
 	                                        : 0;
-	if (start_without_vsync)
-	{
-		if (state.immediate_present_supported)
-		{
-			state.vsync_enabled = 0;
-			state.present_mode_dirty = 1;
-			full_apply_present_mode(device, window, &state);
-		}
-		else
-		{
-			SDL_strlcpy(state.last_action, "VSync on: Immediate presentation unavailable",
-			            sizeof(state.last_action));
-		}
-	}
+	state.mailbox_present_supported = SDL_WindowSupportsGPUPresentMode(
+	                                      device, window, SDL_GPU_PRESENTMODE_MAILBOX) ? 1 : 0;
+	state.requested_present_mode = start_present_mode;
+	state.present_mode_dirty = start_present_mode != state.present_mode;
+	if (!full_apply_present_mode(device, window, &state)) goto cleanup;
+	printf("Profile configuration: backend=%s scenario=%s present=%s\n", SDL_GetGPUDeviceDriver(device),
+	       profile_options.scenario, demo_present_name(state.present_mode));
+	if (capture_wait_ms) SDL_Delay((u32)capture_wait_ms);
 	u64 previous_ticks = SDL_GetTicksNS();
+	u64 previous_frame_start = previous_ticks;
+	u32 observed_edits = 0u, observed_scrolls = 0u;
 	int running = 1;
 	int submitted_frames = 0;
 	int presented_frames = 0;
 
 	while (running)
 	{
+		u64 frame_start = SDL_GetTicksNS();
+		DemoProfileFrame sample = {0};
+		sample.frame = (u32)submitted_frames;
+		sample.frame_interval_ms = (double)(frame_start - previous_frame_start) / 1000000.0;
+		previous_frame_start = frame_start;
 		rg_input_update(&input);
 		rg_input_event_queue_reset(&input_events, SDL_GetModState());
 		SDL_Event event;
@@ -710,6 +917,14 @@ int main(int argc, char** argv)
 		}
 		if (rg_input_is_key_pressed(&input, SDL_SCANCODE_ESCAPE)) running = 0;
 		if (!running) break;
+		if (profile_scenario == FULL_PROFILE_RESIZE && sample.frame % 30u == 0u)
+		{
+			int alternate = (sample.frame / 30u) % 2u != 0u;
+			if (!SDL_SetWindowSize(window, alternate ? 1024 : 1280, alternate ? 720 : 800)) goto cleanup;
+			sample.actions++;
+		}
+		sample.actions += full_profile_input(profile_scenario, sample.frame, &state, &gui,
+		                                     &input, &input_events, window_id);
 
 		u64 ticks = SDL_GetTicksNS();
 		f32 frame_time = (f32)((f64)(ticks - previous_ticks) / 1000000000.0);
@@ -721,10 +936,22 @@ int main(int argc, char** argv)
 		int width = 0;
 		int height = 0;
 		if (!SDL_GetWindowSizeInPixels(window, &width, &height)) goto cleanup;
+		sample.width = (u32)width; sample.height = (u32)height;
+		sample.event_ms = demo_profile_elapsed_ms(frame_start);
+		u64 ui_start = SDL_GetTicksNS();
+		size_t previous_note_length = strlen(state.notes);
+		f32 previous_scroll = state.notes_area.panel.scroll_y;
 		rg_gui_begin_frame_ex(&gui, &input, &input_events, window_id, delta_time);
 		gui.style.color_accent = state.accent;
 		full_build_ui(&gui, &state, width, height);
+		if (profile_atlas) full_profile_images(&gui, width, height, atlas, profile_atlas,
+		                                         profile_scenario == FULL_PROFILE_IMAGES_GROUPED);
 		rg_gui_end_frame(&gui);
+		sample.ui_ms = demo_profile_elapsed_ms(ui_start);
+		sample.diagnostic_flags = (u32)gui.diagnostics.flags;
+		observed_edits += previous_note_length != strlen(state.notes);
+		observed_scrolls += previous_scroll != state.notes_area.panel.scroll_y;
+		u64 platform_start = SDL_GetTicksNS();
 		full_apply_present_mode(device, window, &state);
 
 		const RgGuiPlatformOutput* platform = rg_gui_platform_output(&gui);
@@ -732,12 +959,17 @@ int main(int argc, char** argv)
 		    !demo_platform_update_text_input(&platform_state, &input, window, platform,
 		                                     width, height))
 			goto cleanup;
+		sample.platform_ms = demo_profile_elapsed_ms(platform_start);
 		int presented = 0;
-		if (!demo_render_frame(device, window, &gpu, &text_renderer, &upload_ring, &gui,
-		                       &presented))
+		if (!demo_render_frame_profiled(device, window, &gpu, &text_renderer, &upload_ring, &gui,
+		                                &presented, &sample.main))
 			goto cleanup;
 		const RgGuiDrawList* completed_draw_list = rg_gui_draw_list(&gui);
 		state.previous_draw_command_count = completed_draw_list ? completed_draw_list->count : 0u;
+		sample.frame_work_ms = demo_profile_elapsed_ms(frame_start);
+		if (!demo_profile_capture_append(&profile_capture, &sample)) goto cleanup;
+		// Refresh numeric telemetry at 15-frame intervals to limit self-induced text churn.
+		if (sample.frame % 15u == 0u) state.previous_profile = sample;
 
 		submitted_frames++;
 		presented_frames += presented;
@@ -751,6 +983,14 @@ int main(int argc, char** argv)
 		}
 	}
 
+	if ((profile_scenario == FULL_PROFILE_EDIT && observed_edits < 2u) ||
+	    (profile_scenario == FULL_PROFILE_SCROLL && observed_scrolls < 2u))
+	{
+		SDL_SetError("Scripted profile did not exercise the requested text interaction");
+		goto cleanup;
+	}
+	printf("Profile interactions: text_edits=%u scroll_changes=%u\n", observed_edits, observed_scrolls);
+	if (!demo_profile_capture_write(&profile_capture)) goto cleanup;
 	if (smoke_test && presented_frames < frame_limit)
 	{
 		SDL_SetError("Full-demo smoke test ended before presenting three frames");
@@ -768,6 +1008,8 @@ cleanup:
 	free(text_memory);
 	free(gui_memory);
 	if (atlas) SDL_ReleaseGPUTexture(device, atlas);
+	if (profile_atlas) SDL_ReleaseGPUTexture(device, profile_atlas);
+	demo_profile_capture_destroy(&profile_capture);
 	demo_font_destroy(&demo_font);
 	demo_platform_destroy(&platform_state, &input);
 	if (window_claimed) SDL_ReleaseWindowFromGPUDevice(device, window);

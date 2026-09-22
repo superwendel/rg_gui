@@ -37,12 +37,11 @@ jobs:
           path: _deps/rg_core
           persist-credentials: false
 
-      - name: Check out rg_text dependency
+      - name: Check out pinned rg_text
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: superwendel/rg_text
-          # Bootstrap ref: replace with the first immutable public release commit.
-          ref: main
+          ref: 4b98c6d38d4de1398ebb0970fc8e0e3db01bafa5
           path: _deps/rg_text
           persist-credentials: false
 
@@ -143,7 +142,9 @@ jobs:
             'test_gui.exe',
             'test_renderer.exe',
             'test_gui_gpu.exe',
+            'test_gui_gpu_sse2.exe',
             'test_gui_gpu_device.exe',
+            'test_demo_tearout.exe',
             'rg_gui_demo_minimal.exe',
             'rg_gui_demo_full.exe',
             'rg_gui_demo_tearout.exe'
@@ -178,12 +179,11 @@ jobs:
           path: _deps/rg_core
           persist-credentials: false
 
-      - name: Check out rg_text dependency
+      - name: Check out pinned rg_text
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: superwendel/rg_text
-          # Bootstrap ref: replace with the first immutable public release commit.
-          ref: main
+          ref: 4b98c6d38d4de1398ebb0970fc8e0e3db01bafa5
           path: _deps/rg_text
           persist-credentials: false
 
@@ -239,6 +239,7 @@ jobs:
           for target in test_gui test_renderer test_gui_gpu; do
             clang "${sdl_common[@]}" "tests/$target.c" "${sdl_libs[@]}" -lm -o "$SANITIZER_DIR/$target"
           done
+          clang "${sdl_common[@]}" -DRG_GUI_GPU_USE_SSE2=1 tests/test_gui_gpu.c "${sdl_libs[@]}" -lm -o "$SANITIZER_DIR/test_gui_gpu_sse2"
           clang "${sdl_common[@]}" tests/test_gui_gpu_device.c "${sdl_libs[@]}" -lm -o "$SANITIZER_DIR/test_gui_gpu_device"
 
           export ASAN_OPTIONS='detect_leaks=1:halt_on_error=1:strict_string_checks=1'
@@ -249,4 +250,5 @@ jobs:
           "$SANITIZER_DIR/test_gui"
           "$SANITIZER_DIR/test_renderer"
           "$SANITIZER_DIR/test_gui_gpu"
+          "$SANITIZER_DIR/test_gui_gpu_sse2"
           echo 'The sanitizer-instrumented GPU device binary was compiled but not run.'

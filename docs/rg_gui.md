@@ -24,6 +24,13 @@ For the SDL3 GPU renderer, one include brings in the stack:
 #include "rg_gui_gpu.h"
 ```
 
+On an SSE2-capable x86 target, define `RG_GUI_GPU_USE_SSE2=1` before that include
+to enable rectangle/image vertex packing with intrinsics. The default is the
+portable C path; no assembly object or extra library is needed. Both paths use
+the same vertex layout and capacity checks. The demos select SSE2 on x64 and
+other targets that advertise SSE2 support. This affects CPU geometry packing,
+while glyph expansion still runs on the GPU.
+
 `rg_gui.h` is an include-once unity header. It intentionally has no guard, so
 do not include it separately after another GUI header has included it.
 
@@ -61,6 +68,32 @@ arena and returns zero for invalid input or overflow. Initialization rolls
 arena usage back on failure. There is no frontend destroy call: keep the arena
 unchanged while the context is in use, then release the entire arena when the
 context is no longer needed.
+
+For frequent measurement of changing ASCII labels, an optional shared lookup
+table avoids glyph and kerning searches. Initialize it once per immutable font
+and attach it to the descriptor **before** calling `rg_gui_init`:
+
+```c
+// Store this alongside the font in application-owned state.
+RgGuiTextLookup text_lookup;
+if (!rg_gui_text_lookup_init(&text_lookup, &font))
+{
+	return 1;
+}
+gui_desc.text_lookup = &text_lookup;
+```
+
+The table occupies 66,568 bytes on 64-bit targets and can serve multiple GUI
+contexts using the same font. It adds no arena allocation. Leave `text_lookup`
+null to retain ordinary measurement and the previous arena size. The font,
+glyph/kerning arrays, and lookup object must stay alive and unchanged while
+attached; a lookup for a different font is ignored. Unicode uses the general
+lookup path. The supplied demos enable this option.
+
+Text-area wrapping accumulates advances in one pass and reuses visual lines
+within a widget invocation. Edits, font/scale changes, and IME display text
+invalidate that reuse. Layout is rebuilt on the next invocation, including
+after external buffer edits.
 
 Initialize the persistent text renderer with the same font:
 
@@ -291,14 +324,21 @@ responsible for native-window lifetime and swapchains: create and claim an SDL
 window, route global input through `RgGuiInputRouter`, build its UI with
 `rg_gui_viewport_begin_ordered_ex`, and render the returned viewport draw list
 to that window. A renderer pipeline is created for one target format, so every
-native swapchain served by it must use that same format. Once GPU work using a
-secondary draw list is complete, call `rg_gui_viewport_release` for its ID when
-the native window closes so the fixed viewport slot can be reused.
+native swapchain served by it must use that same format. After the renderer has
+prepared, uploaded, and submitted the secondary draw list for the last time,
+call `rg_gui_viewport_release` when that viewport closes so its fixed CPU slot
+can be reused. This does not destroy GPU resources; their lifetime remains the
+application's responsibility.
 
 [`examples/rg_gui_demo_tearout.c`](../examples/rg_gui_demo_tearout.c) is the
 platform example. It filters ordered text events by SDL window ID, maintains
-the platform output for both native windows, and destroys empty tear-outs after
-their panels are docked back.
+the platform output for both native windows, and parks one empty tear-out as a
+hidden, still-claimed window after its panels are docked back. Reopening reuses
+the window and swapchain; closing clears viewport and IME ownership. This keeps
+SDL's blocking swapchain release out of interactive redocking, at the cost of
+retaining that window's resources until final cleanup. The demo handles main
+window close explicitly and disables SDL's automatic last-visible-window quit
+inference, so a repeated close event for the parked window cannot quit the app.
 
 ## Ownership, text identity, and threads
 

@@ -13,12 +13,13 @@ typedef struct TestRendererFixture
 	RgGuiRenderer renderer;
 } TestRendererFixture;
 
-static int test_renderer_fixture_init(TestRendererFixture* fixture,
-                                      const RgGuiRendererLimits* limits,
-                                      u32 page_quads)
+static int test_renderer_fixture_init_font(TestRendererFixture* fixture,
+                                           const RgGuiRendererLimits* limits,
+                                           u32 page_quads, const RgTextFont* font)
 {
 	memset(fixture, 0, sizeof(*fixture));
 	test_font_init(&fixture->font_owner);
+	if (font) fixture->font_owner.font = *font;
 	size_t size = rg_gui_renderer_memory_required(limits, page_quads);
 	if (size == SIZE_MAX) return 0;
 	fixture->memory = malloc(size);
@@ -31,6 +32,13 @@ static int test_renderer_fixture_init(TestRendererFixture* fixture,
 	if (limits) desc.limits = *limits;
 	desc.page_quads = page_quads;
 	return rg_gui_renderer_init(&fixture->renderer, &fixture->arena, &desc);
+}
+
+static int test_renderer_fixture_init(TestRendererFixture* fixture,
+                                      const RgGuiRendererLimits* limits,
+                                      u32 page_quads)
+{
+	return test_renderer_fixture_init_font(fixture, limits, page_quads, NULL);
 }
 
 static void test_renderer_fixture_free(TestRendererFixture* fixture)
@@ -129,6 +137,77 @@ static void test_renderer_page_sizes_and_geometry(void)
 	if (g_tests_failed) return;
 	test_renderer_page_size_parity(32u, 2u, 24u);
 	if (g_tests_failed) return;
+	TEST_PASS();
+}
+
+static void test_renderer_page_layout_fallbacks_and_capacity(void)
+{
+	RgGuiRendererLimits limits = {1u, 2u, 64u, 8u, 8u, 1u};
+	const u32 pages[] = {3u, 1u, 0u, 2u};
+	for (u32 variant = 0u; variant < 3u; variant++)
+	{
+		TestRendererBaseFixture font_owner = {0};
+		TestRendererFixture fixture;
+		test_layout_font_init(&font_owner, variant);
+		TEST_ASSERT(test_renderer_fixture_init_font(&fixture, &limits, 2u, &font_owner.font),
+		            "fallback page fixture init");
+		RgGuiRenderer* ctx = &fixture.renderer;
+		for (u32 p = 0u; p < RG_ARRAY_COUNT(pages); p++)
+			ctx->page_next[pages[p]] = p + 1u < RG_ARRAY_COUNT(pages) ? pages[p + 1u] : UINT32_MAX;
+		for (u32 t = 0u; t < RG_ARRAY_COUNT(test_layout_texts); t++)
+		for (u32 s = 0u; s < RG_ARRAY_COUNT(test_layout_scales); s++)
+		for (u32 c = 0u; c < RG_ARRAY_COUNT(test_layout_capacities); c++)
+		{
+			const char* text = test_layout_texts[t];
+			f32 scale = test_layout_scales[s];
+			u32 capacity = test_layout_capacities[c];
+			RgTextQuad expected[8];
+			RgGuiRendererBaseCachedQuad guard;
+			memset(&guard, 0xA5, sizeof(guard));
+			memset(ctx->core.cache_quads, 0xA5, 8u * sizeof(*ctx->core.cache_quads));
+			size_t count = rg_text_build_quads(ctx->core.font, text, strlen(text), 0, 0, scale,
+			                                  (RgTextColor){1, 1, 1, 1}, expected, capacity);
+			TEST_ASSERT(rg_gui_renderer_build_pages(ctx, text, strlen(text), scale, pages[0], capacity) == count,
+			            "scattered page count matches rg_text");
+			for (u32 q = 0u; q < 8u; q++)
+			{
+				const RgGuiRendererBaseCachedQuad* actual = &ctx->core.cache_quads[pages[q / 2u] * 2u + q % 2u];
+				if (q < count)
+					TEST_ASSERT(test_cached_quad_matches(actual, &expected[q]),
+					            "scattered page geometry matches resolved glyph semantics");
+				else
+					TEST_ASSERT(memcmp(actual, &guard, sizeof(guard)) == 0,
+					            "page builder leaves un-emitted storage untouched");
+			}
+		}
+
+		/* Also traverse the public cold/warm path, with kerning crossing page boundaries. */
+		rg_gui_renderer_clear_cache(ctx);
+		static const char text[] = "AXA\r\nA\xC3\xA9" "AXA";
+		RgGuiDrawCmd cmd = test_text_cmd_identity(text, 12.0f, -4.0f, 1.5f);
+		RgGuiDrawList list = test_draw_list(&cmd, 1u);
+		RgTextQuad expected[8];
+		size_t count = rg_text_build_quads(ctx->core.font, text, sizeof(text) - 1u, 12, -4, 1.5f,
+		                                  (RgTextColor){1, 1, 1, 1}, expected, 8u);
+		for (u32 frame = 0u; frame < 2u; frame++)
+		{
+			rg_gui_renderer_begin_frame(ctx);
+			TEST_ASSERT(rg_gui_renderer_prepare(ctx, &list, 1u), "public fallback page prepare");
+			const RgGuiRendererPrepared* prepared = rg_gui_renderer_prepared(ctx);
+			TEST_ASSERT(prepared->glyph_count == count && prepared->run_count == (count + 1u) / 2u,
+			            "fallback layout emits all page segments");
+			RgGuiRendererBaseInstance actual[8];
+			test_renderer_expand(ctx, prepared, actual);
+			for (u32 q = 0u; q < count; q++)
+				TEST_ASSERT(test_float_equal(actual[q].x, expected[q].x0) &&
+				                test_float_equal(actual[q].y, expected[q].y0),
+				            "cold and warm production geometry matches rg_text");
+			if (frame)
+				TEST_ASSERT(rg_gui_renderer_stats(ctx)->frame_cache_hits == 1u && ctx->dirty_page_count == 0u,
+				            "fallback layout reuses warm pages without upload");
+		}
+		test_renderer_fixture_free(&fixture);
+	}
 	TEST_PASS();
 }
 
@@ -280,6 +359,7 @@ int main(int argc, char** argv)
 	g_tests_failed = 0;
 	printf("Running renderer segmented page-cache tests...\n\n");
 	test_renderer_page_sizes_and_geometry();
+	test_renderer_page_layout_fallbacks_and_capacity();
 	test_renderer_fragmentation_eliminated();
 	test_renderer_invalid_page_size();
 	test_renderer_zero_quad_run_uses_no_page();

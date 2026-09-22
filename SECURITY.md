@@ -2,16 +2,18 @@
 
 ## Supported versions
 
-Security fixes are applied to the latest tagged `0.x` release. Until the first
-tag is published, the repository does not have a supported public release.
+Security fixes target the latest tagged `0.x` release. Reports against the
+development branch are also welcome; include the affected commit SHA.
 
 ## Reporting a vulnerability
 
-Before the first public release, the maintainer must enable GitHub private
-vulnerability reporting for this repository. Publishing without that reporting
-channel is an unresolved release blocker.
+Use GitHub's [private vulnerability reporting form](https://github.com/superwendel/rg_gui/security/advisories/new)
+when it is available.
 
-Once enabled, use the repository's **Report a vulnerability** action rather
-than opening a public issue. Include the affected version or commit, a minimal
-reproduction, and the expected impact when possible. Do not publish exploit
-details in an issue.
+If private reporting is unavailable, [open an issue](https://github.com/superwendel/rg_gui/issues/new)
+asking the maintainer for a private reporting channel. Do not include the
+vulnerability details, reproduction, or exploit in that public request.
+
+Once a private channel is available, include the affected version or commit,
+a minimal reproduction, and the expected impact when possible. Allow time for
+a fix before publishing technical details.

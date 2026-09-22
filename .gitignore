@@ -70,3 +70,10 @@ cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
 compile_commands.json
+
+# Python benchmark tooling
+__pycache__/
+*.py[cod]
+
+# Local benchmark experiment history (public summary is benchmarks/PERFORMANCE.md)
+/benchmarks/results/

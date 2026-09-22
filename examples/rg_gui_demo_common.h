@@ -7,6 +7,10 @@
 #endif
 // Keep the examples self-contained by selecting rg_core's portable formatter.
 #define RG_SPRINTF_NO_ASM 1
+// Exercise optional geometry packing on targets that guarantee SSE2.
+#if !defined(RG_GUI_GPU_USE_SSE2) && (defined(_M_X64) || defined(__SSE2__))
+#define RG_GUI_GPU_USE_SSE2 1
+#endif
 #include "../src/rg_gui_gpu.h"
 
 #include <errno.h>
@@ -27,6 +31,7 @@ typedef struct DemoFontAssets
 	RgTextFont font;
 	RgTextGlyph glyphs[DEMO_FONT_GLYPH_CAPACITY];
 	RgTextKerning kernings[DEMO_FONT_KERNING_CAPACITY];
+	RgGuiTextLookup text_lookup;
 	u8* pixels;
 	u32 atlas_width;
 	u32 atlas_height;
@@ -300,6 +305,12 @@ static int demo_font_try_load(DemoFontAssets* assets, const char* asset_base)
 		return 0;
 	}
 
+	if (!rg_gui_text_lookup_init(&assets->text_lookup, &assets->font))
+	{
+		free(pixels);
+		SDL_SetError("Could not build demo font lookup tables");
+		return 0;
+	}
 	assets->pixels = (u8*)pixels;
 	assets->atlas_width = assets->font.metrics.atlas_width;
 	assets->atlas_height = assets->font.metrics.atlas_height;
@@ -475,40 +486,81 @@ static SDL_GPUTexture* demo_atlas_create(SDL_GPUDevice* device, const u8* pixels
 	return texture;
 }
 
-static int demo_render_draw_list(SDL_GPUDevice* device, SDL_Window* window,
-                                 RgGuiGpuRenderer* gpu, RgGuiRenderer* text_renderer,
-                                 RgGpuUploadRing* upload_ring,
-                                 const RgGuiDrawList* draw_list, u32 overlay_start,
-                                 int* out_presented)
+/* CPU wall times only: encoding and submission do not measure GPU execution.
+ * A missing swapchain leaves draw_stats zero; submitted/presented identify which
+ * frames have usable draw counters. Text counters also describe failed prepares.
+ */
+typedef struct DemoRenderMetrics
 {
+	double prepare_ms;
+	double stage_upload_ms;
+	double encode_ms;
+	double swapchain_wait_ms;
+	double draw_encode_ms;
+	double submit_ms;
+	double total_ms;
+	RgGuiGpuStats draw_stats;
+	RgGuiRendererStats text_stats;
+	u32 draw_commands;
+	int submitted;
+	int presented;
+} DemoRenderMetrics;
+
+static int demo_render_draw_list_profiled(SDL_GPUDevice* device, SDL_Window* window,
+                                          RgGuiGpuRenderer* gpu, RgGuiRenderer* text_renderer,
+                                          RgGpuUploadRing* upload_ring,
+                                          const RgGuiDrawList* draw_list, u32 overlay_start,
+                                          int* out_presented, DemoRenderMetrics* metrics)
+{
+	u64 render_start = metrics ? SDL_GetTicksNS() : 0u;
+	u64 stage_start = render_start;
+	int result = 0;
+	if (metrics)
+	{
+		memset(metrics, 0, sizeof(*metrics));
+		metrics->draw_commands = draw_list ? draw_list->count : 0u;
+	}
 	if (out_presented) *out_presented = 0;
 	SDL_ClearError();
 	rg_gui_renderer_begin_frame(text_renderer);
-	if (!rg_gui_gpu_prepare(gpu, text_renderer, draw_list, overlay_start))
+	int prepared = rg_gui_gpu_prepare(gpu, text_renderer, draw_list, overlay_start);
+	if (metrics)
+	{
+		u64 now = SDL_GetTicksNS();
+		metrics->prepare_ms = (double)(now - stage_start) / 1000000.0;
+		stage_start = now;
+	}
+	if (!prepared)
 	{
 		SDL_SetError("rg_gui GPU preparation exceeded the configured demo limits");
-		return 0;
+		goto done;
 	}
 
 	RgGuiGpuUpload upload = {0};
 	rg_gpu_upload_ring_begin(upload_ring, 1);
 	int staged = rg_gui_gpu_stage_upload(gpu, text_renderer, upload_ring, &upload);
 	rg_gpu_upload_ring_end(upload_ring);
+	if (metrics)
+	{
+		u64 now = SDL_GetTicksNS();
+		metrics->stage_upload_ms = (double)(now - stage_start) / 1000000.0;
+		stage_start = now;
+	}
 	if (!staged)
 	{
 		SDL_SetError("rg_gui GPU upload staging exceeded the configured demo limits");
-		return 0;
+		goto done;
 	}
 
 	SDL_GPUCommandBuffer* command_buffer = SDL_AcquireGPUCommandBuffer(device);
-	if (!command_buffer) return 0;
+	if (!command_buffer) goto encode_failed;
 	if (upload.has_text || upload.has_geometry)
 	{
 		SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(command_buffer);
 		if (!copy)
 		{
 			SDL_CancelGPUCommandBuffer(command_buffer);
-			return 0;
+			goto encode_failed;
 		}
 		rg_gui_gpu_encode_upload(gpu, text_renderer, copy, upload_ring, &upload);
 		SDL_EndGPUCopyPass(copy);
@@ -517,17 +569,30 @@ static int demo_render_draw_list(SDL_GPUDevice* device, SDL_Window* window,
 	{
 		SDL_CancelGPUCommandBuffer(command_buffer);
 		SDL_SetError("rg_gui GPU text dispatch rejected the prepared frame");
-		return 0;
+		goto encode_failed;
+	}
+	if (metrics)
+	{
+		u64 now = SDL_GetTicksNS();
+		metrics->encode_ms = (double)(now - stage_start) / 1000000.0;
+		stage_start = now;
 	}
 
 	SDL_GPUTexture* swapchain = NULL;
 	u32 width = 0u;
 	u32 height = 0u;
-	if (!SDL_WaitAndAcquireGPUSwapchainTexture(command_buffer, window, &swapchain,
-	                                           &width, &height))
+	int acquired = SDL_WaitAndAcquireGPUSwapchainTexture(command_buffer, window, &swapchain,
+	                                                     &width, &height);
+	if (metrics)
+	{
+		u64 now = SDL_GetTicksNS();
+		metrics->swapchain_wait_ms = (double)(now - stage_start) / 1000000.0;
+		stage_start = now;
+	}
+	if (!acquired)
 	{
 		SDL_CancelGPUCommandBuffer(command_buffer);
-		return 0;
+		goto done;
 	}
 	if (swapchain)
 	{
@@ -541,7 +606,19 @@ static int demo_render_draw_list(SDL_GPUDevice* device, SDL_Window* window,
 		{
 			char render_error[512];
 			SDL_strlcpy(render_error, SDL_GetError(), sizeof(render_error));
-			if (!SDL_SubmitGPUCommandBuffer(command_buffer))
+			if (metrics)
+			{
+				u64 now = SDL_GetTicksNS();
+				metrics->draw_encode_ms = (double)(now - stage_start) / 1000000.0;
+				stage_start = now;
+			}
+			int submitted = SDL_SubmitGPUCommandBuffer(command_buffer) ? 1 : 0;
+			if (metrics)
+			{
+				metrics->submit_ms = (double)(SDL_GetTicksNS() - stage_start) / 1000000.0;
+				metrics->submitted = submitted;
+			}
+			if (!submitted)
 			{
 				char submit_error[512];
 				SDL_strlcpy(submit_error, SDL_GetError(), sizeof(submit_error));
@@ -553,18 +630,64 @@ static int demo_render_draw_list(SDL_GPUDevice* device, SDL_Window* window,
 			{
 				SDL_SetError("%s", render_error[0] ? render_error : "Could not begin the demo render pass");
 			}
-			return 0;
+			goto done;
 		}
 		RgGuiGpuDrawDesc draw_desc = {0};
 		draw_desc.output_width = width;
 		draw_desc.output_height = height;
 		draw_desc.viewport = (SDL_Rect){0, 0, (int)width, (int)height};
-		rg_gui_gpu_draw(gpu, command_buffer, pass, &draw_desc, &upload);
+		RgGuiGpuStats draw_stats = rg_gui_gpu_draw(gpu, command_buffer, pass, &draw_desc, &upload);
+		if (metrics) metrics->draw_stats = draw_stats;
 		SDL_EndGPURenderPass(pass);
 	}
-	if (!SDL_SubmitGPUCommandBuffer(command_buffer)) return 0;
+	if (metrics)
+	{
+		u64 now = SDL_GetTicksNS();
+		metrics->draw_encode_ms = (double)(now - stage_start) / 1000000.0;
+		stage_start = now;
+	}
+	int submitted = SDL_SubmitGPUCommandBuffer(command_buffer) ? 1 : 0;
+	if (metrics)
+	{
+		metrics->submit_ms = (double)(SDL_GetTicksNS() - stage_start) / 1000000.0;
+		metrics->submitted = submitted;
+	}
+	if (!submitted) goto done;
 	if (out_presented) *out_presented = swapchain != NULL;
-	return 1;
+	if (metrics) metrics->presented = swapchain != NULL;
+	result = 1;
+	goto done;
+
+encode_failed:
+	if (metrics) metrics->encode_ms = (double)(SDL_GetTicksNS() - stage_start) / 1000000.0;
+done:
+	if (metrics)
+	{
+		const RgGuiRendererStats* text_stats = rg_gui_renderer_stats(text_renderer);
+		if (text_stats) metrics->text_stats = *text_stats;
+		metrics->total_ms = (double)(SDL_GetTicksNS() - render_start) / 1000000.0;
+	}
+	return result;
+}
+
+static int demo_render_draw_list(SDL_GPUDevice* device, SDL_Window* window,
+                                 RgGuiGpuRenderer* gpu, RgGuiRenderer* text_renderer,
+                                 RgGpuUploadRing* upload_ring,
+                                 const RgGuiDrawList* draw_list, u32 overlay_start,
+                                 int* out_presented)
+{
+	return demo_render_draw_list_profiled(device, window, gpu, text_renderer, upload_ring,
+	                                      draw_list, overlay_start, out_presented, NULL);
+}
+
+static int demo_render_frame_profiled(SDL_GPUDevice* device, SDL_Window* window,
+                                      RgGuiGpuRenderer* gpu, RgGuiRenderer* text_renderer,
+                                      RgGpuUploadRing* upload_ring, RgGuiContext* gui,
+                                      int* out_presented, DemoRenderMetrics* metrics)
+{
+	return demo_render_draw_list_profiled(device, window, gpu, text_renderer, upload_ring,
+	                                      rg_gui_draw_list(gui),
+	                                      rg_gui_draw_list_overlay_start(gui), out_presented, metrics);
 }
 
 static int demo_render_frame(SDL_GPUDevice* device, SDL_Window* window,
@@ -572,7 +695,6 @@ static int demo_render_frame(SDL_GPUDevice* device, SDL_Window* window,
                              RgGpuUploadRing* upload_ring, RgGuiContext* gui,
                              int* out_presented)
 {
-	return demo_render_draw_list(device, window, gpu, text_renderer, upload_ring,
-	                             rg_gui_draw_list(gui),
-	                             rg_gui_draw_list_overlay_start(gui), out_presented);
+	return demo_render_frame_profiled(device, window, gpu, text_renderer, upload_ring,
+	                                  gui, out_presented, NULL);
 }

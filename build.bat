@@ -35,6 +35,8 @@ if /I "%TARGET%"=="test_gpu" goto test_gpu
 if /I "%TARGET%"=="test_gpu_prepare" goto test_gpu_prepare
 if /I "%TARGET%"=="test_gpu_device_build" goto test_gpu_device_build
 if /I "%TARGET%"=="test_gpu_device" goto test_gpu_device
+if /I "%TARGET%"=="test_demo_lifecycle_build" goto test_demo_lifecycle_build
+if /I "%TARGET%"=="test_demo_lifecycle" goto test_demo_lifecycle
 if /I "%TARGET%"=="shaders" goto shaders
 if /I "%TARGET%"=="demo" goto demo
 if /I "%TARGET%"=="demo_minimal" goto demo_minimal
@@ -158,6 +160,9 @@ if not errorlevel 0 exit /b 1
 call "%~f0" test_gpu_device_build
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
+call "%~f0" test_demo_lifecycle_build
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
 call "%~f0" demo
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
@@ -172,6 +177,12 @@ call "%~f0" test_gpu_device
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
 call :run_demo_smoke_built
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+call :setup
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+test_demo_tearout.exe
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
 echo All rg_gui release tests passed.
@@ -251,6 +262,13 @@ if not errorlevel 0 exit /b 1
 test_gui_gpu.exe
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
+echo Building rg_gui_gpu preparation checks with optional SSE2 packing...
+cl %GUI_FLAGS% /DRG_GUI_GPU_USE_SSE2=1 tests\test_gui_gpu.c /Fo:test_gui_gpu_sse2.obj /Fe:test_gui_gpu_sse2.exe /link /LIBPATH:"%SDL3_LIB_DIR%" SDL3.lib
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+test_gui_gpu_sse2.exe
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
 exit /b 0
 
 :test_gpu_device
@@ -272,6 +290,23 @@ if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
 echo Building rg_gui_gpu SDL_GPU device checks...
 cl %GUI_FLAGS% tests\test_gui_gpu_device.c /Fe:test_gui_gpu_device.exe /link /LIBPATH:"%SDL3_LIB_DIR%" SDL3.lib
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+exit /b 0
+
+:test_demo_lifecycle
+call :test_demo_lifecycle_build
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+test_demo_tearout.exe
+exit /b %errorlevel%
+
+:test_demo_lifecycle_build
+call :setup
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+echo Building native tear-out lifecycle checks...
+cl %GUI_FLAGS% /DNDEBUG tests\test_demo_tearout.c /Fe:test_demo_tearout.exe /link /LIBPATH:"%SDL3_LIB_DIR%" SDL3.lib user32.lib
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
 exit /b 0
@@ -492,13 +527,14 @@ exit /b 0
 
 :clean
 rem Every target below is rooted at this batch file's verified repository path.
-del /q "%RG_GUI_ROOT%test_assets.exe" "%RG_GUI_ROOT%test_gui_no_string_ids.exe" "%RG_GUI_ROOT%test_gui.exe" "%RG_GUI_ROOT%test_renderer.exe" "%RG_GUI_ROOT%test_gui_gpu.exe" "%RG_GUI_ROOT%test_gui_gpu_device.exe" 2>nul
+del /q "%RG_GUI_ROOT%test_demo_tearout.exe" "%RG_GUI_ROOT%test_demo_tearout.obj" 2>nul
+del /q "%RG_GUI_ROOT%test_assets.exe" "%RG_GUI_ROOT%test_gui_no_string_ids.exe" "%RG_GUI_ROOT%test_gui.exe" "%RG_GUI_ROOT%test_renderer.exe" "%RG_GUI_ROOT%test_gui_gpu.exe" "%RG_GUI_ROOT%test_gui_gpu_sse2.exe" "%RG_GUI_ROOT%test_gui_gpu_device.exe" 2>nul
 del /q "%RG_GUI_ROOT%rg_gui_demo_minimal.exe" "%RG_GUI_ROOT%rg_gui_demo_full.exe" "%RG_GUI_ROOT%rg_gui_demo_tearout.exe" 2>nul
-del /q "%RG_GUI_ROOT%test_assets.obj" "%RG_GUI_ROOT%test_gui_no_string_ids.obj" "%RG_GUI_ROOT%test_gui_no_string_ids_negative.obj" "%RG_GUI_ROOT%test_gui.obj" "%RG_GUI_ROOT%test_renderer.obj" "%RG_GUI_ROOT%test_gui_gpu.obj" "%RG_GUI_ROOT%test_gui_gpu_device.obj" 2>nul
+del /q "%RG_GUI_ROOT%test_assets.obj" "%RG_GUI_ROOT%test_gui_no_string_ids.obj" "%RG_GUI_ROOT%test_gui_no_string_ids_negative.obj" "%RG_GUI_ROOT%test_gui.obj" "%RG_GUI_ROOT%test_renderer.obj" "%RG_GUI_ROOT%test_gui_gpu.obj" "%RG_GUI_ROOT%test_gui_gpu_sse2.obj" "%RG_GUI_ROOT%test_gui_gpu_device.obj" 2>nul
 del /q "%RG_GUI_ROOT%rg_gui_demo_minimal.obj" "%RG_GUI_ROOT%rg_gui_demo_full.obj" "%RG_GUI_ROOT%rg_gui_demo_tearout.obj" 2>nul
 del /q "%RG_GUI_ROOT%bake_demo_font.obj" "%RG_GUI_ROOT%bake_ui_font.obj" 2>nul
 if exist "%RG_GUI_ROOT%shaders\Compiled" rmdir /s /q "%RG_GUI_ROOT%shaders\Compiled"
-for %%f in (test_assets.exe test_gui_no_string_ids.exe test_gui.exe test_renderer.exe test_gui_gpu.exe test_gui_gpu_device.exe rg_gui_demo_minimal.exe rg_gui_demo_full.exe rg_gui_demo_tearout.exe test_assets.obj test_gui_no_string_ids.obj test_gui_no_string_ids_negative.obj test_gui.obj test_renderer.obj test_gui_gpu.obj test_gui_gpu_device.obj rg_gui_demo_minimal.obj rg_gui_demo_full.obj rg_gui_demo_tearout.obj bake_demo_font.obj bake_ui_font.obj) do if exist "%RG_GUI_ROOT%%%f" (
+for %%f in (test_assets.exe test_gui_no_string_ids.exe test_gui.exe test_renderer.exe test_gui_gpu.exe test_gui_gpu_sse2.exe test_gui_gpu_device.exe test_demo_tearout.exe rg_gui_demo_minimal.exe rg_gui_demo_full.exe rg_gui_demo_tearout.exe test_assets.obj test_gui_no_string_ids.obj test_gui_no_string_ids_negative.obj test_gui.obj test_renderer.obj test_gui_gpu.obj test_gui_gpu_sse2.obj test_gui_gpu_device.obj test_demo_tearout.obj rg_gui_demo_minimal.obj rg_gui_demo_full.obj rg_gui_demo_tearout.obj bake_demo_font.obj bake_ui_font.obj) do if exist "%RG_GUI_ROOT%%%f" (
 	echo Failed to remove build artifact: %%f
 	exit /b 1
 )

@@ -143,6 +143,7 @@ int main(int argc, char** argv)
 	RgGuiContext gui;
 	RgGuiInitDesc gui_desc = {0};
 	gui_desc.font = &demo_font.font;
+	gui_desc.text_lookup = &demo_font.text_lookup;
 	gui_desc.max_draw_cmds = 4096u;
 	gui_desc.text_buffer_size = KB(64);
 	size_t gui_memory_size = rg_gui_memory_required(&gui_desc);

@@ -70,10 +70,13 @@ static void test_font_init(TestRendererBaseFixture* fixture)
 	fixture->kernings[0] = (RgTextKerning){'A', 'B', -1};
 }
 
-static int test_fixture_init(TestRendererBaseFixture* fixture, const RgGuiRendererBaseLimits* requested)
+static int test_fixture_init_font(TestRendererBaseFixture* fixture,
+                                  const RgGuiRendererBaseLimits* requested,
+                                  const RgTextFont* font)
 {
 	memset(fixture, 0, sizeof(*fixture));
 	test_font_init(fixture);
+	if (font) fixture->font = *font;
 	size_t memory_size = rg_gui_renderer_base_memory_required(requested);
 	if (memory_size == SIZE_MAX)
 	{
@@ -93,6 +96,11 @@ static int test_fixture_init(TestRendererBaseFixture* fixture, const RgGuiRender
 	desc.font = &fixture->font;
 	if (requested) desc.limits = *requested;
 	return rg_gui_renderer_base_init(&fixture->gui4, &fixture->arena, &desc);
+}
+
+static int test_fixture_init(TestRendererBaseFixture* fixture, const RgGuiRendererBaseLimits* requested)
+{
+	return test_fixture_init_font(fixture, requested, NULL);
 }
 
 static void test_fixture_free(TestRendererBaseFixture* fixture)
@@ -138,6 +146,143 @@ static RgGuiDrawList test_draw_list(RgGuiDrawCmd* cmds, u32 count)
 	list.count = count;
 	list.capacity = count;
 	return list;
+}
+
+static void test_ascii_lookup_table_equivalence(void)
+{
+	/* Manual fonts retain their first matching entry, even if its advance is zero. */
+	RgTextGlyph glyphs[] = {
+	    {'A', 0, 0, 5, 7, 0, 1, 0}, {0xFFFDu, 5, 0, 4, 7, 0, 1, 5},
+	    {'?', 9, 0, 4, 7, 0, 1, 4}, {0u, 0, 0, 0, 0, 0, 0, 0},
+	    {127u, 13, 0, 4, 7, 0, 1, 4}, {'A', 17, 0, 5, 7, 0, 1, 99},
+	    {0xFFFDu, 22, 0, 4, 7, 0, 1, 99}};
+	RgTextKerning pairs[] = {
+	    {'A', '?', 0}, {127u, 0u, -3}, {'A', '?', 8}, {0u, 'A', 2},
+	    {'A', 128u, -9}, {128u, 'A', 9}, {'A', 'A', -1},
+	    {'A', 'A', 0}, {127u, 0u, 7}};
+	TestRendererBaseFixture font_owner = {0};
+	test_font_init(&font_owner);
+	RgTextFont* font = &font_owner.font;
+	font->glyphs = glyphs;
+	font->glyph_count = font->glyph_capacity = (u32)RG_ARRAY_COUNT(glyphs);
+	font->kernings = pairs;
+	font->kerning_count = font->kerning_capacity = (u32)RG_ARRAY_COUNT(pairs);
+	const u32 fallbacks[] = {'?', 0xFFFDu, 0u, UINT32_MAX};
+	RgGuiRendererBaseLimits limits = {1u, 2u, 32u, 8u, 8u, 1u};
+	for (u32 variant = 0u; variant < RG_ARRAY_COUNT(fallbacks) + 2u; variant++)
+	{
+		font->fallback_codepoint = fallbacks[variant % RG_ARRAY_COUNT(fallbacks)];
+		if (variant == RG_ARRAY_COUNT(fallbacks)) font->kernings = NULL;
+		if (variant == RG_ARRAY_COUNT(fallbacks) + 1u)
+		{
+			font->kernings = pairs;
+			font->kerning_count = 0u;
+		}
+		TestRendererBaseFixture fixture;
+		TEST_ASSERT(test_fixture_init_font(&fixture, &limits, font), "manual font init");
+		TEST_ASSERT(fixture.gui4.ascii_glyphs['A'] == &glyphs[0], "first duplicate glyph wins");
+		TEST_ASSERT(fixture.gui4.ascii_kerning['A' * 128u + '?'] == 0,
+		            "zero first kerning is not overwritten by duplicate");
+		for (u32 left = 0u; left < 128u; left++)
+		{
+			TEST_ASSERT(fixture.gui4.ascii_glyphs[left] == rg_text_find_glyph(font, left),
+			            "ASCII glyph table matches public lookup");
+			for (u32 right = 0u; right < 128u; right++)
+				TEST_ASSERT(fixture.gui4.ascii_kerning[left * 128u + right] ==
+				                rg_text_find_kerning(font, left, right),
+				            "ASCII kerning table matches public lookup");
+		}
+		test_fixture_free(&fixture);
+	}
+	TEST_PASS();
+}
+
+static const char* const test_layout_texts[] = {
+    "XA", "AX", "AXB", "A\xC3\xA9" "A", "A\rB\nA\r\nB",
+    "A \tA", "A\xFF" "A", "A\xF0\x9F\x98\x80" "B"};
+static const f32 test_layout_scales[] = {0.0f, 1.0f, 0.7f, -0.5f};
+static const u32 test_layout_capacities[] = {0u, 1u, 2u, 8u};
+
+static void test_layout_font_init(TestRendererBaseFixture* font_owner, u32 variant)
+{
+	static RgTextKerning pairs[] = {
+	    {'A', 'B', -1}, {'?', 'A', -2}, {'A', '?', 1}, {'A', 'X', -9},
+	    {'A', 0xE9u, -3}, {0xE9u, 'A', -4}, {' ', 'A', 2}, {'A', ' ', -2}};
+	test_font_init(font_owner);
+	font_owner->font.kernings = pairs;
+	font_owner->font.kerning_count = font_owner->font.kerning_capacity = (u32)RG_ARRAY_COUNT(pairs);
+	font_owner->font.glyph_count = variant == 2u ? 5u : 4u;
+	font_owner->font.fallback_codepoint = variant == 0u ? '?' : variant == 1u ? UINT32_MAX : 0xE9u;
+}
+
+static int test_cached_quad_matches(const RgGuiRendererBaseCachedQuad* actual,
+                                    const RgTextQuad* expected)
+{
+	return test_float_equal(actual->x, expected->x0) &&
+	       test_float_equal(actual->y, expected->y0) &&
+	       test_float_equal(actual->w, expected->x1 - expected->x0) &&
+	       test_float_equal(actual->h, expected->y1 - expected->y0) &&
+	       actual->u0 == (u16)(expected->u0 * 64.0f + 0.5f) &&
+	       actual->v0 == (u16)(expected->v0 * 32.0f + 0.5f) &&
+	       actual->u1 == (u16)(expected->u1 * 64.0f + 0.5f) &&
+	       actual->v1 == (u16)(expected->v1 * 32.0f + 0.5f);
+}
+
+static void test_layout_fallbacks_and_capacity(void)
+{
+	RgGuiRendererBaseLimits limits = {1u, 2u, 64u, 8u, 8u, 1u};
+	for (u32 variant = 0u; variant < 3u; variant++)
+	{
+		TestRendererBaseFixture font_owner = {0}, fixture;
+		test_layout_font_init(&font_owner, variant);
+		TEST_ASSERT(test_fixture_init_font(&fixture, &limits, &font_owner.font), "layout fixture init");
+		for (u32 t = 0u; t < RG_ARRAY_COUNT(test_layout_texts); t++)
+		for (u32 s = 0u; s < RG_ARRAY_COUNT(test_layout_scales); s++)
+		for (u32 c = 0u; c < RG_ARRAY_COUNT(test_layout_capacities); c++)
+		{
+			const char* text = test_layout_texts[t];
+			f32 scale = test_layout_scales[s];
+			u32 capacity = test_layout_capacities[c];
+			RgTextQuad expected[8];
+			RgGuiRendererBaseCachedQuad cached[9], guard;
+			RgGuiRendererBaseInstance instances[9], instance_guard;
+			memset(cached, 0xA5, sizeof(cached));
+			memset(&guard, 0xA5, sizeof(guard));
+			memset(instances, 0xA5, sizeof(instances));
+			memset(&instance_guard, 0xA5, sizeof(instance_guard));
+			size_t count = rg_text_build_quads(&fixture.font, text, strlen(text), 0, 0, scale,
+			                                  (RgTextColor){1, 1, 1, 1}, expected, capacity);
+			TEST_ASSERT(rg_gui_renderer_base_build_cached(&fixture.gui4, text, strlen(text), scale,
+			                cached, capacity) == count, "cached layout count matches rg_text");
+			for (u32 q = 0u; q < count; q++)
+				TEST_ASSERT(test_cached_quad_matches(&cached[q], &expected[q]),
+				            "cached layout geometry matches resolved glyph semantics");
+			const rg_vec2 origin = {.x = 17.25f, .y = -3.5f};
+			TEST_ASSERT(rg_text_build_quads(&fixture.font, text, strlen(text), origin.x, origin.y, scale,
+			                (RgTextColor){1, 1, 1, 1}, expected, capacity) == count, "translated count");
+			TEST_ASSERT(rg_gui_renderer_base_build_instances(&fixture.gui4, text, strlen(text), scale,
+			                origin, UINT32_MAX, instances, capacity) == count, "reference instance count");
+			for (u32 q = 0u; q < count; q++)
+			{
+				const RgGuiRendererBaseInstance* actual = &instances[q];
+				TEST_ASSERT(test_float_equal(actual->x, expected[q].x0) &&
+				                test_float_equal(actual->y, expected[q].y0) &&
+				                test_float_equal(actual->w, expected[q].x1 - expected[q].x0) &&
+				                test_float_equal(actual->h, expected[q].y1 - expected[q].y0),
+				            "reference instance geometry matches rg_text");
+				TEST_ASSERT(actual->u0 == cached[q].u0 && actual->v0 == cached[q].v0 &&
+				                actual->u1 == cached[q].u1 && actual->v1 == cached[q].v1 &&
+				                actual->color == UINT32_MAX && actual->padding == 0u,
+				            "instance texture coordinates and color preserved");
+			}
+			for (u32 q = (u32)count; q < RG_ARRAY_COUNT(cached); q++)
+				TEST_ASSERT(memcmp(&cached[q], &guard, sizeof(guard)) == 0 &&
+				                memcmp(&instances[q], &instance_guard, sizeof(instance_guard)) == 0,
+				            "layout writes only emitted quads within capacity");
+		}
+		test_fixture_free(&fixture);
+	}
+	TEST_PASS();
 }
 
 static void test_defaults_init_and_rollback(void)
@@ -610,6 +755,8 @@ int main(int argc, char** argv)
 	printf("Running test-only reference renderer CPU tests...\n\n");
 
 	test_defaults_init_and_rollback();
+	test_ascii_lookup_table_equivalence();
+	test_layout_fallbacks_and_capacity();
 	test_geometry_parity_and_warm_cache();
 	test_cache_copy_mutation_and_scale_key();
 	test_static_identity_and_dynamic_fallback();

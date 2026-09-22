@@ -10,6 +10,7 @@ hinted `Inter-Medium.ttf` in the
 | Item | Recorded value |
 | --- | --- |
 | Source TTF SHA-256 | `97ad806f526e41546d46365bb3a393145f75b7b1568913db74549ad8b8dba872` |
+| `rg_text` source revision | `4b98c6d38d4de1398ebb0970fc8e0e3db01bafa5` |
 | Baker vcpkg baseline | `91e8cb4be8195112ea3a9c7e5846bd0b3ff74673` |
 | Baker triplet | `x64-windows` |
 | FreeType | `2.14.3#0` (default features disabled) |
@@ -32,11 +33,11 @@ footprint.
 ## Reproduce
 
 From a sibling [`rg_text`](https://github.com/superwendel/rg_text) checkout, use
-a vcpkg checkout at the baseline recorded above, install the optional `baker`
-feature for the recorded triplet, set `RG_TEXT_TEST_FONT` to the source TTF, and
-run:
+the source revision and vcpkg baseline recorded above. Set `RG_TEXT_TEST_FONT`
+to the source TTF, then install the optional `baker` feature and run:
 
 ```bat
+git checkout 4b98c6d38d4de1398ebb0970fc8e0e3db01bafa5
 vcpkg install --x-feature=baker --triplet x64-windows
 build.bat rg_text_bake
 rg_text_bake.exe "%RG_TEXT_TEST_FONT%" "..\rg_gui\examples\assets\inter_medium_16" 16 32-126 1 256
@@ -52,11 +53,8 @@ Get-FileHash ..\rg_gui\examples\assets\inter_medium_16.rgba -Algorithm SHA256
 The recorded Windows baker environment reproduces both hashes above. Raster
 output can vary across dependency versions and platforms, so these hashes are a
 release check for that environment, not a cross-platform reproducibility claim.
-The Linux baker sanitizer job is compatibility coverage and does not produce
-the checked-in golden assets.
-Before the first public tag, replace `rg_text/main` in the `rg_gui` CI workflow
-with the full commit SHA of the released baker source; the dependency table in
-the root README tracks that remaining source-identity gate.
+The Linux baker sanitizer job is configured for compatibility coverage; it
+does not produce the checked-in assets.
 
 The raw atlas keeps FreeType and HarfBuzz out of the runtime dependency graph.
 `rg_text` parses the `.font` file, and the shared SDL3 bootstrap uploads the

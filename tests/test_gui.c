@@ -12,6 +12,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "test_gui_lookup.h"
+
 static int nearly_equal(f32 a, f32 b)
 {
 	return fabsf(a - b) <= 0.0001f;
@@ -741,6 +743,180 @@ static int test_viewport_and_input_router(RgGuiContext* gui)
 	return 1;
 }
 
+// Retain the previous prefix-measuring implementation as an independent oracle
+// for wrap decisions, including malformed UTF-8 and unusual font metrics.
+static size_t reference_wrap_line_end(const RgGuiContext* ctx, const char* buffer,
+                                      size_t start, size_t hard_end, f32 wrap_width)
+{
+	if (!ctx || !buffer || start >= hard_end) return start;
+	if (wrap_width <= 0.0f) return rg_gui_utf8_next_boundary(buffer, hard_end, start);
+	size_t best = start;
+	size_t last_space = start;
+	int has_space = 0;
+	for (size_t i = start; i < hard_end; i = rg_gui_utf8_next_boundary(buffer, hard_end, i))
+	{
+		if (buffer[i] == ' ' || buffer[i] == '\t')
+		{
+			last_space = i;
+			has_space = 1;
+		}
+		size_t candidate = rg_gui_utf8_next_boundary(buffer, hard_end, i);
+		f32 width = rg_gui_text_area_measure_range(ctx, buffer + start, candidate - start);
+		if (width <= wrap_width)
+		{
+			best = candidate;
+			continue;
+		}
+		if (has_space && last_space > start) return last_space + 1u;
+		if (best > start) return best;
+		return candidate;
+	}
+	return hard_end;
+}
+
+static int test_incremental_text_wrapping(void)
+{
+	RgGuiContext gui;
+	memset(&gui, 0, sizeof(gui));
+	RgTextFont font;
+	RgTextGlyph glyphs[3];
+	make_font(&font, glyphs);
+	RgTextKerning kernings[] = {
+		{'A', 'A', -3}, {'A', '?', 2}, {'?', 'A', -7},
+		{'M', 'A', -20}, {'A', 'M', 5}, {'?', '?', 1}
+	};
+	font.kernings = kernings;
+	font.kerning_count = (u32)RG_ARRAY_COUNT(kernings);
+	static const char* cases[] = {
+		"", "AAAAAAAAAAAAAAAAAAAAAAAAAAAA", "AMAMAMAM", " A  M\tA ",
+		"A\rM\nA\r\nM", "A\xc3\xa9" "M", "A\xf0\x9f\x98\x80" "A",
+		"A\xff\x80\xbf" "M", "\xc0\xaf" "A\xed\xa0\x80" "M",
+		"A\xf4\x90\x80\x80" "M", "A\xe2\x82", "\x80\xbf" "A"
+	};
+	const f32 heights[] = {-INFINITY, -10.0f, -0.0f, 0.7f, 10.0f, 20.0f, FLT_MAX, INFINITY, NAN};
+	const f32 widths[] = {-INFINITY, -1.0f, 0.0f, 0.25f, 4.0f, 8.0f, 17.0f, 31.0f, FLT_MAX, INFINITY, NAN};
+	for (u32 variant = 0u; variant < 4u; variant++)
+	{
+		gui.font = variant == 3u ? NULL : &font;
+		font.fallback_codepoint = variant == 1u ? UINT32_MAX : '?';
+		glyphs[1].x_advance = variant == 2u ? -8 : 8;
+		for (u32 h = 0u; h < RG_ARRAY_COUNT(heights); h++)
+		{
+			gui.style.text_height = heights[h];
+			for (u32 w = 0u; w < RG_ARRAY_COUNT(widths); w++)
+			{
+				for (u32 c = 0u; c < RG_ARRAY_COUNT(cases); c++)
+				{
+					const char* text = cases[c];
+					// Every byte length exercises truncated multibyte sequences.
+					for (size_t length = 0u; length <= strlen(text); length++)
+					{
+						for (size_t start = 0u; ; start = rg_gui_utf8_next_boundary(text, length, start))
+						{
+							size_t expected = reference_wrap_line_end(&gui, text, start, length, widths[w]);
+							size_t actual = rg_gui_text_area_wrap_line_end(&gui, text, start, length, widths[w]);
+							if (actual != expected)
+							{
+								fprintf(stderr, "incremental wrap differs: font=%u height=%u width=%u case=%u range=%zu..%zu: %zu != %zu\n",
+								        variant, h, w, c, start, length, actual, expected);
+								return 0;
+							}
+							if (start == length) break;
+						}
+					}
+				}
+			}
+		}
+	}
+	return 1;
+}
+
+static void text_area_test_key(RgInputEventQueue* events, SDL_Scancode key, SDL_Keymod modifiers)
+{
+	RgInputEvent* event = rg_input_event_queue_push(events);
+	event->kind = RG_INPUT_EVENT_KEY_DOWN;
+	event->data.key.scancode = key;
+	event->modifiers = modifiers;
+}
+
+static int test_text_area_layout_edits(RgGuiContext* gui)
+{
+	RgGuiStyle saved_style = gui->style;
+	gui->style.padding = 0.0f;
+	gui->style.border_thickness = 0.0f;
+	gui->style.scroll_bar_width = 0.0f;
+	gui->style.text_height = 10.0f;
+	RgGuiTextAreaState area = {0};
+	const RgGuiId id = 0x7311u;
+	RgGuiRect rect = rg_gui_make_rect(0.0f, 0.0f, 16.0f, 200.0f);
+	char buffer[64] = "AAAAAAAA";
+	RgInputState input;
+	rg_input_init(&input);
+	input.mouse_x = -100;
+	input.mouse_y = -100;
+	rg_gui_begin_frame(gui, &input, 1.0f / 60.0f);
+	gui->focus_id = id;
+	gui->text_edit_state->active = 0;
+	(void)rg_gui_text_area(gui, &area, buffer, sizeof(buffer), rect, id);
+	rg_gui_end_frame(gui);
+	rg_gui_text_edit_set_cursor(gui->text_edit_state, 1u, 0);
+
+	RgInputEvent event_storage[8];
+	char event_text[32];
+	RgInputEventQueue events;
+	rg_input_event_queue_init(&events, event_storage, RG_ARRAY_COUNT(event_storage), event_text, sizeof(event_text));
+	text_area_test_key(&events, SDL_SCANCODE_DOWN, SDL_KMOD_NONE);
+	text_area_test_key(&events, SDL_SCANCODE_DOWN, SDL_KMOD_NONE);
+	text_area_test_key(&events, SDL_SCANCODE_LEFT, SDL_KMOD_LSHIFT);
+	RgInputEvent* replacement = rg_input_event_queue_push_text(&events, "M");
+	replacement->kind = RG_INPUT_EVENT_TEXT_INPUT;
+	text_area_test_key(&events, SDL_SCANCODE_UP, SDL_KMOD_NONE);
+	text_area_test_key(&events, SDL_SCANCODE_UP, SDL_KMOD_NONE);
+	RgInputEvent* preedit = rg_input_event_queue_push_text(&events, "AA");
+	preedit->kind = RG_INPUT_EVENT_TEXT_EDITING;
+	rg_gui_begin_frame_ex(gui, &input, &events, 0u, 1.0f / 60.0f);
+	int changed = rg_gui_text_area(gui, &area, buffer, sizeof(buffer), rect, id);
+	rg_gui_end_frame(gui);
+	if (!changed || strcmp(buffer, "AAAAMAAA") != 0 || gui->text_edit_state->cursor != 2u ||
+	    gui->text_edit_state->preedit_length != 2u || !nearly_equal(area.panel.content_height, 60.0f))
+	{
+		fprintf(stderr, "text area ordered edits/IME reused stale layout: %s cursor=%zu height=%g\n",
+		        buffer, gui->text_edit_state->cursor, (double)area.panel.content_height);
+		return 0;
+	}
+
+	// An external replacement of equal length must be seen in the next call,
+	// even when the edit state's content_version did not change.
+	rg_gui_text_edit_clear_preedit(gui->text_edit_state);
+	memcpy(buffer, "MMMMMMMM", 9u);
+	rg_gui_begin_frame(gui, &input, 1.0f / 60.0f);
+	(void)rg_gui_text_area(gui, &area, buffer, sizeof(buffer), rect, id);
+	rg_gui_end_frame(gui);
+	if (!nearly_equal(area.panel.content_height, 80.0f))
+	{
+		fprintf(stderr, "text area reused layout across external edits\n");
+		return 0;
+	}
+
+	// One invocation performs click picking, drag picking, and rendering.
+	input.mouse_x = 1;
+	input.mouse_y = 25;
+	input.current_mouse[RG_MOUSE_BUTTON_LEFT] = true;
+	rg_gui_begin_frame(gui, &input, 1.0f / 60.0f);
+	(void)rg_gui_text_area(gui, &area, buffer, sizeof(buffer), rect, id);
+	rg_gui_end_frame(gui);
+	if (gui->text_edit_state->cursor != 2u || !nearly_equal(area.panel.content_height, 80.0f))
+	{
+		fprintf(stderr, "text area click/drag layout disagreed with rendering\n");
+		return 0;
+	}
+	gui->text_edit_state->active = 0;
+	gui->focus_id = 0u;
+	gui->active_id = 0u;
+	gui->style = saved_style;
+	return 1;
+}
+
 int main(void)
 {
 	RgTextFont font;
@@ -897,7 +1073,9 @@ int main(void)
 
 	if (!test_dock_layout_validation(&gui) || !test_node_graph_bundle_validation() ||
 	    !test_integer_widget_boundaries(&gui) ||
-	    !test_viewport_and_input_router(&gui))
+	    !test_viewport_and_input_router(&gui) ||
+	    !test_incremental_text_wrapping() || !test_text_area_layout_edits(&gui) ||
+	    !test_text_lookup())
 	{
 		free(memory);
 		return 1;

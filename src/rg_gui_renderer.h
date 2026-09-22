@@ -99,10 +99,18 @@ typedef struct RgGuiRendererBaseRunInstance
 	f32 y;
 	u32 color;
 	u32 first_output_instance;
+	/* Host metadata: padding[0] is the source draw-command index; padding[1]
+	   is reserved. Both remain outside the shader's 24-byte payload. */
 	u32 padding[2];
 } RgGuiRendererBaseRunInstance;
 
 typedef char RgGuiRendererBaseRunInstanceMustBe32Bytes[(sizeof(RgGuiRendererBaseRunInstance) == 32u) ? 1 : -1];
+
+/** Source draw-list index for a prepared run or page segment. */
+RGINLINE u32 rg_gui_renderer_run_command_index(const RgGuiRendererBaseRunInstance* run)
+{
+	return run->padding[0];
+}
 
 typedef struct RgGuiRendererBaseRunPrepared
 {
@@ -393,12 +401,30 @@ static int rg_gui_renderer_base_init(RgGuiRendererBaseContext* ctx, RgArena* are
 	}
 
 	memset(ctx->hash_slots, 0, sizeof(u32) * limits.hash_slot_count);
+	memset(ctx->ascii_glyphs, 0, sizeof(*ctx->ascii_glyphs) * 128u);
+	memset(ctx->ascii_kerning, 0, sizeof(*ctx->ascii_kerning) * 128u * 128u);
+	const RgTextGlyph* fallback = NULL;
+	/* Reverse traversal preserves the first matching record in manually supplied
+	 * unsorted fonts, including duplicate kerning pairs whose advance is zero. */
+	for (u32 i = ctx->font->glyph_count; i > 0u; i--)
+	{
+		const RgTextGlyph* glyph = &ctx->font->glyphs[i - 1u];
+		if (glyph->codepoint < 128u) ctx->ascii_glyphs[glyph->codepoint] = glyph;
+		if (glyph->codepoint == ctx->font->fallback_codepoint) fallback = glyph;
+	}
 	for (u32 cp = 0u; cp < 128u; cp++)
 	{
-		ctx->ascii_glyphs[cp] = rg_text_find_glyph(ctx->font, cp);
-		for (u32 right = 0u; right < 128u; right++)
+		if (!ctx->ascii_glyphs[cp]) ctx->ascii_glyphs[cp] = fallback;
+	}
+	if (ctx->font->kernings)
+	{
+		for (u32 i = ctx->font->kerning_count; i > 0u; i--)
 		{
-			ctx->ascii_kerning[cp * 128u + right] = rg_text_find_kerning(ctx->font, cp, right);
+			const RgTextKerning* pair = &ctx->font->kernings[i - 1u];
+			if (pair->left < 128u && pair->right < 128u)
+			{
+				ctx->ascii_kerning[pair->left * 128u + pair->right] = pair->x_advance;
+			}
 		}
 	}
 
@@ -536,6 +562,7 @@ RGINLINE u32 rg_gui_renderer_base_build_cached(const RgGuiRendererBaseContext* c
 	f32 line_y = 0.0f;
 	f32 pen_x = 0.0f;
 	u32 count = 0u;
+	const RgTextGlyph* previous = NULL;
 	while (offset < text_size && count < capacity)
 	{
 		u32 cp = rg_text_decode_utf8(text, text_size, &offset);
@@ -544,13 +571,19 @@ RGINLINE u32 rg_gui_renderer_base_build_cached(const RgGuiRendererBaseContext* c
 			if (cp == '\r' && offset < text_size && text[offset] == '\n') offset++;
 			line_y += (f32)ctx->font->metrics.line_height * scale;
 			pen_x = 0.0f;
+			previous = NULL;
 			continue;
 		}
 
 		const RgTextGlyph* glyph = rg_gui_renderer_base_find_glyph(ctx, cp);
 		if (!glyph)
 		{
+			previous = NULL;
 			continue;
+		}
+		if (previous)
+		{
+			pen_x += (f32)rg_gui_renderer_base_find_kerning(ctx, previous->codepoint, glyph->codepoint) * scale;
 		}
 		if (glyph->w > 0 && glyph->h > 0)
 		{
@@ -566,15 +599,7 @@ RGINLINE u32 rg_gui_renderer_base_build_cached(const RgGuiRendererBaseContext* c
 		}
 
 		pen_x += (f32)glyph->x_advance * scale;
-		size_t next_offset = offset;
-		if (next_offset < text_size)
-		{
-			u32 next_cp = rg_text_decode_utf8(text, text_size, &next_offset);
-			if (next_cp != '\n' && next_cp != '\r')
-			{
-				pen_x += (f32)rg_gui_renderer_base_find_kerning(ctx, cp, next_cp) * scale;
-			}
-		}
+		previous = glyph;
 	}
 	return count;
 }
@@ -594,6 +619,7 @@ RGINLINE u32 rg_gui_renderer_base_build_instances(const RgGuiRendererBaseContext
 	f32 line_y = 0.0f;
 	f32 pen_x = 0.0f;
 	u32 count = 0u;
+	const RgTextGlyph* previous = NULL;
 	while (offset < text_size && count < capacity)
 	{
 		u32 cp = rg_text_decode_utf8(text, text_size, &offset);
@@ -602,13 +628,19 @@ RGINLINE u32 rg_gui_renderer_base_build_instances(const RgGuiRendererBaseContext
 			if (cp == '\r' && offset < text_size && text[offset] == '\n') offset++;
 			line_y += (f32)ctx->font->metrics.line_height * scale;
 			pen_x = 0.0f;
+			previous = NULL;
 			continue;
 		}
 
 		const RgTextGlyph* glyph = rg_gui_renderer_base_find_glyph(ctx, cp);
 		if (!glyph)
 		{
+			previous = NULL;
 			continue;
+		}
+		if (previous)
+		{
+			pen_x += (f32)rg_gui_renderer_base_find_kerning(ctx, previous->codepoint, glyph->codepoint) * scale;
 		}
 		if (glyph->w > 0 && glyph->h > 0)
 		{
@@ -626,15 +658,7 @@ RGINLINE u32 rg_gui_renderer_base_build_instances(const RgGuiRendererBaseContext
 		}
 
 		pen_x += (f32)glyph->x_advance * scale;
-		size_t next_offset = offset;
-		if (next_offset < text_size)
-		{
-			u32 next_cp = rg_text_decode_utf8(text, text_size, &next_offset);
-			if (next_cp != '\n' && next_cp != '\r')
-			{
-				pen_x += (f32)rg_gui_renderer_base_find_kerning(ctx, cp, next_cp) * scale;
-			}
-		}
+		previous = glyph;
 	}
 	return count;
 }
@@ -653,19 +677,7 @@ RGINLINE u64 rg_gui_renderer_base_key_hash(const char* text, size_t text_size,
 		hash ^= hash >> 33u;
 		return hash;
 	}
-	const u8* bytes = (const u8*)text;
-	u64 hash = 1469598103934665603ull;
-	for (size_t i = 0u; i < text_size; i++)
-	{
-		hash ^= bytes[i];
-		hash *= 1099511628211ull;
-	}
-	for (u32 shift = 0u; shift < 32u; shift += 8u)
-	{
-		hash ^= (u8)(scale_bits >> shift);
-		hash *= 1099511628211ull;
-	}
-	return hash;
+	return rg_hash_bytes(text, text_size, (u64)scale_bits);
 }
 
 RGINLINE u32 rg_gui_renderer_base_float_bits(f32 value)
@@ -1088,7 +1100,7 @@ static int rg_gui_renderer_base_prepare_run_stream(RgGuiRendererBaseContext* ctx
 		output->y = cmd->data.text.pos.y;
 		output->color = rg_gui_renderer_base_pack_color(cmd->data.text.color);
 		output->first_output_instance = output_glyph_count;
-		output->padding[0] = 0u;
+		output->padding[0] = i;
 		output->padding[1] = 0u;
 		output_glyph_count += run->quad_count;
 		batch->instance_count++;
@@ -1539,6 +1551,7 @@ RGINLINE u32 rg_gui_renderer_build_pages(const RgGuiRenderer* ctx, const char* t
 	f32 line_y = 0.0f;
 	f32 pen_x = 0.0f;
 	u32 count = 0u;
+	const RgTextGlyph* previous = NULL;
 	u32 page = first_page;
 	u32 page_offset = 0u;
 	while (offset < text_size && count < capacity)
@@ -1549,10 +1562,19 @@ RGINLINE u32 rg_gui_renderer_build_pages(const RgGuiRenderer* ctx, const char* t
 			if (cp == '\r' && offset < text_size && text[offset] == '\n') offset++;
 			line_y += (f32)ctx->core.font->metrics.line_height * scale;
 			pen_x = 0.0f;
+			previous = NULL;
 			continue;
 		}
 		const RgTextGlyph* glyph = rg_gui_renderer_base_find_glyph(&ctx->core, cp);
-		if (!glyph) continue;
+		if (!glyph)
+		{
+			previous = NULL;
+			continue;
+		}
+		if (previous)
+		{
+			pen_x += (f32)rg_gui_renderer_base_find_kerning(&ctx->core, previous->codepoint, glyph->codepoint) * scale;
+		}
 		if (glyph->w > 0 && glyph->h > 0)
 		{
 			if (page_offset == ctx->page_quads)
@@ -1573,13 +1595,7 @@ RGINLINE u32 rg_gui_renderer_build_pages(const RgGuiRenderer* ctx, const char* t
 			count++;
 		}
 		pen_x += (f32)glyph->x_advance * scale;
-		size_t next_offset = offset;
-		if (next_offset < text_size)
-		{
-			u32 next_cp = rg_text_decode_utf8(text, text_size, &next_offset);
-			if (next_cp != '\n' && next_cp != '\r')
-				pen_x += (f32)rg_gui_renderer_base_find_kerning(&ctx->core, cp, next_cp) * scale;
-		}
+		previous = glyph;
 	}
 	return count;
 }
@@ -1937,7 +1953,7 @@ RGINLINE int rg_gui_renderer_prepare(RgGuiRenderer* ctx,
 			output->y = cmd->data.text.pos.y;
 			output->color = packed_color;
 			output->first_output_instance = output_glyph_count;
-			output->padding[0] = 0u;
+			output->padding[0] = i;
 			output->padding[1] = 0u;
 			output_glyph_count += quad_count;
 			batch->instance_count++;
@@ -1955,7 +1971,7 @@ RGINLINE int rg_gui_renderer_prepare(RgGuiRenderer* ctx,
 			output->y = cmd->data.text.pos.y;
 			output->color = packed_color;
 			output->first_output_instance = output_glyph_count;
-			output->padding[0] = 0u;
+			output->padding[0] = i;
 			output->padding[1] = 0u;
 			output_glyph_count += count;
 			remaining -= count;

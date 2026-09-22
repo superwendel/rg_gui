@@ -20,6 +20,20 @@
 #include <SDL3/SDL.h>
 #include <string.h>
 
+// Optional rectangle/image packing backend. SSE2 is baseline on x64; 32-bit
+// x86 builds must enable SSE2 in their compiler target. Other targets use C.
+#ifndef RG_GUI_GPU_USE_SSE2
+#define RG_GUI_GPU_USE_SSE2 0
+#endif
+
+#if RG_GUI_GPU_USE_SSE2 && (defined(__SSE2__) || defined(_M_X64) || \
+    (defined(_M_IX86_FP) && _M_IX86_FP >= 2))
+#include <emmintrin.h>
+#define RG_GUI_GPU_SSE2_ENABLED 1
+#else
+#define RG_GUI_GPU_SSE2_ENABLED 0
+#endif
+
 #ifndef RG_GUI_GPU_RUN_ASSERT
 #include <assert.h>
 #define RG_GUI_GPU_RUN_ASSERT(x) assert(x)
@@ -921,12 +935,34 @@ RGINLINE int rg_gui_gpu_add_rect_vertices(RgGuiGpuRenderer* renderer,
 	    renderer->vertex_capacity - renderer->vertex_count < 6u)
 		return 0;
 	RgGuiGpuVertex* out = &renderer->vertices[renderer->vertex_count];
+#if RG_GUI_GPU_SSE2_ENABLED
+	// Zero the unused lanes so packing does not perform extra arithmetic on
+	// rectangle widths/heights (which could overflow even when x+w is finite).
+	__m128 r = _mm_castsi128_ps(_mm_loadl_epi64((const __m128i*)&rect.x));
+	__m128 r1 = _mm_add_ps(r, _mm_castsi128_ps(_mm_loadl_epi64((const __m128i*)&rect.w)));
+	__m128 t = _mm_castsi128_ps(_mm_loadl_epi64((const __m128i*)&uv.x));
+	__m128 t1 = _mm_add_ps(t, _mm_castsi128_ps(_mm_loadl_epi64((const __m128i*)&uv.w)));
+	__m128 c = _mm_castsi128_ps(_mm_cvtsi32_si128((int)color));
+	__m128 cu0 = _mm_unpacklo_ps(c, t);
+	__m128 cu1 = _mm_unpacklo_ps(c, t1);
+	__m128 v00 = _mm_movelh_ps(r, cu0);
+	__m128 v10 = _mm_movelh_ps(_mm_move_ss(r, r1), cu1);
+	__m128 v11 = _mm_movelh_ps(r1, cu1);
+	__m128 v01 = _mm_movelh_ps(_mm_move_ss(r1, r), cu0);
+	_mm_storeu_ps((f32*)&out[0], v00); out[0].v = uv.y;
+	_mm_storeu_ps((f32*)&out[1], v10); out[1].v = uv.y;
+	_mm_storeu_ps((f32*)&out[2], v11); out[2].v = uv.y + uv.h;
+	_mm_storeu_ps((f32*)&out[3], v00); out[3].v = uv.y;
+	_mm_storeu_ps((f32*)&out[4], v11); out[4].v = uv.y + uv.h;
+	_mm_storeu_ps((f32*)&out[5], v01); out[5].v = uv.y + uv.h;
+#else
 	rg_gui_gpu_set_vertex(&out[0], rect.x, rect.y, color, uv.x, uv.y);
 	rg_gui_gpu_set_vertex(&out[1], rect.x + rect.w, rect.y, color, uv.x + uv.w, uv.y);
 	rg_gui_gpu_set_vertex(&out[2], rect.x + rect.w, rect.y + rect.h, color, uv.x + uv.w, uv.y + uv.h);
 	rg_gui_gpu_set_vertex(&out[3], rect.x, rect.y, color, uv.x, uv.y);
 	rg_gui_gpu_set_vertex(&out[4], rect.x + rect.w, rect.y + rect.h, color, uv.x + uv.w, uv.y + uv.h);
 	rg_gui_gpu_set_vertex(&out[5], rect.x, rect.y + rect.h, color, uv.x, uv.y + uv.h);
+#endif
 	renderer->vertex_count += 6u;
 	return 1;
 }
@@ -1031,36 +1067,23 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 		}
 		if (cmd->type == RG_GUI_CMD_TEXT)
 		{
-			const char* text = cmd->data.text.text ? cmd->data.text.text : "";
-			u32 expected = rg_gui_renderer_base_count_quads(
-			    &text_renderer->core, text, strlen(text));
-			if (!expected || run_cursor >= renderer->text_prepared->run_count) continue;
-
-			u32 packed_color = rg_gui_renderer_base_pack_color(cmd->data.text.color);
+			if (run_cursor >= renderer->text_prepared->run_count) continue;
 			const RgGuiRendererRun* first_run = &renderer->text_prepared->runs[run_cursor];
-			if (first_run->x != cmd->data.text.pos.x || first_run->y != cmd->data.text.pos.y ||
-			    first_run->color != packed_color)
-				continue;
+			/* A skipped command has no segments. Match the recorded source index
+			   so identical positions/colors cannot consume another command's text. */
+			if (rg_gui_renderer_run_command_index(first_run) != i) continue;
 
-			u32 cursor = run_cursor;
 			u32 glyph_count = 0u;
 			u32 first_glyph = first_run->first_output_instance;
-			while (cursor < renderer->text_prepared->run_count && glyph_count < expected)
+			do
 			{
-				const RgGuiRendererRun* run = &renderer->text_prepared->runs[cursor];
-				if (run->x != cmd->data.text.pos.x || run->y != cmd->data.text.pos.y ||
-				    run->color != packed_color || run->first_output_instance != first_glyph + glyph_count)
-					break;
-				glyph_count += run->quad_count;
-				cursor++;
+				glyph_count += renderer->text_prepared->runs[run_cursor++].quad_count;
 			}
-			if (glyph_count == expected)
-			{
-				if (!rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_TEXT, 0u, 0u,
-				                         first_glyph, glyph_count, clip_enabled, clip))
-					goto capacity_failure;
-				run_cursor = cursor;
-			}
+			while (run_cursor < renderer->text_prepared->run_count &&
+			       rg_gui_renderer_run_command_index(&renderer->text_prepared->runs[run_cursor]) == i);
+			if (!rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_TEXT, 0u, 0u,
+			                         first_glyph, glyph_count, clip_enabled, clip))
+				goto capacity_failure;
 		}
 	}
 	return 1;

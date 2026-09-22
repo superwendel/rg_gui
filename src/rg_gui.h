@@ -74,6 +74,7 @@
 #if defined(RG_GUI_INCLUDED)
 #error rg_gui.h is include-once; include it once in the unity translation unit
 #endif
+#define RG_GUI_HAS_TEXT_LOOKUP 1
 #define RG_GUI_INCLUDED 1
 
 #define RG_GUI_VERSION_MAJOR 0
@@ -393,6 +394,19 @@
 typedef u64 RgGuiId;
 typedef uintptr_t RgGuiTexture;
 typedef u64 RgGuiImageMaterial;
+
+/**
+ * Optional caller-owned ASCII lookup tables shared by GUI contexts using one font.
+ * The font, its glyph/kerning arrays, and these tables must remain alive and unchanged
+ * while attached to a context. Rebuild the tables after changing the font.
+ * Uses 66,568 bytes on 64-bit targets; no arena allocation is added by default.
+ */
+typedef struct RgGuiTextLookup
+{
+	const RgTextFont* font;
+	const RgTextGlyph* ascii_glyphs[128];
+	i32 ascii_kerning[128 * 128];
+} RgGuiTextLookup;
 
 typedef struct RgGuiContext RgGuiContext;
 typedef struct RgGuiTableColumn RgGuiTableColumn;
@@ -1613,6 +1627,7 @@ typedef struct RgGuiContext
 	RgGuiId input_events_changed_id;
 	RgGuiId input_events_submit_id;
 	RgGuiDiagnostics diagnostics;
+	const RgGuiTextLookup* text_lookup;
 } RgGuiContext;
 
 typedef struct RgGuiInputRouter
@@ -1647,6 +1662,7 @@ typedef struct RgGuiInitDesc
 	u32 text_length_cache_size;
 	u32 menu_width_cache_size;
 	u32 tab_scroll_cache_size;
+	const RgGuiTextLookup* text_lookup; // Optional; ignored when its font differs from font.
 } RgGuiInitDesc;
 
 typedef enum RgGuiTextInputFlags
@@ -1794,6 +1810,12 @@ typedef enum RgGuiDragTargetFlags
  *             capacity fields select their documented defaults.
  */
 RGINLINE int rg_gui_init(RgGuiContext* ctx, RgArena* arena, const RgGuiInitDesc* desc);
+
+/**
+ * @brief Build optional caller-owned ASCII tables for an immutable font
+ * @return 1 on success, or 0 for an invalid font/lookup; a supplied lookup is cleared on failure
+ */
+RGINLINE int rg_gui_text_lookup_init(RgGuiTextLookup* lookup, const RgTextFont* font);
 
 /**
  * @brief Return an alignment-safe upper bound for the persistent arena bytes used by rg_gui_init
@@ -3602,6 +3624,73 @@ RGINLINE RgGuiStyle rg_gui_style_default(void)
 	style.color_drop_shadow = rg_gui_color(0.0f, 0.0f, 0.0f, 0.35f);
 
 	return style;
+}
+
+RGINLINE int rg_gui_text_lookup_init(RgGuiTextLookup* lookup, const RgTextFont* font)
+{
+	if (!lookup)
+	{
+		return 0;
+	}
+	memset(lookup, 0, sizeof(*lookup));
+	if (!font || !font->glyphs || font->glyph_count == 0u)
+	{
+		return 0;
+	}
+
+	// Reverse traversal preserves the first matching entry in caller-supplied arrays.
+	const RgTextGlyph* fallback = NULL;
+	for (u32 i = font->glyph_count; i > 0u; i--)
+	{
+		const RgTextGlyph* glyph = &font->glyphs[i - 1u];
+		if (glyph->codepoint < 128u)
+		{
+			lookup->ascii_glyphs[glyph->codepoint] = glyph;
+		}
+		if (glyph->codepoint == font->fallback_codepoint)
+		{
+			fallback = glyph;
+		}
+	}
+	for (u32 cp = 0u; cp < 128u; cp++)
+	{
+		if (!lookup->ascii_glyphs[cp]) lookup->ascii_glyphs[cp] = fallback;
+	}
+	if (font->kernings)
+	{
+		for (u32 i = font->kerning_count; i > 0u; i--)
+		{
+			const RgTextKerning* pair = &font->kernings[i - 1u];
+			if (pair->left < 128u && pair->right < 128u)
+			{
+				lookup->ascii_kerning[pair->left * 128u + pair->right] = pair->x_advance;
+			}
+		}
+	}
+	lookup->font = font;
+	return 1;
+}
+
+RGINLINE const RgTextGlyph* rg_gui_text_find_glyph(const RgGuiContext* ctx, u32 codepoint)
+{
+	const RgTextFont* font = ctx ? ctx->font : NULL;
+	const RgGuiTextLookup* lookup = ctx ? ctx->text_lookup : NULL;
+	if (lookup && lookup->font == font && codepoint < 128u)
+	{
+		return lookup->ascii_glyphs[codepoint];
+	}
+	return rg_text_find_glyph(font, codepoint);
+}
+
+RGINLINE i32 rg_gui_text_find_kerning(const RgGuiContext* ctx, u32 left, u32 right)
+{
+	const RgTextFont* font = ctx ? ctx->font : NULL;
+	const RgGuiTextLookup* lookup = ctx ? ctx->text_lookup : NULL;
+	if (lookup && lookup->font == font && left < 128u && right < 128u)
+	{
+		return lookup->ascii_kerning[left * 128u + right];
+	}
+	return rg_text_find_kerning(font, left, right);
 }
 
 RGINLINE f32 rg_gui_text_base_scale(const RgGuiContext* ctx)
@@ -8127,6 +8216,11 @@ RGINLINE size_t rg_gui_text_area_wrap_line_end(const RgGuiContext* ctx, const ch
 	size_t best = start;
 	size_t last_space = start;
 	int has_space = 0;
+	f32 scale = rg_gui_text_base_scale(ctx);
+	f32 line_width = 0.0f;
+	f32 max_width = 0.0f;
+	const RgTextGlyph* previous = NULL;
+	size_t offset = start;
 	for (size_t i = start; i < hard_end; i = rg_gui_utf8_next_boundary(buffer, hard_end, i))
 	{
 		if (buffer[i] == ' ' || buffer[i] == '\t')
@@ -8136,7 +8230,35 @@ RGINLINE size_t rg_gui_text_area_wrap_line_end(const RgGuiContext* ctx, const ch
 		}
 
 		size_t candidate = rg_gui_utf8_next_boundary(buffer, hard_end, i);
-		f32 width = rg_gui_text_area_measure_range(ctx, buffer + start, candidate - start);
+		// Accumulate the same operations as rg_text_measure without remeasuring
+		// each growing prefix. Decode up to the GUI boundary, including malformed
+		// byte sequences that produce more than one replacement glyph.
+		while (ctx->font && scale != 0.0f && offset < candidate)
+		{
+			u32 cp = rg_text_decode_utf8(buffer, candidate, &offset);
+			if (cp == '\r' || cp == '\n')
+			{
+				if (cp == '\r' && offset < candidate && buffer[offset] == '\n') offset++;
+				if (line_width > max_width) max_width = line_width;
+				line_width = 0.0f;
+				previous = NULL;
+				continue;
+			}
+			const RgTextGlyph* glyph = rg_gui_text_find_glyph(ctx, cp);
+			if (!glyph)
+			{
+				previous = NULL;
+				continue;
+			}
+			if (previous)
+			{
+				line_width += (f32)rg_gui_text_find_kerning(
+				    ctx, previous->codepoint, glyph->codepoint) * scale;
+			}
+			line_width += (f32)glyph->x_advance * scale;
+			previous = glyph;
+		}
+		f32 width = line_width > max_width ? line_width : max_width;
 		if (width <= wrap_width)
 		{
 			best = candidate;
@@ -8230,6 +8352,46 @@ RGINLINE u32 rg_gui_text_area_build_visual_lines(const RgGuiContext* ctx,
 		lines[count++] = (RgGuiTextAreaVisualLine){0u, 0u, 0};
 	}
 	return count;
+}
+
+// This cache lives only for one widget invocation. Content edits change the
+// version, and IME display text uses a different buffer. No text storage is
+// retained between frames, so external edits are observed on the next call.
+typedef struct RgGuiTextAreaLayout
+{
+	RgGuiTextAreaVisualLine* lines;
+	const char* buffer;
+	const RgTextFont* font;
+	size_t length;
+	u32 content_version;
+	u32 scale_bits;
+	u32 wrap_width_bits;
+	u32 count;
+} RgGuiTextAreaLayout;
+
+RGINLINE u32 rg_gui_text_area_ensure_layout(const RgGuiContext* ctx,
+                                            RgGuiTextAreaLayout* layout,
+                                            const char* buffer, size_t length,
+                                            u32 content_version, f32 wrap_width)
+{
+	u32 scale_bits = rg_gui_text_scale_bits(ctx);
+	u32 wrap_width_bits = 0u;
+	memcpy(&wrap_width_bits, &wrap_width, sizeof(wrap_width_bits));
+	if (layout->count == 0u || layout->buffer != buffer ||
+	    layout->length != length || layout->content_version != content_version ||
+	    layout->font != ctx->font || layout->scale_bits != scale_bits ||
+	    layout->wrap_width_bits != wrap_width_bits)
+	{
+		layout->count = rg_gui_text_area_build_visual_lines(
+		    ctx, buffer, length, wrap_width, layout->lines, RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
+		layout->buffer = buffer;
+		layout->font = ctx->font;
+		layout->length = length;
+		layout->content_version = content_version;
+		layout->scale_bits = scale_bits;
+		layout->wrap_width_bits = wrap_width_bits;
+	}
+	return layout->count;
 }
 
 RGINLINE u32 rg_gui_text_area_find_visual_line(const RgGuiTextAreaVisualLine* lines,
@@ -8357,6 +8519,7 @@ RGINLINE int rg_gui_text_area_move_cursor_wrapped(const RgGuiContext* ctx,
 typedef struct RgGuiTextAreaOrderedKeyContext
 {
 	f32 wrap_width;
+	RgGuiTextAreaLayout* layout;
 } RgGuiTextAreaOrderedKeyContext;
 
 static RG_NOINLINE void rg_gui_text_area_process_ordered_key(
@@ -8371,10 +8534,13 @@ static RG_NOINLINE void rg_gui_text_area_process_ordered_key(
 
 	int direction = event->data.key.scancode == SDL_SCANCODE_UP ? -1 : 1;
 	int selecting = (event->modifiers & (SDL_KMOD_LSHIFT | SDL_KMOD_RSHIFT)) != 0;
-	RgGuiTextAreaVisualLine lines[RG_GUI_TEXT_AREA_VISUAL_LINE_MAX];
-	u32 line_count = rg_gui_text_area_build_visual_lines(
-	    ctx, edit->buffer, edit->length, move->wrap_width,
-	    lines, RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
+	RgGuiTextAreaVisualLine fallback_lines[RG_GUI_TEXT_AREA_VISUAL_LINE_MAX];
+	RgGuiTextAreaVisualLine* lines = move->layout ? move->layout->lines : fallback_lines;
+	u32 line_count = move->layout
+	    ? rg_gui_text_area_ensure_layout(ctx, move->layout, edit->buffer,
+	                                     edit->length, edit->content_version, move->wrap_width)
+	    : rg_gui_text_area_build_visual_lines(ctx, edit->buffer, edit->length,
+	                                          move->wrap_width, lines, RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
 	if (rg_gui_text_area_move_cursor_wrapped(
 	        ctx, edit, lines, line_count, direction, selecting))
 	{
@@ -8402,9 +8568,9 @@ RGINLINE void rg_gui_text_edit_store_ordered_config(RgGuiTextEditState* edit,
 	edit->ordered_wrap_width = wrap_width;
 }
 
-static RG_NOINLINE int rg_gui_text_edit_process_pending_ordered_config(
+static RG_NOINLINE int rg_gui_text_edit_process_pending_ordered_config_with_layout(
     RgGuiContext* ctx, int read_only, int allow_newline,
-    u32 filter_flags, int multiline, f32 wrap_width)
+    u32 filter_flags, int multiline, f32 wrap_width, RgGuiTextAreaLayout* layout)
 {
 	if (!ctx || !ctx->input_events || !ctx->text_edit_state ||
 	    ctx->input_events_processed_id != 0u ||
@@ -8415,7 +8581,7 @@ static RG_NOINLINE int rg_gui_text_edit_process_pending_ordered_config(
 		return 0;
 	}
 
-	RgGuiTextAreaOrderedKeyContext move = {wrap_width};
+	RgGuiTextAreaOrderedKeyContext move = {wrap_width, layout};
 	int submit = 0;
 	RgGuiId id = ctx->text_edit_state->id;
 	int changed = rg_gui_text_edit_process_ordered_with_key_ex(
@@ -8431,6 +8597,14 @@ static RG_NOINLINE int rg_gui_text_edit_process_pending_ordered_config(
 		ctx->input_events_submit_id = id;
 	}
 	return changed;
+}
+
+RGINLINE int rg_gui_text_edit_process_pending_ordered_config(
+    RgGuiContext* ctx, int read_only, int allow_newline,
+    u32 filter_flags, int multiline, f32 wrap_width)
+{
+	return rg_gui_text_edit_process_pending_ordered_config_with_layout(
+	    ctx, read_only, allow_newline, filter_flags, multiline, wrap_width, NULL);
 }
 
 static RG_NOINLINE int rg_gui_text_edit_process_pending_ordered_stored(RgGuiContext* ctx)
@@ -8624,7 +8798,51 @@ RGINLINE f32 rg_gui_text_measure_prefix(const RgGuiContext* ctx, const char* tex
 		return 0.0f;
 	}
 
-	return rg_text_measure(ctx->font, text, length, rg_gui_text_base_scale(ctx)).width;
+	f32 scale = rg_gui_text_base_scale(ctx);
+	const RgGuiTextLookup* lookup = ctx->text_lookup;
+	if (!lookup || lookup->font != ctx->font)
+	{
+		return rg_text_measure(ctx->font, text, length, scale).width;
+	}
+	if (!ctx->font || scale == 0.0f)
+	{
+		return 0.0f;
+	}
+
+	f32 max_width = 0.0f;
+	f32 line_width = 0.0f;
+	size_t offset = 0u;
+	const RgTextGlyph* previous = NULL;
+	while (offset < length)
+	{
+		u32 cp = rg_text_decode_utf8(text, length, &offset);
+		if (cp == '\r' || cp == '\n')
+		{
+			if (cp == '\r' && offset < length && text[offset] == '\n') offset++;
+			if (line_width > max_width) max_width = line_width;
+			line_width = 0.0f;
+			previous = NULL;
+			continue;
+		}
+		const RgTextGlyph* glyph = cp < 128u ? lookup->ascii_glyphs[cp] : rg_text_find_glyph(ctx->font, cp);
+		if (!glyph)
+		{
+			previous = NULL;
+			continue;
+		}
+		if (previous)
+		{
+			u32 left = previous->codepoint;
+			u32 right = glyph->codepoint;
+			i32 kerning = left < 128u && right < 128u ? lookup->ascii_kerning[left * 128u + right] :
+			    rg_text_find_kerning(ctx->font, left, right);
+			line_width += (f32)kerning * scale;
+		}
+		line_width += (f32)glyph->x_advance * scale;
+		previous = glyph;
+	}
+	if (line_width > max_width) max_width = line_width;
+	return max_width;
 }
 
 RGINLINE f32 rg_gui_text_measure_range(RgGuiContext* ctx, const char* text, size_t start, size_t end)
@@ -9361,6 +9579,7 @@ RGINLINE int rg_gui_init_desc_resolve(const RgGuiInitDesc* desc, RgGuiInitDesc* 
 
 	memset(out, 0, sizeof(*out));
 	out->font = desc->font;
+	out->text_lookup = desc->text_lookup;
 	out->max_draw_cmds = desc->max_draw_cmds ? desc->max_draw_cmds : RG_GUI_MAX_DRAW_CMDS;
 	out->text_buffer_size = desc->text_buffer_size ? desc->text_buffer_size : RG_GUI_TEXT_BUFFER_SIZE;
 	out->ime_callback = desc->ime_callback;
@@ -9510,6 +9729,7 @@ RGINLINE int rg_gui_init(RgGuiContext* ctx, RgArena* arena, const RgGuiInitDesc*
 	ctx->text_buffer_capacity = init.text_buffer_size;
 	ctx->text_buffer_used = 0u;
 	ctx->font = init.font;
+	ctx->text_lookup = init.text_lookup;
 	ctx->ime_callback = init.ime_callback;
 	ctx->ime_callback_user = init.ime_callback_user;
 	ctx->text_measure_cache = NULL;
@@ -18514,12 +18734,15 @@ RGINLINE int rg_gui_text_area(RgGuiContext* ctx, RgGuiTextAreaState* area, char*
 	{
 		wrap_width = 1.0f;
 	}
+	RgGuiTextAreaVisualLine visual_lines[RG_GUI_TEXT_AREA_VISUAL_LINE_MAX];
+	RgGuiTextAreaLayout layout = {0};
+	layout.lines = visual_lines;
 
 	int changed = 0;
 	if (enabled && ctx->input_events && ctx->input_event_focus_id == id)
 	{
-		rg_gui_text_edit_process_pending_ordered_config(
-		    ctx, 0, 1, 0u, 1, wrap_width);
+		rg_gui_text_edit_process_pending_ordered_config_with_layout(
+		    ctx, 0, 1, 0u, 1, wrap_width, &layout);
 		changed |= rg_gui_text_edit_consume_ordered_result(ctx, id, NULL);
 	}
 
@@ -18570,12 +18793,10 @@ RGINLINE int rg_gui_text_area(RgGuiContext* ctx, RgGuiTextAreaState* area, char*
 		ctx->text_edit_state->content_version++;
 		rg_gui_text_prefix_cache_reset(ctx->text_edit_state, buffer);
 
-		RgGuiTextAreaVisualLine pick_lines[RG_GUI_TEXT_AREA_VISUAL_LINE_MAX];
 		u32 pick_line_count =
-		    rg_gui_text_area_build_visual_lines(ctx, buffer, ctx->text_edit_state->length,
-		                                        wrap_width, pick_lines,
-		                                        RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
-		size_t pick = rg_gui_text_area_pick_cursor_wrapped(ctx, pick_lines, pick_line_count,
+		    rg_gui_text_area_ensure_layout(ctx, &layout, buffer, ctx->text_edit_state->length,
+		                                   ctx->text_edit_state->content_version, wrap_width);
+		size_t pick = rg_gui_text_area_pick_cursor_wrapped(ctx, visual_lines, pick_line_count,
 		                                                   inner, area->panel.scroll_y, line_height);
 		int click_count = rg_gui_text_edit_update_click(ctx, ctx->text_edit_state, id, ctx->mouse_pos);
 		if (click_count == 1)
@@ -18622,13 +18843,11 @@ RGINLINE int rg_gui_text_area(RgGuiContext* ctx, RgGuiTextAreaState* area, char*
 		{
 			int selecting = rg_gui_input_has_shift(ctx->input) ? 1 : 0;
 			int direction = rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_UP) ? -1 : 1;
-			RgGuiTextAreaVisualLine move_lines[RG_GUI_TEXT_AREA_VISUAL_LINE_MAX];
 			u32 move_line_count =
-			    rg_gui_text_area_build_visual_lines(ctx, buffer, ctx->text_edit_state->length,
-			                                        wrap_width, move_lines,
-			                                        RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
+			    rg_gui_text_area_ensure_layout(ctx, &layout, buffer, ctx->text_edit_state->length,
+			                                   ctx->text_edit_state->content_version, wrap_width);
 			if (rg_gui_text_area_move_cursor_wrapped(ctx, ctx->text_edit_state,
-			                                         move_lines, move_line_count,
+			                                         visual_lines, move_line_count,
 			                                         direction, selecting))
 			{
 				ctx->text_edit_state->dirty = 1;
@@ -18641,12 +18860,10 @@ RGINLINE int rg_gui_text_area(RgGuiContext* ctx, RgGuiTextAreaState* area, char*
 	if (focused && ctx->active_id == id && ctx->text_edit_state->active &&
 	    ctx->text_edit_state->id == id && ctx->mouse_down)
 	{
-		RgGuiTextAreaVisualLine pick_lines[RG_GUI_TEXT_AREA_VISUAL_LINE_MAX];
 		u32 pick_line_count =
-		    rg_gui_text_area_build_visual_lines(ctx, buffer, ctx->text_edit_state->length,
-		                                        wrap_width, pick_lines,
-		                                        RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
-		size_t pick = rg_gui_text_area_pick_cursor_wrapped(ctx, pick_lines, pick_line_count,
+		    rg_gui_text_area_ensure_layout(ctx, &layout, buffer, ctx->text_edit_state->length,
+		                                   ctx->text_edit_state->content_version, wrap_width);
+		size_t pick = rg_gui_text_area_pick_cursor_wrapped(ctx, visual_lines, pick_line_count,
 		                                                   inner, area->panel.scroll_y, line_height);
 		rg_gui_text_edit_set_cursor(ctx->text_edit_state, pick, 1);
 		ctx->text_edit_state->dirty = 1;
@@ -18681,11 +18898,9 @@ RGINLINE int rg_gui_text_area(RgGuiContext* ctx, RgGuiTextAreaState* area, char*
 		}
 	}
 
-	RgGuiTextAreaVisualLine visual_lines[RG_GUI_TEXT_AREA_VISUAL_LINE_MAX];
 	u32 line_count =
-	    rg_gui_text_area_build_visual_lines(ctx, render_buffer, length, wrap_width,
-	                                        visual_lines,
-	                                        RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
+	    rg_gui_text_area_ensure_layout(ctx, &layout, render_buffer, length,
+	                                   ctx->text_edit_state->content_version, wrap_width);
 	u32 cursor_line =
 	    rg_gui_text_area_find_visual_line(visual_lines, line_count, cursor);
 	RgGuiTextAreaVisualLine cursor_visual_line = visual_lines[cursor_line];
