@@ -52,6 +52,8 @@ jobs:
           repository: microsoft/vcpkg
           ref: 91e8cb4be8195112ea3a9c7e5846bd0b3ff74673
           path: _deps/vcpkg
+          # Versioned ports require Git trees from the baseline's history.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Initialize vcpkg paths
@@ -217,8 +219,9 @@ jobs:
             -fno-sanitize-recover=all
             -fsanitize=address,undefined
             -D_CRT_SECURE_NO_WARNINGS
-            -I "$RG_CORE_DIR/src"
-            -I "$RG_TEXT_DIR/src"
+            # Dependency headers expose unused static helpers in unity builds.
+            -isystem "$RG_CORE_DIR/src"
+            -isystem "$RG_TEXT_DIR/src"
           )
           sdl_common=(
             "${common[@]}"

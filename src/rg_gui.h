@@ -25737,8 +25737,8 @@ RGINLINE RgGuiNodeGroupResult rg_gui_node_group(RgGuiContext* ctx, RgGuiNodeEdit
 			rg_vec2 mouse_canvas = rg_gui_node_editor_to_canvas(editor, ctx->mouse_pos);
 			rg_vec2 delta =
 			    {
-			        mouse_canvas.x - state->drag_start_mouse.x,
-			        mouse_canvas.y - state->drag_start_mouse.y};
+			        .x = mouse_canvas.x - state->drag_start_mouse.x,
+			        .y = mouse_canvas.y - state->drag_start_mouse.y};
 			result.moved = (delta.x != 0.0f || delta.y != 0.0f) ? 1 : 0;
 			result.move_delta = delta;
 			group->position.x = state->drag_start_pos.x + delta.x;
@@ -25754,8 +25754,8 @@ RGINLINE RgGuiNodeGroupResult rg_gui_node_group(RgGuiContext* ctx, RgGuiNodeEdit
 			rg_vec2 mouse_canvas = rg_gui_node_editor_to_canvas(editor, ctx->mouse_pos);
 			rg_vec2 delta =
 			    {
-			        mouse_canvas.x - state->drag_start_mouse.x,
-			        mouse_canvas.y - state->drag_start_mouse.y};
+			        .x = mouse_canvas.x - state->drag_start_mouse.x,
+			        .y = mouse_canvas.y - state->drag_start_mouse.y};
 			rg_vec2 pos = state->drag_start_pos;
 			rg_vec2 size = state->drag_start_size;
 			f32 right = state->drag_start_pos.x + state->drag_start_size.x;
@@ -26970,8 +26970,8 @@ RGINLINE int rg_gui_node_graph_editor_ex(RgGuiContext* ctx, RgGuiNodeEditorState
 				{
 					rg_vec2 delta =
 					    {
-					        group->position.x - group_state->drag_start_pos.x,
-					        group->position.y - group_state->drag_start_pos.y};
+					        .x = group->position.x - group_state->drag_start_pos.x,
+					        .y = group->position.y - group_state->drag_start_pos.y};
 
 					if (delta.x != 0.0f || delta.y != 0.0f)
 					{
@@ -27787,8 +27787,8 @@ RGINLINE int rg_gui_node_graph_editor_ex(RgGuiContext* ctx, RgGuiNodeEditorState
 		{
 			rg_vec2 delta =
 			    {
-			        graph->node_positions[state->drag_anchor].x - state->drag_start[state->drag_anchor].x,
-			        graph->node_positions[state->drag_anchor].y - state->drag_start[state->drag_anchor].y};
+			        .x = graph->node_positions[state->drag_anchor].x - state->drag_start[state->drag_anchor].x,
+			        .y = graph->node_positions[state->drag_anchor].y - state->drag_start[state->drag_anchor].y};
 			if (delta.x != 0.0f || delta.y != 0.0f)
 			{
 				for (u32 i = 0u; i < graph->node_count; i++)

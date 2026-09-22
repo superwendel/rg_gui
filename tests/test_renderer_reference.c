@@ -108,9 +108,9 @@ static RgGuiDrawCmd test_text_cmd(const char* text, f32 x, f32 y, f32 scale,
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.type = RG_GUI_CMD_TEXT;
 	cmd.data.text.text = text;
-	cmd.data.text.pos = (rg_vec2){x, y};
+	cmd.data.text.pos = (rg_vec2){.x = x, .y = y};
 	cmd.data.text.scale = scale;
-	cmd.data.text.color = (rg_vec4){r, g, b, a};
+	cmd.data.text.color = (rg_vec4){.x = r, .y = g, .z = b, .w = a};
 	return cmd;
 }
 
@@ -234,8 +234,8 @@ static void test_geometry_parity_and_warm_cache(void)
 	TEST_ASSERT(stats->frame_upload_bytes == expected_count * sizeof(RgGuiRendererBaseInstance),
 	            "upload byte count");
 
-	cmd.data.text.pos = (rg_vec2){100.0f, 200.0f};
-	cmd.data.text.color = (rg_vec4){0.0f, 1.0f, 0.0f, 0.5f};
+	cmd.data.text.pos = (rg_vec2){.x = 100.0f, .y = 200.0f};
+	cmd.data.text.color = (rg_vec4){.x = 0.0f, .y = 1.0f, .z = 0.0f, .w = 0.5f};
 	rg_gui_renderer_base_begin_frame(&fixture.gui4);
 	TEST_ASSERT(rg_gui_renderer_base_prepare_draw_list(&fixture.gui4, &list, 1u), "prepare warm frame");
 	prepared = rg_gui_renderer_base_prepared(&fixture.gui4);
