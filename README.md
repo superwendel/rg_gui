@@ -104,7 +104,7 @@ release for repeatable builds.
 
 ## Clean Windows setup
 
-Install Visual Studio 2022 with the Desktop development with C++ workload and
+Install Visual Studio 2022 or later with the Desktop development with C++ workload and
 open an **x64 Native Tools Command Prompt**. Keep the `rg_core` and `rg_text`
 folders beside `rg_gui`, or set `RG_CORE_DIR` and `RG_TEXT_DIR` to their roots.
 
@@ -120,7 +120,9 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 The script downloads the official SDL3 development package and shader compiler
 dependencies, builds SDL_shadercross, and sets the paths for that PowerShell
-session. SDL_shadercross currently has no published release package.
+session. CMake selects the installed Visual Studio version; use a CMake release
+that supports your Visual Studio installation. SDL_shadercross currently has no
+published release package.
 
 If you already have SDL3 and SDL_shadercross installed, set their paths in the
 x64 Native Tools Command Prompt instead:

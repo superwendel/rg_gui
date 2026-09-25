@@ -5,7 +5,7 @@
 [CmdletBinding()]
 param(
     [string]$Destination = '',
-    [string]$Generator = 'Visual Studio 17 2022'
+    [string]$Generator = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -129,20 +129,24 @@ finally { Pop-Location }
 
 # Select target AND compiler-host architecture explicitly; do not inherit an
 # x86 developer prompt or build the much larger vendored DXC/LLVM dependency.
+# Let CMake select the installed Visual Studio version, as in the DXC bootstrap.
+# An explicit -Generator overrides that choice when a specific version is wanted.
+$generatorArguments = @('-A', 'x64', '-T', 'host=x64')
+if ($Generator) {
+    $generatorArguments = @('-G', $Generator) + $generatorArguments
+}
 $spirvCrossBuild = Join-Path $Destination 'spirv-cross-build'
 $spirvCrossPrefix = Join-Path $Destination 'spirv-cross'
-Invoke-CMake @('-S', $spirvCrossSource, '-B', $spirvCrossBuild,
-    '-G', $Generator, '-A', 'x64', '-T', 'host=x64',
+Invoke-CMake (@('-S', $spirvCrossSource, '-B', $spirvCrossBuild) + $generatorArguments + @(
     '-DSPIRV_CROSS_SHARED=ON', '-DSPIRV_CROSS_STATIC=OFF',
     '-DSPIRV_CROSS_CLI=OFF', '-DSPIRV_CROSS_ENABLE_TESTS=OFF',
-    "-DCMAKE_INSTALL_PREFIX=$spirvCrossPrefix")
+    "-DCMAKE_INSTALL_PREFIX=$spirvCrossPrefix"))
 Invoke-CMake @('--build', $spirvCrossBuild, '--config', 'Release', '--parallel', '2')
 Invoke-CMake @('--install', $spirvCrossBuild, '--config', 'Release')
 
 $shadercrossBuild = Join-Path $Destination 'shadercross-build'
 $shadercrossPrefix = Join-Path $Destination 'shadercross'
-Invoke-CMake @('-S', $shadercrossSource, '-B', $shadercrossBuild,
-    '-G', $Generator, '-A', 'x64', '-T', 'host=x64',
+Invoke-CMake (@('-S', $shadercrossSource, '-B', $shadercrossBuild) + $generatorArguments + @(
     "-DSDL3_DIR=$(Join-Path $sdlRoot 'cmake')",
     "-Dspirv_cross_c_shared_DIR=$(Join-Path $spirvCrossPrefix 'share\spirv_cross_c_shared\cmake')",
     "-DCMAKE_INSTALL_PREFIX=$shadercrossPrefix",
@@ -150,7 +154,7 @@ Invoke-CMake @('-S', $shadercrossSource, '-B', $shadercrossBuild,
     '-DSDLSHADERCROSS_SPIRVCROSS_SHARED=ON', '-DSDLSHADERCROSS_VENDORED=OFF',
     '-DSDLSHADERCROSS_DXC=ON', '-DSDLSHADERCROSS_CLI=ON', '-DSDLSHADERCROSS_TESTS=OFF',
     '-DSDLSHADERCROSS_INSTALL=ON', '-DSDLSHADERCROSS_INSTALL_RUNTIME=ON',
-    '-DSDLSHADERCROSS_INSTALL_CPACK=OFF', '-DSDLSHADERCROSS_INSTALL_MAN=OFF')
+    '-DSDLSHADERCROSS_INSTALL_CPACK=OFF', '-DSDLSHADERCROSS_INSTALL_MAN=OFF'))
 Invoke-CMake @('--build', $shadercrossBuild, '--config', 'Release', '--parallel', '2')
 Invoke-CMake @('--install', $shadercrossBuild, '--config', 'Release')
 
