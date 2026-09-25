@@ -77,7 +77,7 @@ static void test_renderer_page_size_parity(u32 page_quads,
                                            u32 expected_segments,
                                            u32 expected_waste)
 {
-	RgGuiRendererLimits limits = {4u, 8u, 256u, 128u, 128u, 4u};
+	RgGuiRendererLimits limits = {4u, 8u, 256u, 128u, 128u, 4u, 0u};
 	TestRendererBaseFixture control;
 	TestRendererFixture candidate;
 	TEST_ASSERT(test_fixture_init(&control, &limits), "control fixture init");
@@ -142,7 +142,7 @@ static void test_renderer_page_sizes_and_geometry(void)
 
 static void test_renderer_page_layout_fallbacks_and_capacity(void)
 {
-	RgGuiRendererLimits limits = {1u, 2u, 64u, 8u, 8u, 1u};
+	RgGuiRendererLimits limits = {1u, 2u, 64u, 8u, 8u, 1u, 0u};
 	const u32 pages[] = {3u, 1u, 0u, 2u};
 	for (u32 variant = 0u; variant < 3u; variant++)
 	{
@@ -213,7 +213,7 @@ static void test_renderer_page_layout_fallbacks_and_capacity(void)
 
 static void test_renderer_fragmentation_eliminated(void)
 {
-	RgGuiRendererLimits limits = {4u, 8u, 64u, 6u, 8u, 4u};
+	RgGuiRendererLimits limits = {4u, 8u, 64u, 6u, 8u, 4u, 0u};
 	TestRendererFixture fixture;
 	TEST_ASSERT(test_renderer_fixture_init(&fixture, &limits, 1u),
 	            "fragment fixture init");
@@ -260,7 +260,7 @@ static void test_renderer_fragmentation_eliminated(void)
 
 static void test_renderer_invalid_page_size(void)
 {
-	RgGuiRendererLimits limits = {4u, 8u, 64u, 64u, 64u, 4u};
+	RgGuiRendererLimits limits = {4u, 8u, 64u, 64u, 64u, 4u, 0u};
 	TEST_ASSERT(rg_gui_renderer_page_quads_resolve(0u, limits.max_cached_quads) == 32u,
 	            "promoted default uses 32-quad pages");
 	TEST_ASSERT(rg_gui_renderer_memory_required(&limits, 3u) == SIZE_MAX,
@@ -275,7 +275,7 @@ static void test_renderer_invalid_page_size(void)
 
 static void test_renderer_zero_quad_run_uses_no_page(void)
 {
-	RgGuiRendererLimits limits = {4u, 8u, 64u, 64u, 64u, 4u};
+	RgGuiRendererLimits limits = {4u, 8u, 64u, 64u, 64u, 4u, 0u};
 	TestRendererFixture fixture;
 	TEST_ASSERT(test_renderer_fixture_init(&fixture, &limits, 16u),
 	            "zero-quad fixture init");
@@ -294,7 +294,7 @@ static void test_renderer_zero_quad_run_uses_no_page(void)
 
 static void test_renderer_clear_is_lazy_and_reuses_from_zero(void)
 {
-	RgGuiRendererLimits limits = {4u, 8u, 64u, 64u, 64u, 4u};
+	RgGuiRendererLimits limits = {4u, 8u, 64u, 64u, 64u, 4u, 0u};
 	TestRendererFixture fixture;
 	TEST_ASSERT(test_renderer_fixture_init(&fixture, &limits, 16u),
 	            "lazy-clear fixture init");
@@ -326,7 +326,7 @@ static void test_renderer_clear_is_lazy_and_reuses_from_zero(void)
 
 static void test_renderer_single_page_recycles_directly(void)
 {
-	RgGuiRendererLimits limits = {1u, 2u, 64u, 64u, 64u, 4u};
+	RgGuiRendererLimits limits = {1u, 2u, 64u, 64u, 64u, 4u, 0u};
 	TestRendererFixture fixture;
 	TEST_ASSERT(test_renderer_fixture_init(&fixture, &limits, 32u),
 	            "single-page recycle fixture init");
@@ -352,6 +352,157 @@ static void test_renderer_single_page_recycles_directly(void)
 	TEST_PASS();
 }
 
+static void test_renderer_optimistic_layout_parity(void)
+{
+	RgGuiRendererLimits limits = {8u, 16u, 1024u, 512u, 512u, 8u, 0u};
+	char long_text[301];
+	memset(long_text, 'A', sizeof(long_text) - 1u);
+	long_text[sizeof(long_text) - 1u] = '\0';
+	static const char utf8[] = "\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9"
+	                           "\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9"
+	                           "\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9";
+	const char* texts[] = {
+	    "ABABABABABABABABABABABABABABABABABABABAB", utf8,
+	    "                                                ",
+	    "AB \xC3\xA9\r\nAB \xC3\xA9\nAB \xC3\xA9\rAB \xC3\xA9",
+	    "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXA", long_text};
+	const f32 scales[] = {1.0f, -0.5f};
+	const u32 page_sizes[] = {8u, 16u};
+	for (u32 variant = 0u; variant < 2u; variant++)
+	for (u32 p = 0u; p < RG_ARRAY_COUNT(page_sizes); p++)
+	{
+		TestRendererBaseFixture font_owner = {0};
+		test_font_init(&font_owner);
+		if (variant) font_owner.font.fallback_codepoint = UINT32_MAX;
+		TestRendererFixture fixture;
+		TEST_ASSERT(test_renderer_fixture_init_font(&fixture, &limits, page_sizes[p], &font_owner.font),
+		            "optimistic layout fixture init");
+		RgGuiRenderer* ctx = &fixture.renderer;
+		for (u32 t = 0u; t < RG_ARRAY_COUNT(texts); t++)
+		for (u32 s = 0u; s < RG_ARRAY_COUNT(scales); s++)
+		{
+			rg_gui_renderer_clear_cache(ctx);
+			memset(ctx->core.cache_quads, 0xA5, sizeof(*ctx->core.cache_quads) * limits.max_cached_quads);
+			RgGuiDrawCmd cmd = test_text_cmd(texts[t], 0, 0, scales[s], 1, 1, 1, 1);
+			RgGuiDrawList list = test_draw_list(&cmd, 1u);
+			RgTextQuad expected[320];
+			u32 count = (u32)rg_text_build_quads(ctx->core.font, texts[t], strlen(texts[t]), 0, 0,
+			                                    scales[s], (RgTextColor){1, 1, 1, 1}, expected, 320u);
+			rg_gui_renderer_begin_frame(ctx);
+			TEST_ASSERT(rg_gui_renderer_prepare(ctx, &list, 1u), "optimistic cold prepare");
+			const RgGuiRendererPrepared* prepared = rg_gui_renderer_prepared(ctx);
+			TEST_ASSERT(prepared->glyph_count == count, "UTF-8 byte bound preserves exact glyph count");
+			u32 pages = count ? 1u + (count - 1u) / page_sizes[p] : 0u;
+			TEST_ASSERT(ctx->allocated_page_count == pages && ctx->free_page_count + pages == ctx->total_pages &&
+			                ctx->live_quad_count == count && ctx->dirty_page_count == pages,
+			            "unused reservation pages are returned without corrupting live/dirty counts");
+			RgGuiRendererCachedQuad zero = {0};
+			for (u32 r = 0u; r < prepared->run_count; r++)
+			{
+				const RgGuiRendererRun* run = &prepared->runs[r];
+				for (u32 q = 0u; q < run->quad_count; q++)
+					TEST_ASSERT(test_cached_quad_matches(&ctx->core.cache_quads[run->first_cached_quad + q],
+					                                       &expected[run->first_output_instance + q]),
+					            "cold multi-page geometry matches independent rg_text layout");
+				for (u32 q = run->quad_count; q < page_sizes[p]; q++)
+					TEST_ASSERT(!memcmp(&ctx->core.cache_quads[run->first_cached_quad + q], &zero, sizeof(zero)),
+					            "retained page tails are initialized before whole-page upload");
+				if (r + 1u == prepared->run_count)
+					TEST_ASSERT(ctx->page_next[run->first_cached_quad / page_sizes[p]] == UINT32_MAX,
+					            "retained chain is detached from returned tail pages");
+			}
+			u32 upload_quads = 0u;
+			TEST_ASSERT(rg_gui_renderer_upload_ranges(ctx, 0u, NULL, 0u, &upload_quads) != UINT32_MAX &&
+			                upload_quads == pages * page_sizes[p],
+			            "upload revisions include only retained live pages");
+			u64 revision = ctx->cache_revision;
+			rg_gui_renderer_begin_frame(ctx);
+			TEST_ASSERT(rg_gui_renderer_prepare(ctx, &list, 1u), "optimistic warm prepare");
+			TEST_ASSERT(ctx->cache_revision == revision && !ctx->dirty_page_count &&
+			                rg_gui_renderer_stats(ctx)->frame_cache_hits == 1u,
+			            "warm zero/nonzero runs retain cache identity and revision");
+		}
+		test_renderer_fixture_free(&fixture);
+	}
+	TEST_PASS();
+}
+
+static void test_renderer_optimistic_capacity_fallback(void)
+{
+	RgGuiRendererLimits limits = {4u, 8u, 64u, 16u, 32u, 4u, 0u};
+	TestRendererFixture fixture;
+	TEST_ASSERT(test_renderer_fixture_init(&fixture, &limits, 8u), "byte-bound fallback fixture init");
+	RgGuiRenderer* ctx = &fixture.renderer;
+	RgGuiDrawCmd cmd = test_text_cmd_identity("AAAAAAAA", 0, 0, 1);
+	RgGuiDrawCmd retained_cmd = cmd;
+	RgGuiDrawList list = test_draw_list(&cmd, 1u);
+	rg_gui_renderer_begin_frame(ctx);
+	TEST_ASSERT(rg_gui_renderer_prepare(ctx, &list, 1u), "fill one of two available pages");
+	u32 retained_quad = rg_gui_renderer_prepared(ctx)->runs[0].first_cached_quad;
+	RgGuiRendererCachedQuad retained[8];
+	memcpy(retained, ctx->core.cache_quads + retained_quad, sizeof(retained));
+	cmd = test_text_cmd_identity("\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9"
+	                            "\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9", 0, 0, 1);
+	rg_gui_renderer_begin_frame(ctx);
+	TEST_ASSERT(rg_gui_renderer_prepare(ctx, &list, 1u), "exact glyph count fits despite byte bound");
+	TEST_ASSERT(rg_gui_renderer_prepared(ctx)->glyph_count == 8u && ctx->allocated_page_count == 2u &&
+	                !ctx->allocator_stats.frame_reclaims && !rg_gui_renderer_stats(ctx)->frame_cache_bypasses &&
+	                !memcmp(retained, ctx->core.cache_quads + retained_quad, sizeof(retained)),
+	            "speculative byte overestimate cannot reclaim or overwrite an unrelated cached run");
+	cmd = retained_cmd;
+	rg_gui_renderer_begin_frame(ctx);
+	TEST_ASSERT(rg_gui_renderer_prepare(ctx, &list, 1u) && rg_gui_renderer_stats(ctx)->frame_cache_hits == 1u,
+	            "retained run remains reusable after exact-count fallback");
+	test_renderer_fixture_free(&fixture);
+	TEST_PASS();
+}
+
+static void test_renderer_optimistic_reclaim_and_tail_reuse(void)
+{
+	RgGuiRendererLimits limits = {2u, 4u, 96u, 32u, 32u, 4u, 0u};
+	TestRendererFixture fixture;
+	TEST_ASSERT(test_renderer_fixture_init(&fixture, &limits, 8u), "reclaim/tail fixture init");
+	RgGuiRenderer* ctx = &fixture.renderer;
+	RgGuiDrawCmd commands[3] = {
+	    test_text_cmd_identity("AAAAAAAAAAAAAAAA", 0, 0, 1),
+	    test_text_cmd_identity("BBBBBBBB", 0, 0, 1), {0}};
+	RgGuiDrawList list = test_draw_list(commands, 2u);
+	rg_gui_renderer_begin_frame(ctx);
+	TEST_ASSERT(rg_gui_renderer_prepare(ctx, &list, 2u), "fill run metadata before reclamation");
+	u32 retained_quad = rg_gui_renderer_prepared(ctx)->runs[0].first_cached_quad;
+	RgGuiRendererCachedQuad retained[16];
+	memcpy(retained, ctx->core.cache_quads + retained_quad, sizeof(retained));
+	commands[1] = test_text_cmd_identity("               B", 0, 0, 1);
+	rg_gui_renderer_begin_frame(ctx);
+	TEST_ASSERT(rg_gui_renderer_prepare(ctx, &list, 2u), "reclaim metadata then reserve/build/release tail");
+	TEST_ASSERT(rg_gui_renderer_prepared(ctx)->glyph_count == 17u && ctx->allocated_page_count == 3u &&
+	                ctx->free_page_count == 1u && ctx->dirty_page_count == 1u &&
+	                rg_gui_renderer_stats(ctx)->frame_cache_evictions == 1u &&
+	                ctx->allocator_stats.frame_reclaims == 2u &&
+	                !memcmp(retained, ctx->core.cache_quads + retained_quad, sizeof(retained)),
+	            "post-reclaim layout returns excess reservation while preserving the current run");
+	// Both cached runs are pinned by this frame. A third key must fail without
+	// changing the retained output or leaking the remaining free page.
+	commands[2] = test_text_cmd_identity("AB", 0, 0, 1);
+	list = test_draw_list(&commands[2], 1u);
+	TEST_ASSERT(rg_gui_renderer_prepare(ctx, &list, 1u), "current-frame cache pressure is reported");
+	TEST_ASSERT(rg_gui_renderer_stats(ctx)->frame_cache_bypasses == 1u &&
+	                ctx->allocated_page_count == 3u && ctx->free_page_count == 1u,
+	            "failed speculative admission does not leak or evict current-frame pages");
+	// Age both keys out, then use every physical page with a single run. This
+	// also traverses the previously returned tail in a recycled page chain.
+	rg_gui_renderer_begin_frame(ctx);
+	rg_gui_renderer_begin_frame(ctx);
+	commands[0] = test_text_cmd_identity("ABABABABABABABABABABABABABABABAB", 0, 0, 1);
+	list = test_draw_list(commands, 1u);
+	TEST_ASSERT(rg_gui_renderer_prepare(ctx, &list, 1u), "recycle every page after tail release");
+	TEST_ASSERT(rg_gui_renderer_prepared(ctx)->glyph_count == 32u && ctx->allocated_page_count == 4u &&
+	                ctx->free_page_count == 0u && !rg_gui_renderer_stats(ctx)->frame_cache_bypasses,
+	            "returned tail remains usable at exact total capacity");
+	test_renderer_fixture_free(&fixture);
+	TEST_PASS();
+}
+
 static void test_renderer_shared_lookup_geometry_and_ownership(void)
 {
 	RgGuiTextLookup* lookup = (RgGuiTextLookup*)malloc(sizeof(*lookup));
@@ -365,7 +516,7 @@ static void test_renderer_shared_lookup_geometry_and_ownership(void)
 		memcpy(saved, lookup, sizeof(*saved));
 		RgGuiRendererInitDesc desc = {0};
 		desc.font = &font_owner.font;
-		desc.limits = (RgGuiRendererLimits){4u, 8u, 256u, 32u, 32u, 4u};
+		desc.limits = (RgGuiRendererLimits){4u, 8u, 256u, 32u, 32u, 4u, 0u};
 		desc.page_quads = 2u;
 		size_t owned_size = rg_gui_renderer_memory_required_ex(&desc);
 		desc.text_lookup = lookup;
@@ -446,7 +597,7 @@ static void test_renderer_lookup_memory_alignment_and_rollback(void)
 	                rg_gui_text_lookup_init(other_lookup, &other_font), "memory-test lookups init");
 	RgGuiRendererInitDesc desc = {0};
 	desc.font = &font_owner.font;
-	desc.limits = (RgGuiRendererLimits){3u, 7u, 35u, 32u, 17u, 3u};
+	desc.limits = (RgGuiRendererLimits){3u, 7u, 35u, 32u, 17u, 3u, 0u};
 	desc.page_quads = 2u;
 	size_t conservative = rg_gui_renderer_memory_required(&desc.limits, desc.page_quads);
 	TEST_ASSERT(rg_gui_renderer_memory_required_ex(&desc) == conservative,
@@ -536,6 +687,9 @@ int main(int argc, char** argv)
 	test_renderer_zero_quad_run_uses_no_page();
 	test_renderer_clear_is_lazy_and_reuses_from_zero();
 	test_renderer_single_page_recycles_directly();
+	test_renderer_optimistic_layout_parity();
+	test_renderer_optimistic_capacity_fallback();
+	test_renderer_optimistic_reclaim_and_tail_reuse();
 	test_renderer_shared_lookup_geometry_and_ownership();
 	test_renderer_lookup_memory_alignment_and_rollback();
 	printf("\nResults: %d passed, %d failed\n", g_tests_passed, g_tests_failed);

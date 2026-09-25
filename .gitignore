@@ -75,5 +75,5 @@ compile_commands.json
 __pycache__/
 *.py[cod]
 
-# Local benchmark experiment history (public summary is benchmarks/PERFORMANCE.md)
+# Local benchmark results and experiment history
 /benchmarks/results/

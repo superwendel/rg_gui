@@ -1,125 +1,114 @@
-# Measured demo performance
+# Performance against Dear ImGui
 
-For the subsequent rg_core update, shared renderer lookup, and demo helper
-changes, see [rg_core reuse measurements](CORE_REUSE.md). The captures below
-retain their original dependency baseline.
+In this workload suite, `rg_gui` has lower median frame time in **15 of 16
+configurations**. Dear ImGui is faster in the mixed inspector with two frames
+in flight: `rg_gui` takes **13.2% longer**. These are project measurements on
+one Windows/D3D12 system; results depend on the workload and configuration.
 
-The full showcase retained sub-millisecond median frame production with Mailbox
-presentation on the tested Windows/D3D12 system. Reusing the tear-out window also
-reduced the large frame stalls caused by repeated swapchain destruction.
+The [result data](comparison.json) include every trial summary, CPU preparation
+timings, frame-time ranges and tails, memory reservations, and source identities.
 
-These measurements were collected on **2026-09-22** from saved development
-snapshots. They are examples of measured behavior, not guarantees for every
-application or later revision. [Selected data and provenance](performance.json)
-retain per-trial percentiles, paired native action samples, and input hashes.
-Historical binaries, source snapshots, and raw captures are not distributed with
-this checkout; hashes identify those inputs but cannot reconstruct them.
+## Frame times
 
-## Setup and interpretation
+All times are **microseconds; lower is better**. p50 is the median and p95 is
+the 95th percentile. Each table value is the median of six per-trial
+percentiles. The change column compares the two frame p50 values.
 
-- Intel Core i7-12700KF, NVIDIA RTX 2060, Windows 11 build 26200.
-- SDL 3.4.10, D3D12; MSVC 19.44.35219 x64, `/O2 /DNDEBUG /W4 /WX /std:c11`.
-- Fixed rg_core `27d5475a4af221813977f4b7d62e4e3f88cffab2` and
-  rg_text `4b98c6d38d4de1398ebb0970fc8e0e3db01bafa5`.
-- Both demos enabled the shared ASCII lookup and SSE2 geometry packing, with the
-  portable formatter. Instrumentation and displayed telemetry were included.
-- Processes ran serially with normal OS CPU scheduling and no concurrent builds,
-  tests, or benchmarks. Hardware and dependency inputs stayed fixed per comparison.
+Frame time includes CPU work and required GPU-fence waits. It does not measure
+GPU execution time, display FPS, or input latency.
 
-All times below are **CPU wall milliseconds**, including driver and swapchain
-waits. They are not GPU execution times, visible display FPS, or input-to-photon
-latency. No display scanout or visual-artifact measurement was made. Results cover
-one Windows/D3D12 machine and short workloads, not other platforms or long sessions.
+### One frame in flight
 
-## Full showcase: presentation modes
+Each frame waits for GPU completion before the next frame begins.
 
-The comparison used the animated showcase, either idle or receiving scripted edits
-in an approximately 8 KiB text area. Before/Immediate, after/Immediate, and
-after/Mailbox ran in rotating order for three trials each, with 120 warmup and
-1,200 measured frames per process. VSync companions used one trial per workload,
-with 120 warmup and 480 measured frames.
+| Workload | rg_gui p50 | Dear ImGui p50 | rg_gui median time | rg_gui p95 | Dear ImGui p95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Static labels | 94.40 | 140.10 | 32.6% lower | 122.60 | 183.20 |
+| Changing labels | 121.35 | 135.80 | 10.6% lower | 164.95 | 179.65 |
+| Inspector | 105.10 | 121.40 | 13.4% lower | 144.95 | 168.45 |
+| Virtualized list | 90.80 | 97.00 | 6.4% lower | 126.05 | 135.35 |
+| Mixed inspector | 105.60 | 120.30 | 12.2% lower | 145.20 | 169.35 |
+| Asset browser | 83.20 | 103.45 | 19.6% lower | 119.30 | 147.30 |
+| Text editor | 100.80 | 148.85 | 32.3% lower | 144.85 | 200.05 |
+| Docked workspace | 118.70 | 138.55 | 14.3% lower | 167.45 | 190.00 |
 
-The before executable predates explicit Mailbox selection. All after rows use the
-same executable with different presentation modes. No core rendering algorithm
-changed between these snapshots. Percentiles use nearest-rank frame samples;
-table values are medians of the trial percentiles. Brackets span the smallest and
-largest trial p50, not confidence intervals.
+### Two frames in flight
 
-| Workload | Snapshot / mode | Frame p50 [trial range] | Frame p95 | Frame p99 |
-| --- | --- | ---: | ---: | ---: |
-| Idle | Before / Immediate | 0.1885 [0.1847-0.1933] | 0.4469 | 7.1170 |
-| Idle | After / Immediate | 0.2104 [0.2065-0.2149] | 0.4419 | 6.3830 |
-| Idle | After / Mailbox | 0.1998 [0.1951-0.2095] | 0.4374 | 5.5104 |
-| Idle | After / VSync, one trial | 16.6853 | 17.7542 | 18.1610 |
-| Edit | Before / Immediate | 0.2700 [0.2586-0.2875] | 0.4708 | 4.6824 |
-| Edit | After / Immediate | 0.2641 [0.2548-0.2715] | 0.4919 | 4.3839 |
-| Edit | After / Mailbox | 0.2656 [0.2567-0.2876] | 0.5380 | 5.2645 |
-| Edit | After / VSync, one trial | 16.6741 | 17.2816 | 17.7824 |
+Up to two frames can be pending. Frame time includes waiting when this queue
+is full, allowing CPU preparation and GPU execution to overlap.
 
-Mailbox idle was 6.0% slower than the saved before/Immediate snapshot; editing was
-1.6% faster. Against the same after executable in Immediate mode, Mailbox changed
-idle p50 by -0.0106 ms and edit p50 by +0.0015 ms. Edit p95/p99 were higher with
-Mailbox. These mixed results establish no renderer speedup or uniform latency
-improvement. Driver/presentation work dominates; VSync waits for display refresh.
+| Workload | rg_gui p50 | Dear ImGui p50 | rg_gui median time | rg_gui p95 | Dear ImGui p95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Static labels | 52.80 | 73.10 | 27.8% lower | 72.45 | 101.60 |
+| Changing labels | 69.45 | 75.85 | 8.4% lower | 87.90 | 99.35 |
+| Inspector | 61.50 | 63.70 | 3.5% lower | 85.85 | 92.65 |
+| Virtualized list | 55.65 | 59.40 | 6.3% lower | 70.80 | 71.90 |
+| Mixed inspector | 60.90 | 53.80 | **13.2% higher** | 77.15 | 86.95 |
+| Asset browser | 31.70 | 45.70 | 30.6% lower | 48.75 | 62.05 |
+| Text editor | 53.50 | 86.65 | 38.3% lower | 90.05 | 123.00 |
+| Docked workspace | 65.55 | 81.40 | 19.5% lower | 102.10 | 116.95 |
 
-For interactive use, **View > Fast, no tearing** selects Mailbox. It permits fast
-frame production and can replace completed submissions before display; rendering
-thousands of frames does not mean the display shows them all. Normal launches
-default to VSync. Unsupported modes fail explicitly; unsupported menu choices are
-disabled. [SDL presentation-mode semantics](https://wiki.libsdl.org/SDL3/SDL_GPUPresentMode).
+CPU widget submission and renderer preparation medians are lower for `rg_gui`
+in all 16 configurations. Frame p95 is also lower in all 16, but later tails
+and maxima do not uniformly improve: the two-frame list has p99 of **130.40
+versus 120.35 microseconds**, and changing labels with two frames in flight
+have a worst observed frame of **1.86 versus 1.28 milliseconds**. Small median
+differences should be read alongside the trial ranges in the data; those ranges
+are not confidence intervals.
 
-## Native tear-out: destruction versus reuse
+This configuration reserves more CPU and GPU/upload-buffer memory in `rg_gui`
+than in Dear ImGui. Persistent caches and configured capacities are part of the
+tradeoff. The data count explicit reservations, excluding shared font/target
+resources and opaque SDL/driver allocations; they are not process memory or
+resident VRAM measurements.
 
-The before demo destroyed the native window and swapchain on redock/close. The
-after demo parked one hidden claimed window and reused it. These saved snapshots
-predate the presentation-mode selection change above. Three alternating process
-pairs ran per mode, each with 120 warmup and 1,200 measured frames. The script
-activated a 520x460 Inspector every 240 frames and closed it at cycle frame 180.
+## Workloads
 
-Action values pool 15 post-warmup occurrences per side and mode. Brackets span
-individual action minimum/maximum, rather than trial percentiles.
+| Workload | Content and interactions |
+| --- | --- |
+| Static labels | 128 unchanged labels at fixed positions. |
+| Changing labels | 128 labels cycling through a fixed text corpus. |
+| Inspector | 32 checkboxes and 32 sliders with changing numeric values. |
+| Virtualized list | 32 visible text rows from 10,000 assets. |
+| Mixed inspector | Checkboxes and sliders with replayed clicks and drags. |
+| Asset browser | Filtering, selection, and scrolling through visible asset rows. |
+| Text editor | An 8 KiB multiline document with editing and selection. |
+| Docked workspace | Four panels with changing labels, splitter resizing, and tab rearrangement. |
 
-| Mode | Action | Before median [range] | After median [range] |
-| --- | --- | ---: | ---: |
-| Immediate | Close lifecycle | 1.4497 [1.2724-3.4747] | 0.2896 [0.2535-0.4030] |
-| Immediate | Reopen lifecycle | 7.3592 [6.1843-8.5135] | 0.7184 [0.6599-1.3827] |
-| VSync | Close lifecycle | 35.7893 [34.2843-45.2400] | 0.3970 [0.2678-2.2388] |
-| VSync | Reopen lifecycle | 6.0221 [5.0714-8.2089] | 1.1843 [0.7872-2.2738] |
-| VSync | Whole close frame | 52.3485 [50.1560-62.0554] | 16.9860 [12.4636-19.2905] |
-| VSync | Whole reopen frame | 22.3010 [17.1893-23.6566] | 17.6459 [8.5903-23.7349] |
+Shared scene generation, filtering, and list virtualization occur outside the
+timed frame. Native widget formatting and UI/render preparation are timed.
+The docking workload restores its layout periodically during measurement.
 
-The median close-plus-five-following-frame total stayed near six refresh periods
-under VSync: 99.5919 ms before and 99.3654 ms after. Reuse improved pacing around
-the close action, rather than increasing display refresh. Whole-run frame p50
-changed from 0.2640 to 0.2677 ms in Immediate and 16.6965 to 16.7130 ms in VSync;
-there is no general steady-frame speedup claim.
+## Configuration and limits
 
-First creation remains in warmup. Reuse retains one native window and swapchain
-until shutdown; retained allocation bytes were not measured. Resource cleanup was
-outside the frame distributions: after medians were 34.1431 ms in Immediate and
-64.6052 ms in VSync. The original executable had no separate cleanup timer, so no
-shutdown improvement is claimed. Resizing/restoring windows can still incur work.
+- **Hardware:** Intel Core i7-12700KF, NVIDIA RTX 2060, driver 595.97, Windows 11
+  build 26200. Normal OS scheduling, with serial benchmark processes.
+- **Rendering:** SDL 3.4.10, D3D12, 1280 x 800 offscreen target. No swapchain
+  presentation is measured.
+- **Libraries:** the `rg_gui` source identified in the data and Dear ImGui
+  **1.93.0 WIP**. The first four workloads use its mainline branch; the other
+  four use its docking branch. Exact source revisions are recorded in the data.
+- **Build:** MSVC release optimization (`/O2 /DNDEBUG /MD`), C11 for `rg_gui`
+  and C++17 for Dear ImGui, without link-time optimization.
+- **Method:** six alternating process pairs per workload and buffering mode,
+  with 1,024 warmup and 8,192 measured frames per process. All measured frames
+  are retained. Initialization and font loading are outside timing.
+- **Text and style:** the same prebaked Inter 16 atlas and glyph metrics, with
+  kerning, shape antialiasing, and rounding disabled. Native widget shapes
+  still differ. This differs from `rg_gui`'s default kerning-enabled text.
+- **Caching:** `rg_gui` uses shared ASCII lookup, 32-glyph cache pages, and the
+  optional editor layout cache. Dear ImGui uses its native widgets and official
+  SDL_GPU renderer, importing the common immutable font through its font loader.
+- **Validation:** core text images and inspector numeric regions match across
+  libraries within two color levels. Tool interactions pass state checks and
+  save reference frames; cross-library pixel equality is not claimed for native
+  widgets or docking.
 
-## Validation and measuring an application
+These warm workloads do not cover startup, native-window lifecycle costs,
+complex Unicode shaping, other GPUs, or other operating systems.
 
-The recorded release checks passed host/renderer/asset tests, GPU-device checks,
-three demo smokes, and 82 native lifecycle checks. All 22,560 Full and 14,400 native
-measurement frames passed capture validation without suppressed presentations,
-dropped work, or unexpected diagnostics. Native trials matched main/secondary
-presentation counts and verified final cleanup left no retained native window.
-
-Build the current demos with the [normal dependency setup](../README.md), then
-measure current workloads using your own dependency paths and new output folders:
-
-```powershell
-.\build.bat demo
-python benchmarks/run_frames.py --scenario idle --scenario edit --present immediate --sdl-root C:/deps/SDL3 --core-root ../rg_core --text-root ../rg_text --output out/frames-immediate
-python benchmarks/run_frames.py --scenario idle --scenario edit --present mailbox --sdl-root C:/deps/SDL3 --core-root ../rg_core --text-root ../rg_text --output out/frames-mailbox
-python benchmarks/run_frames.py --scenario tearout --present vsync --sdl-root C:/deps/SDL3 --core-root ../rg_core --text-root ../rg_text --output out/frames-tearout
-```
-
-These commands measure the current checkout; they do not recreate the historical
-before/after snapshots. For a new comparison, freeze each executable before the
-next build, keep dependencies/options fixed, alternate trial order, and retain
-the generated captures and manifests. See [profiling instructions](PROFILING.md)
-and [CPU benchmark instructions](README.md) for workload definitions and tools.
+The comparison harness and raw captures are maintained locally and are not
+distributed in this repository. The linked data document the project
+measurements; source hashes alone do not make the comparison publicly
+reproducible. To measure `rg_gui` in your own setup, use the public
+[CPU benchmark guide](README.md) and [demo profiling guide](PROFILING.md).

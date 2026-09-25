@@ -18,6 +18,55 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(RG_GUI_ENABLE_VIEWPORTS)
+/* The application owns optional viewport lists. Keep their allocations until
+ * shutdown so reopening a detached window does not allocate again. */
+typedef struct DemoViewportStorage
+{
+	RgGuiDrawCmd* blocks[RG_GUI_MAX_VIEWPORTS];
+	u32 draw_capacities[RG_GUI_MAX_VIEWPORTS];
+	u32 overlay_capacities[RG_GUI_MAX_VIEWPORTS];
+	size_t reserved_bytes;
+} DemoViewportStorage;
+
+static int demo_viewport_storage_acquire(void* user, u32 slot,
+                                         u32 draw_capacity, u32 overlay_capacity,
+                                         RgGuiDrawCmd** draw_commands,
+                                         RgGuiDrawCmd** overlay_commands)
+{
+	DemoViewportStorage* storage = (DemoViewportStorage*)user;
+	if (!storage || slot >= RG_GUI_MAX_VIEWPORTS || !draw_commands ||
+	    !overlay_commands || !draw_capacity || !overlay_capacity)
+		return 0;
+	if (!storage->blocks[slot])
+	{
+		u64 count = (u64)draw_capacity + overlay_capacity;
+		if (count > SIZE_MAX / sizeof(RgGuiDrawCmd)) return 0;
+		size_t bytes = (size_t)count * sizeof(RgGuiDrawCmd);
+		if (bytes > SIZE_MAX - storage->reserved_bytes) return 0;
+		RgGuiDrawCmd* block = (RgGuiDrawCmd*)malloc(bytes);
+		if (!block) return 0;
+		storage->blocks[slot] = block;
+		storage->draw_capacities[slot] = draw_capacity;
+		storage->overlay_capacities[slot] = overlay_capacity;
+		storage->reserved_bytes += bytes;
+	}
+	if (storage->draw_capacities[slot] != draw_capacity ||
+	    storage->overlay_capacities[slot] != overlay_capacity)
+		return 0;
+	*draw_commands = storage->blocks[slot];
+	*overlay_commands = storage->blocks[slot] + draw_capacity;
+	return 1;
+}
+
+static void demo_viewport_storage_destroy(DemoViewportStorage* storage)
+{
+	if (!storage) return;
+	for (u32 i = 0u; i < RG_GUI_MAX_VIEWPORTS; i++) free(storage->blocks[i]);
+	memset(storage, 0, sizeof(*storage));
+}
+#endif
+
 #ifndef RG_GUI_DEMO_GPU_DEBUG
 #define RG_GUI_DEMO_GPU_DEBUG 0
 #endif
@@ -515,6 +564,7 @@ static int demo_render_draw_list_profiled(SDL_GPUDevice* device, SDL_Window* win
 	u64 render_start = metrics ? SDL_GetTicksNS() : 0u;
 	u64 stage_start = render_start;
 	int result = 0;
+	RgGuiGpuUpload upload = {0};
 	if (metrics)
 	{
 		memset(metrics, 0, sizeof(*metrics));
@@ -536,7 +586,6 @@ static int demo_render_draw_list_profiled(SDL_GPUDevice* device, SDL_Window* win
 		goto done;
 	}
 
-	RgGuiGpuUpload upload = {0};
 	rg_gpu_upload_ring_begin(upload_ring, 1);
 	int staged = rg_gui_gpu_stage_upload(gpu, text_renderer, upload_ring, &upload);
 	rg_gpu_upload_ring_end(upload_ring);
@@ -562,13 +611,21 @@ static int demo_render_draw_list_profiled(SDL_GPUDevice* device, SDL_Window* win
 			SDL_CancelGPUCommandBuffer(command_buffer);
 			goto encode_failed;
 		}
-		rg_gui_gpu_encode_upload(gpu, text_renderer, copy, upload_ring, &upload);
+		rg_gui_gpu_encode_upload(gpu, copy, upload_ring, &upload);
 		SDL_EndGPUCopyPass(copy);
 	}
-	if (!rg_gui_gpu_dispatch(gpu, command_buffer))
+	if (!rg_gui_gpu_dispatch_upload(gpu, command_buffer, &upload))
 	{
 		SDL_CancelGPUCommandBuffer(command_buffer);
 		SDL_SetError("rg_gui GPU text dispatch rejected the prepared frame");
+		goto encode_failed;
+	}
+	/* SDL forbids cancellation after swapchain acquisition. Validate packet order
+	 * first; no further renderer staging/acknowledgement occurs before submission. */
+	if (!rg_gui_gpu_upload_ready(gpu, &upload))
+	{
+		SDL_CancelGPUCommandBuffer(command_buffer);
+		SDL_SetError("rg_gui upload packet must be restaged before submission");
 		goto encode_failed;
 	}
 	if (metrics)
@@ -613,6 +670,7 @@ static int demo_render_draw_list_profiled(SDL_GPUDevice* device, SDL_Window* win
 				stage_start = now;
 			}
 			int submitted = SDL_SubmitGPUCommandBuffer(command_buffer) ? 1 : 0;
+			if (submitted) rg_gui_gpu_upload_commit(gpu, &upload);
 			if (metrics)
 			{
 				metrics->submit_ms = (double)(SDL_GetTicksNS() - stage_start) / 1000000.0;
@@ -647,6 +705,7 @@ static int demo_render_draw_list_profiled(SDL_GPUDevice* device, SDL_Window* win
 		stage_start = now;
 	}
 	int submitted = SDL_SubmitGPUCommandBuffer(command_buffer) ? 1 : 0;
+	if (submitted) rg_gui_gpu_upload_commit(gpu, &upload);
 	if (metrics)
 	{
 		metrics->submit_ms = (double)(SDL_GetTicksNS() - stage_start) / 1000000.0;
@@ -661,6 +720,7 @@ static int demo_render_draw_list_profiled(SDL_GPUDevice* device, SDL_Window* win
 encode_failed:
 	if (metrics) metrics->encode_ms = (double)(SDL_GetTicksNS() - stage_start) / 1000000.0;
 done:
+	rg_gui_gpu_upload_abort(gpu, &upload);
 	if (metrics)
 	{
 		const RgGuiRendererStats* text_stats = rg_gui_renderer_stats(text_renderer);

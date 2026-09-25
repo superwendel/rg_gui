@@ -128,8 +128,8 @@ jobs:
           foreach ($entry in $formats.GetEnumerator()) {
             $directory = Join-Path $env:GITHUB_WORKSPACE "shaders\Compiled\$($entry.Key)"
             $files = @(Get-ChildItem -LiteralPath $directory -File -Filter $entry.Value)
-            if ($files.Count -ne 6) {
-              throw "Expected 6 $($entry.Key) shaders, found $($files.Count)."
+            if ($files.Count -ne 8) {
+              throw "Expected 8 $($entry.Key) shaders, found $($files.Count)."
             }
             if ($files | Where-Object { $_.Length -eq 0 }) {
               throw "$($entry.Key) contains an empty shader output."

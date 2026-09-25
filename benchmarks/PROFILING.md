@@ -2,8 +2,18 @@
 
 The full and tear-out demos record real window frames, including SDL GPU
 submission and presentation waits. The Unicode harness separately measures CPU
-text work. These complement the [CPU before/after benchmarks](README.md).
+text work. These complement the [CPU benchmarks](README.md).
 Keep builds, tests, and other benchmarks separate from measurement runs.
+
+## Requirements
+
+The commands below use Windows, Python 3.9+, Visual Studio C++ tools, rg_core,
+rg_text, and an x64 SDL3 development package. Set up the
+[normal demo dependencies](../README.md#dependencies) first. Run commands from
+the repository root and replace `C:/deps/SDL3` with your SDL3 installation.
+The real-window runner needs freshly built demos and a working SDL GPU backend;
+the Unicode CPU harness builds its own executable. RenderDoc is optional and
+used only by the capture workflow at the end of this guide.
 
 ## Inspect the interactive demo
 
@@ -66,9 +76,7 @@ and hardware consistent when comparing runs.
 For manual Full-demo testing, choose **View > Fast, no tearing** or launch
 `.\rg_gui_demo_full.exe --present mailbox`. Mailbox may replace completed
 submissions before display; its frame-production rate is not the display's
-refresh rate. The [performance summary](PERFORMANCE.md) compares saved Immediate,
-Mailbox, and VSync snapshots and native-window reuse; [selected data](performance.json)
-retain the per-trial evidence and provenance.
+refresh rate.
 
 Select workloads or adjust capture length with:
 
@@ -103,13 +111,12 @@ it does not add automatic draw reordering. Arbitrary UI commands cannot in
 general be reordered without changing appearance.
 
 The tear-out scenario uses the same panel/window requests as the demo controls.
-The current demo parks one hidden claimed window on redock/close, then reuses it
+The demo parks one hidden claimed window on redock/close, then reuses it
 on the next activation. It retains that window and swapchain until final cleanup.
-Initial creation, parking, and reuse are included in `lifecycle_ms`; older demo
-binaries instead destroy/recreate the window and include their GPU-idle waits.
+Initial creation, parking, and reuse are included in `lifecycle_ms`.
 Post-warmup lifecycle spikes remain in the reported maximum and percentiles.
 Initial warmup and process shutdown are not part of the main summary. The
-current demo reports separate physical creation/reuse/parking/destruction counts
+demo reports separate physical creation/reuse/parking/destruction counts
 and resource-cleanup duration (through device/window destruction, before
 `SDL_Quit`); the runner checks that final cleanup retains no native window.
 
@@ -156,13 +163,18 @@ a reduced draw-call count as proof of a faster frame.
 
 ## Paired native-window lifecycle comparisons
 
-Freeze the previous tear-out executable before rebuilding. The dedicated runner
-accepts two prebuilt executables and alternates their process order, with three
-trials each in both immediate and VSync modes by default:
+To evaluate a lifecycle change, preserve a baseline tear-out executable before
+rebuilding. The dedicated runner accepts two prebuilt executables and alternates
+their process order, with three trials each in both immediate and VSync modes
+by default:
 
 ```powershell
 python benchmarks/run_native_lifecycle.py --before-bin out/before/rg_gui_demo_tearout.exe --after-bin rg_gui_demo_tearout.exe --sdl-root C:/deps/SDL3 --output out/native-comparison
 ```
+
+`out/before` is an example directory you create to hold your baseline executable;
+the repository does not supply a baseline. Use matching dependencies, assets,
+and shaders for a GUI-only comparison.
 
 Each process records 720 frames with 120 warmup frames. Use `--frames`,
 `--warmup`, `--trials`, or repeated `--mode immediate`/`--mode vsync` to adjust
@@ -260,9 +272,10 @@ without launching the demo again. Native driver calls can block outside the
 script's polling timeout, so an automated launcher should impose an overall
 process timeout and clean up only the processes it created.
 
-RenderDoc 1.44's D3D12 GPU counter collection requires Windows Developer Mode.
-If it reports that requirement, counters are unavailable; ordinary GUI rendering
-and CPU profiling do not require Developer Mode. Setting the process environment
+If RenderDoc reports a missing prerequisite or unsupported GPU counters, treat
+those counters as unavailable and follow the tool's diagnostics. A successful
+capture alone does not establish that duration counters are available.
+Setting the process environment
 `SDL_GPU_DRIVER=vulkan` requests a separate Vulkan experiment, and the script
 records that request and verifies the captured API. Keep such GPU results
 separate from D3D12 measurements. Only report GPU durations when the captured API

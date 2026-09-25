@@ -5,7 +5,29 @@ RGBA8 atlas used by all three demos. They were baked at 16 pixels from the
 hinted `Inter-Medium.ttf` in the
 [official Inter 4.1 release archive](https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip).
 
-## Recorded inputs and outputs
+## Using the bundled assets
+
+The demos load these files directly; building or running them does not require
+FreeType, HarfBuzz, or a font baker. Keep the two files together in
+`examples/assets` beside a repository-built executable, or in `assets` beside
+a deployed executable. The loader checks those locations beside the executable
+first, then relative to the working directory. Missing or malformed assets
+produce an error naming the expected files.
+
+The atlas is 256 x 128 pixels in RGBA8 format and covers U+0020 through U+007E.
+The metrics use a 16-pixel em line box rather than the font's 22-pixel
+typographic line spacing. Pair advances include shaping adjustments rounded
+to the nearest whole pixel, including symmetric rounding for negative values.
+Nonempty glyph rectangles include a one-pixel dark shadow.
+
+Inter font software is licensed under the SIL Open Font License 1.1; see
+[`LICENSE-INTER.txt`](LICENSE-INTER.txt).
+
+## Regenerating the exact bundled assets (optional)
+
+Use the inputs below when reproducing the bundled files byte for byte. These
+versions apply to asset generation, not to ordinary `rg_gui` builds. Use a
+separate `rg_text` checkout if your application uses its latest branch.
 
 | Item | Recorded value |
 | --- | --- |
@@ -22,15 +44,6 @@ hinted `Inter-Medium.ttf` in the
 | Output atlas | 256 x 128, RGBA8, 131072 bytes |
 | `.font` SHA-256 | `e31e494cee22d7a7b03355d70862e6631993a55dc75f23b3e0aa896bb1369e83` |
 | `.rgba` SHA-256 | `9d67b0f6edfe34294fecd4888e8058a9c5e21e1fa2589b8ff873496b6230e626` |
-
-The metrics use a 16-pixel em line box rather than the font's 22-pixel
-typographic line spacing. Pair advances include the font's shaping adjustments,
-rounded to the nearest whole pixel. Negative fractional adjustments are rounded
-symmetrically; they are not shifted or floored to an extra negative pixel. Each
-nonempty glyph rectangle also contains the baker's one-pixel dark shadow
-footprint.
-
-## Reproduce
 
 From a sibling [`rg_text`](https://github.com/superwendel/rg_text) checkout, use
 the source revision and vcpkg baseline recorded above. Set `RG_TEXT_TEST_FONT`
@@ -50,16 +63,7 @@ Get-FileHash ..\rg_gui\examples\assets\inter_medium_16.font -Algorithm SHA256
 Get-FileHash ..\rg_gui\examples\assets\inter_medium_16.rgba -Algorithm SHA256
 ```
 
-The recorded Windows baker environment reproduces both hashes above. Raster
-output can vary across dependency versions and platforms, so these hashes are a
-release check for that environment, not a cross-platform reproducibility claim.
-The Linux baker sanitizer job is configured for compatibility coverage; it
-does not produce the checked-in assets.
-
-The raw atlas keeps FreeType and HarfBuzz out of the runtime dependency graph.
-`rg_text` parses the `.font` file, and the shared SDL3 bootstrap uploads the
-matching `.rgba` bytes directly. If either asset is missing or malformed, the
-examples stop with an error naming the expected files.
-
-Inter font software is licensed under the SIL Open Font License 1.1; see
-[`LICENSE-INTER.txt`](LICENSE-INTER.txt).
+The hashes identify the bundled files produced with the recorded Windows baker
+environment. Raster output can vary across dependency versions and platforms.
+Run `build.bat test_assets` from the `rg_gui` directory to check the bundled
+assets and their hashes.

@@ -166,6 +166,7 @@ int main(int argc, char** argv)
 	}
 
 	RgGuiRendererLimits limits = rg_gui_renderer_limits_default();
+	limits.max_frame_runs = 512u;
 	RgGuiRendererInitDesc text_desc = {0};
 	text_desc.font = &demo_font.font;
 	text_desc.limits = limits;
@@ -201,15 +202,17 @@ int main(int argc, char** argv)
 	gpu_desc.atlas_width = demo_font.atlas_width;
 	gpu_desc.atlas_height = demo_font.atlas_height;
 	gpu_desc.max_cached_quads = limits.max_cached_quads;
-	gpu_desc.max_runs = limits.max_frame_instances;
+	gpu_desc.max_runs = limits.max_frame_runs;
 	gpu_desc.max_text_instances = limits.max_frame_instances;
 	gpu_desc.max_geometry_vertices = 16384u;
 	gpu_desc.max_items = 2048u;
+	gpu_desc.frame_buffer_count = 2u;
 	gpu_desc.min_filter = SDL_GPU_FILTER_LINEAR;
 	gpu_desc.mag_filter = SDL_GPU_FILTER_LINEAR;
 	if (!rg_gui_gpu_create(&gpu, &gpu_desc))
 		goto cleanup;
-	if (!rg_gpu_upload_ring_init(&upload_ring, device, MB(4)))
+	if (!rg_gpu_upload_ring_init(&upload_ring, device,
+	                            rg_gui_gpu_upload_ring_size_required(&gpu)))
 		goto cleanup;
 
 	rg_input_init(&input);

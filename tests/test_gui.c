@@ -1,7 +1,9 @@
 // rg_gui direct rg_text integration tests
 
 #define RG_SPRINTF_NO_ASM 1
-#define RG_GUI_ASSUME_STATIC_LABELS 1
+#define RG_GUI_TEXT_MEASURE_CACHE_SIZE 256u
+#define RG_GUI_TEXT_LENGTH_CACHE_SIZE 256u
+#define RG_GUI_MENU_WIDTH_CACHE_SIZE 64u
 #define RG_GUI_ENABLE_VIEWPORTS 1
 #define RGINLINE static inline
 #include "../src/rg_gui.h"
@@ -13,6 +15,10 @@
 #include <string.h>
 
 #include "test_gui_lookup.h"
+#include "test_gui_text_lifetime.h"
+#include "test_gui_text_capture.h"
+#include "test_gui_text_area_cache.h"
+#include "test_gui_viewport_storage.h"
 
 static int nearly_equal(f32 a, f32 b)
 {
@@ -1073,9 +1079,10 @@ int main(void)
 
 	if (!test_dock_layout_validation(&gui) || !test_node_graph_bundle_validation() ||
 	    !test_integer_widget_boundaries(&gui) ||
-	    !test_viewport_and_input_router(&gui) ||
+	    !test_viewport_and_input_router(&gui) || !test_viewport_storage(&font) ||
 	    !test_incremental_text_wrapping() || !test_text_area_layout_edits(&gui) ||
-	    !test_text_lookup())
+	    !test_text_lookup() || !test_text_lifetimes(&font) || !test_text_mouse_capture(&font) ||
+	    !test_text_area_cache())
 	{
 		free(memory);
 		return 1;

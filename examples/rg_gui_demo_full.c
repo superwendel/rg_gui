@@ -87,6 +87,9 @@ typedef struct FullDemoState
 	int environment_open;
 	RgGuiTreeState tree;
 	RgGuiTextAreaState notes_area;
+	RgGuiTextAreaLayoutCache notes_cache;
+	char notes_cache_text[KB(16)];
+	RgGuiTextAreaVisualLine notes_cache_lines[RG_GUI_TEXT_AREA_VISUAL_LINE_MAX];
 
 	int stats_live;
 	f32 activity;
@@ -161,6 +164,10 @@ static void full_reset_controls(FullDemoState* state)
 static void full_state_init(FullDemoState* state)
 {
 	memset(state, 0, sizeof(*state));
+	rg_gui_text_area_cache_init(&state->notes_cache, state->notes_cache_text,
+	                            sizeof(state->notes_cache_text), state->notes_cache_lines,
+	                            RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
+	state->notes_area.layout_cache = &state->notes_cache;
 	state->menu_active = 0;
 	for (int i = 0; i < FULL_MENU_COUNT; i++) state->menu_selected[i] = -1;
 	SDL_strlcpy(state->last_action, "Ready", sizeof(state->last_action));
@@ -823,6 +830,7 @@ int main(int argc, char** argv)
 
 	RgGuiRendererLimits limits = rg_gui_renderer_limits_default();
 	limits.max_frame_instances = 32768u;
+	limits.max_frame_runs = 2048u;
 	limits.max_batches = 4096u;
 	RgGuiRendererInitDesc text_desc = {0};
 	text_desc.font = &demo_font.font;
@@ -858,14 +866,16 @@ int main(int argc, char** argv)
 	gpu_desc.atlas_width = demo_font.atlas_width;
 	gpu_desc.atlas_height = demo_font.atlas_height;
 	gpu_desc.max_cached_quads = limits.max_cached_quads;
-	gpu_desc.max_runs = limits.max_frame_instances;
+	gpu_desc.max_runs = limits.max_frame_runs;
 	gpu_desc.max_text_instances = limits.max_frame_instances;
 	gpu_desc.max_geometry_vertices = 65536u;
 	gpu_desc.max_items = 8192u;
+	gpu_desc.frame_buffer_count = 2u;
 	gpu_desc.min_filter = SDL_GPU_FILTER_LINEAR;
 	gpu_desc.mag_filter = SDL_GPU_FILTER_LINEAR;
 	if (!rg_gui_gpu_create(&gpu, &gpu_desc)) goto cleanup;
-	if (!rg_gpu_upload_ring_init(&upload_ring, device, MB(8))) goto cleanup;
+	if (!rg_gpu_upload_ring_init(&upload_ring, device,
+	                            rg_gui_gpu_upload_ring_size_required(&gpu))) goto cleanup;
 
 	rg_input_init(&input);
 	RgInputEvent input_event_storage[256];

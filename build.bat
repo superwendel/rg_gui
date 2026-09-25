@@ -530,6 +530,12 @@ if not errorlevel 0 exit /b 1
 call :compile_shader rg_gui_image.frag fragment
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
+call :compile_shader rg_gui_indexed.vert vertex
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+call :compile_shader rg_gui_indexed.frag fragment
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
 echo rg_gui shaders compiled successfully.
 exit /b 0
 

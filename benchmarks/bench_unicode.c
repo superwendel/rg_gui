@@ -96,7 +96,7 @@ static void unicode_init(UnicodeBench* u, u32 count) {
     b->gui_memory = allocate(gui_size);
     RgArena gui_arena = {(char*)b->gui_memory, gui_size, 0u, gui_size};
     if (!rg_gui_init(&b->gui, &gui_arena, &gui_desc)) fail("Unicode GUI init");
-    RgGuiRendererLimits limits = {512u, 1024u, 128u * 1024u, 32768u, 32768u, 16u};
+    RgGuiRendererLimits limits = {512u, 1024u, 128u * 1024u, 32768u, 32768u, 16u, 0u};
     b->renderer_memory_size = rg_gui_renderer_memory_required(&limits, 32u);
     if (b->renderer_memory_size == SIZE_MAX) fail("Unicode renderer size");
     b->renderer_memory = allocate(b->renderer_memory_size);

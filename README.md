@@ -25,14 +25,15 @@ applications in this repository.
   backend binaries are intentionally ignored.
 
 The frontend uses `RgTextFont` directly for measurement. The renderer caches
-`rg_text` glyph geometry and sends compact run descriptors to a compute shader,
-which expands final text instances on the GPU. The steady-state frontend and
+`rg_text` glyph geometry and draws text, shapes, and stock images through an
+ordered indexed stream. Compatible adjacent items share a draw call; text
+vertices read the cached glyphs directly on the GPU. The steady-state frontend and
 text-preparation paths use fixed-capacity storage selected at initialization;
 they do not grow their arenas during a frame.
 
 `rg_gui_init` requires a descriptor with a non-null font. Use
 `rg_gui_memory_required` with that same descriptor to allocate the frontend
-arena exactly; the demos do this rather than relying on a guessed reserve.
+arena with sufficient capacity and alignment padding.
 
 Changing text can opt into a shared `RgGuiTextLookup` through
 `RgGuiInitDesc.text_lookup`. It costs about 65 KiB per font and accelerates ASCII
@@ -41,33 +42,24 @@ measurement. The renderer can borrow the same table via
 to omit its duplicate storage. The demos share one table per font. See the
 [lookup ownership rules](docs/rg_gui.md#include-and-initialize).
 
+Larger text editors can attach a caller-owned
+[text-area layout cache](docs/rg_gui.md#persistent-text-area-layout) to reuse
+wrapped lines across unchanged frames. The full showcase demonstrates it.
+
 See [the API and integration notes](docs/rg_gui.md) for the complete lifecycle,
 capacity behavior, platform output, and ownership rules.
 
-## Dependency baseline
+## Dependencies
 
-Use these pinned dependency revisions for reproducible builds:
-
-| Dependency | Revision or version |
-| --- | --- |
-| `rg_core` | `d4787158faa3366357d16ba2e1e466ee40276749` |
-| `rg_text` | `4b98c6d38d4de1398ebb0970fc8e0e3db01bafa5` |
-| vcpkg ports | baseline `91e8cb4be8195112ea3a9c7e5846bd0b3ff74673` |
-| SDL3 | 3.4.10 used for local Windows release validation; 3.4.14 configured in Linux sanitizer CI |
-
-The Windows manifest install resolves SDL3 through the vcpkg baseline. Local
-GPU and performance measurements used a separate SDL3 3.4.10 installation.
-
-The optional Windows atlas baker at that baseline uses FreeType `2.14.3#0`
-and HarfBuzz `14.4.0#0`; neither is a runtime dependency. The exact feature
-selection, source-font hash, command, and output hashes are recorded in
-[`examples/assets/README.md`](examples/assets/README.md).
+Use the latest `rg_core` and `rg_text` default branches, plus SDL3 and
+SDL_shadercross. The vcpkg manifest installs the SDL dependencies automatically.
+The demos include prebuilt font assets, so no font-baking tools are needed.
 
 ## Clean Windows setup
 
 Use a Visual Studio 2022 Developer Command Prompt with the Desktop development
-with C++ workload. Place the three repositories beside one another so the
-default dependency paths resolve:
+with C++ workload. Clone the repositories beside one another so the default
+dependency paths resolve. These commands use their latest default branches:
 
 ```bat
 git clone https://github.com/superwendel/rg_core.git
@@ -75,9 +67,6 @@ git clone https://github.com/superwendel/rg_text.git
 git clone https://github.com/superwendel/rg_gui.git
 git clone https://github.com/microsoft/vcpkg.git
 
-git -C rg_core checkout d4787158faa3366357d16ba2e1e466ee40276749
-git -C rg_text checkout 4b98c6d38d4de1398ebb0970fc8e0e3db01bafa5
-git -C vcpkg checkout 91e8cb4be8195112ea3a9c7e5846bd0b3ff74673
 call vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
 cd rg_gui
@@ -103,6 +92,7 @@ build.bat test
 build.bat test_ci
 build.bat shaders
 build.bat test_gpu_device
+build.bat test_demo_lifecycle
 build.bat demo
 build.bat demo_smoke
 build.bat test_release
@@ -110,23 +100,24 @@ build.bat test_release
 
 - `test` runs renderer-neutral and GPU-preparation tests without executing a GPU
   command buffer.
-- `test_ci` also translates every shader format, compiles the device target,
-  validates the demo assets and their recorded SHA-256 hashes, and builds all
-  demos. Hosted CI does not claim to execute a GPU device.
+- `test_ci` also translates every shader format, validates demo assets, builds
+  all demos, and compiles the GPU device and native lifecycle tests. It does
+  not execute GPU work.
 - `test_gpu_device` executes the hidden-window SDL_GPU device test.
 - `test_demo_lifecycle` exercises native tear-out window reuse, restoration,
   text-input cleanup, and final destruction with actual SDL GPU windows.
 - `demo_smoke` builds all three demos, briefly opens their windows, and requires
   three actual main-window presentations from each. The tear-out smoke also
   creates a secondary native window and presents its viewport at least once.
-- `test_release` is the local release gate: it includes the device test and
-  runs those presentation-verified demo smokes and native lifecycle checks.
+- `test_release` runs `test_ci`, the GPU device test, demo smoke tests, and
+  native lifecycle checks. It requires a working SDL GPU device and display.
 
 `build.bat clean` removes only generated files rooted in this checkout.
 
-See the [performance report](benchmarks/PERFORMANCE.md) for measured results
-and their limits, and the [benchmark instructions](benchmarks/README.md) to
-run repeatable CPU comparisons.
+Use the [benchmark guide](benchmarks/README.md) for repeatable CPU comparisons
+and the [profiling guide](benchmarks/PROFILING.md) to measure demo frame times
+and renderer activity. See [performance against Dear ImGui](benchmarks/PERFORMANCE.md)
+for workload comparisons, test settings, and tradeoffs.
 
 ## Demos
 
@@ -180,15 +171,15 @@ The tested language modes are C11 with MSVC and GNU11 with Clang. `rg_core`
 uses compiler extensions for type-safe utility macros, so this stack does not
 claim ISO C99 conformance.
 
-| Platform | Current verification |
+| Platform | Build and runtime coverage |
 | --- | --- |
 | Windows x64 / MSVC | Full build, shader translation, demos, and local SDL_GPU device execution |
-| Linux x64 / Clang | CI configured for ASan/UBSan host tests and SDL_GPU device-target compilation; hosted results not yet verified; GPU execution untested |
+| Linux x64 / Clang | CI configured for ASan/UBSan host tests and GPU device-target compilation; GPU execution untested |
 | macOS | Not currently tested; emitting MSL shader output is not a macOS support claim |
 
-Windows x64 applications should assemble and link rg_core's
-`src/asm/sprintf/win_x64/rg_sprintf_asm_x64.asm` to retain the optimized
-numeric-formatting path. `RG_SPRINTF_NO_ASM` selects the portable C fallback.
+The demos build with portable C formatting. Projects that select rg_core's
+optional native assembly formatter must also assemble and link its matching
+helper object; see the [integration notes](docs/rg_gui.md).
 
 ## License and trademark
 

@@ -46,6 +46,9 @@ typedef struct RgGuiRendererBaseLimits
 	u32 max_cached_quads;
 	u32 max_frame_instances;
 	u32 max_batches;
+	/* Page-segment descriptors, independently bounded from expanded glyphs.
+	 * Zero preserves the max_frame_instances bound for existing callers. */
+	u32 max_frame_runs;
 } RgGuiRendererBaseLimits;
 
 typedef struct RgGuiRendererBaseInitDesc
@@ -265,6 +268,7 @@ RGINLINE RgGuiRendererBaseLimits rg_gui_renderer_base_limits_default(void)
 	limits.max_cached_quads = 65536u;
 	limits.max_frame_instances = 65536u;
 	limits.max_batches = 256u;
+	limits.max_frame_runs = 0u;
 	return limits;
 }
 
@@ -273,6 +277,7 @@ RGINLINE RgGuiRendererBaseLimits rg_gui_renderer_base_limits_resolve(const RgGui
 	RgGuiRendererBaseLimits result = rg_gui_renderer_base_limits_default();
 	if (!supplied)
 	{
+		result.max_frame_runs = result.max_frame_instances;
 		return result;
 	}
 	if (supplied->max_cached_runs) result.max_cached_runs = supplied->max_cached_runs;
@@ -281,7 +286,18 @@ RGINLINE RgGuiRendererBaseLimits rg_gui_renderer_base_limits_resolve(const RgGui
 	if (supplied->max_cached_quads) result.max_cached_quads = supplied->max_cached_quads;
 	if (supplied->max_frame_instances) result.max_frame_instances = supplied->max_frame_instances;
 	if (supplied->max_batches) result.max_batches = supplied->max_batches;
+	result.max_frame_runs = supplied->max_frame_runs ? supplied->max_frame_runs : result.max_frame_instances;
 	return result;
+}
+
+RGINLINE u32 rg_gui_renderer_base_frame_storage_count(const RgGuiRendererBaseLimits* limits)
+{
+#if defined(RG_GUI_RENDERER_TEST_REFERENCE)
+	return limits->max_frame_runs > limits->max_frame_instances ?
+	       limits->max_frame_runs : limits->max_frame_instances;
+#else
+	return limits->max_frame_runs;
+#endif
 }
 
 RGINLINE int rg_gui_renderer_base_size_add_array(size_t* total, size_t count, size_t element_size,
@@ -311,7 +327,7 @@ RGINLINE size_t rg_gui_renderer_base_memory_required_internal(
 	    !rg_gui_renderer_base_size_add_array(&total, limits.hash_slot_count, sizeof(u32), RG_ALIGNOF(u32)) ||
 	    !rg_gui_renderer_base_size_add_array(&total, limits.text_capacity, sizeof(char), RG_ALIGNOF(char)) ||
 	    !rg_gui_renderer_base_size_add_array(&total, limits.max_cached_quads, sizeof(RgGuiRendererBaseCachedQuad), RG_ALIGNOF(RgGuiRendererBaseCachedQuad)) ||
-	    !rg_gui_renderer_base_size_add_array(&total, limits.max_frame_instances, sizeof(RgGuiRendererBaseInstance), RG_ALIGNOF(RgGuiRendererBaseInstance)) ||
+	    !rg_gui_renderer_base_size_add_array(&total, rg_gui_renderer_base_frame_storage_count(&limits), sizeof(RgGuiRendererBaseInstance), RG_ALIGNOF(RgGuiRendererBaseInstance)) ||
 	    !rg_gui_renderer_base_size_add_array(&total, limits.max_batches, sizeof(RgGuiRendererBaseBatch), RG_ALIGNOF(RgGuiRendererBaseBatch)) ||
 	    (own_lookup && !rg_gui_renderer_base_size_add_array(
 	        &total, 1u, sizeof(RgGuiTextLookup), RG_ALIGNOF(RgGuiTextLookup))))
@@ -382,7 +398,7 @@ static int rg_gui_renderer_base_init(RgGuiRendererBaseContext* ctx, RgArena* are
 	ctx->cache_quads = (RgGuiRendererBaseCachedQuad*)rg_arena_alloc_array(
 	    arena, sizeof(RgGuiRendererBaseCachedQuad), limits.max_cached_quads, RG_ALIGNOF(RgGuiRendererBaseCachedQuad));
 	ctx->frame_instances = (RgGuiRendererBaseInstance*)rg_arena_alloc_array(
-	    arena, sizeof(RgGuiRendererBaseInstance), limits.max_frame_instances, RG_ALIGNOF(RgGuiRendererBaseInstance));
+	    arena, sizeof(RgGuiRendererBaseInstance), rg_gui_renderer_base_frame_storage_count(&limits), RG_ALIGNOF(RgGuiRendererBaseInstance));
 	ctx->frame_batches = (RgGuiRendererBaseBatch*)rg_arena_alloc_array(
 	    arena, sizeof(RgGuiRendererBaseBatch), limits.max_batches, RG_ALIGNOF(RgGuiRendererBaseBatch));
 	if (own_lookup)
@@ -1270,6 +1286,12 @@ RGINLINE const RgGuiRendererBaseStats* rg_gui_renderer_base_stats(const RgGuiRen
 #define RG_GUI_RENDERER_DEFAULT_PAGE_QUADS 32u
 #endif
 
+// Bound speculative page reservation for cold text layout. Longer runs use an
+// exact glyph count before allocation; zero disables speculative reservation.
+#ifndef RG_GUI_RENDERER_OPTIMISTIC_TEXT_BYTES
+#define RG_GUI_RENDERER_OPTIMISTIC_TEXT_BYTES 256u
+#endif
+
 typedef RgGuiRendererBaseLimits RgGuiRendererLimits;
 typedef RgGuiRendererBaseInstance RgGuiRendererGlyph;
 typedef RgGuiRendererBaseCachedQuad RgGuiRendererCachedQuad;
@@ -1319,6 +1341,9 @@ typedef struct RgGuiRenderer
 	u32* page_next;
 	u32* free_pages;
 	RgGuiRendererRange* dirty_pages;
+	/* Zero is free; live pages carry the last content revision, surviving begin_frame. */
+	u64* page_revisions;
+	u64 cache_revision;
 	u32 page_quads;
 	u32 total_pages;
 	u32 next_fresh_page;
@@ -1367,6 +1392,8 @@ RGINLINE size_t rg_gui_renderer_memory_required_internal(
 	                                         sizeof(u32), RG_ALIGNOF(u32)) ||
 	    !rg_gui_renderer_base_size_add_array(&total, total_pages,
 	                                         sizeof(u32), RG_ALIGNOF(u32)) ||
+	    !rg_gui_renderer_base_size_add_array(&total, total_pages,
+	                                         sizeof(u64), RG_ALIGNOF(u64)) ||
 	    !rg_gui_renderer_base_size_add_array(&total, total_pages,
 	                                         sizeof(RgGuiRendererRange), RG_ALIGNOF(RgGuiRendererRange)))
 	{
@@ -1442,14 +1469,17 @@ RGINLINE int rg_gui_renderer_init(RgGuiRenderer* ctx, RgArena* arena,
 	    arena, sizeof(u32), ctx->total_pages, RG_ALIGNOF(u32));
 	ctx->dirty_pages = (RgGuiRendererRange*)rg_arena_alloc_array(
 	    arena, sizeof(RgGuiRendererRange), ctx->total_pages, RG_ALIGNOF(RgGuiRendererRange));
+	ctx->page_revisions = (u64*)rg_arena_alloc_array(
+	    arena, sizeof(u64), ctx->total_pages, RG_ALIGNOF(u64));
 	if (!ctx->run_first_pages || !ctx->page_next || !ctx->free_pages ||
-	    !ctx->dirty_pages)
+	    !ctx->dirty_pages || !ctx->page_revisions)
 	{
 		arena->used = arena_used;
 		memset(ctx, 0, sizeof(*ctx));
 		return 0;
 	}
 	ctx->free_page_count = ctx->total_pages;
+	memset(ctx->page_revisions, 0, sizeof(u64) * ctx->total_pages);
 	ctx->initialized = 1;
 	rg_gui_renderer_sync_allocator_stats(ctx);
 	return 1;
@@ -1470,6 +1500,8 @@ RGINLINE u32 rg_gui_renderer_allocate_pages(RgGuiRenderer* ctx, u32 page_count)
 		u32 page = ctx->recycled_page_count ? ctx->free_pages[--ctx->recycled_page_count] : ctx->next_fresh_page++;
 		ctx->free_page_count--;
 		ctx->page_next[page] = UINT32_MAX;
+		memset(ctx->core.cache_quads + page * ctx->page_quads, 0,
+		       sizeof(RgGuiRendererCachedQuad) * ctx->page_quads);
 		ctx->allocated_page_count++;
 		return page;
 	}
@@ -1478,6 +1510,8 @@ RGINLINE u32 rg_gui_renderer_allocate_pages(RgGuiRenderer* ctx, u32 page_count)
 	for (u32 i = 0u; i < page_count; i++)
 	{
 		u32 page = ctx->recycled_page_count ? ctx->free_pages[--ctx->recycled_page_count] : ctx->next_fresh_page++;
+		memset(ctx->core.cache_quads + page * ctx->page_quads, 0,
+		       sizeof(RgGuiRendererCachedQuad) * ctx->page_quads);
 		if (previous_page != UINT32_MAX) ctx->page_next[previous_page] = page;
 		else first_page = page;
 		previous_page = page;
@@ -1494,6 +1528,7 @@ RGINLINE void rg_gui_renderer_free_pages(RgGuiRenderer* ctx, u32 first_page,
 	if (page_count == 1u)
 	{
 		ctx->free_pages[ctx->recycled_page_count++] = first_page;
+		ctx->page_revisions[first_page] = 0u;
 		ctx->free_page_count++;
 		ctx->allocated_page_count--;
 		ctx->live_quad_count -= quad_count;
@@ -1504,6 +1539,7 @@ RGINLINE void rg_gui_renderer_free_pages(RgGuiRenderer* ctx, u32 first_page,
 	{
 		u32 next = ctx->page_next[page];
 		ctx->free_pages[ctx->recycled_page_count++] = page;
+		ctx->page_revisions[page] = 0u;
 		page = next;
 	}
 	ctx->free_page_count += page_count;
@@ -1515,8 +1551,10 @@ RGINLINE void rg_gui_renderer_mark_pages_dirty(RgGuiRenderer* ctx, u32 first_pag
                                                u32 quad_count)
 {
 	if (!quad_count) return;
+	u64 revision = ++ctx->cache_revision;
 	if (quad_count <= ctx->page_quads)
 	{
+		ctx->page_revisions[first_page] = revision;
 		RgGuiRendererRange* dirty = &ctx->dirty_pages[ctx->dirty_page_count++];
 		dirty->first_quad = first_page * ctx->page_quads;
 		dirty->quad_count = quad_count;
@@ -1526,6 +1564,7 @@ RGINLINE void rg_gui_renderer_mark_pages_dirty(RgGuiRenderer* ctx, u32 first_pag
 	u32 remaining = quad_count;
 	while (remaining)
 	{
+		ctx->page_revisions[page] = revision;
 		u32 count = remaining < ctx->page_quads ? remaining : ctx->page_quads;
 		RgGuiRendererRange* dirty = &ctx->dirty_pages[ctx->dirty_page_count++];
 		dirty->first_quad = page * ctx->page_quads;
@@ -1668,6 +1707,14 @@ RGINLINE void rg_gui_renderer_reclaim(RgGuiRenderer* ctx, int keep_previous)
 	}
 }
 
+RGINLINE int rg_gui_renderer_run_metadata_fits(const RgGuiRendererBaseContext* core,
+                                               size_t text_size, u32 slot)
+{
+	return slot != UINT32_MAX && core->run_count < core->limits.max_cached_runs &&
+	       text_size <= core->limits.text_capacity &&
+	       text_size <= core->limits.text_capacity - core->text_used;
+}
+
 static RgGuiRendererBaseRunResult rg_gui_renderer_get_run(RgGuiRenderer* ctx, const char* text,
                                                           size_t text_size, f32 scale,
                                                           uintptr_t cache_identity,
@@ -1702,24 +1749,50 @@ static RgGuiRendererBaseRunResult rg_gui_renderer_get_run(RgGuiRenderer* ctx, co
 	u32 page_count = 0u;
 	u32 first_page = UINT32_MAX;
 	int built_optimistically = 0;
-	int can_build_once = text_size && scale != 0.0f &&
-	                     text_size <= ctx->page_quads &&
-	                     stored_text_size <= core->limits.text_capacity &&
-	                     core->run_count < core->limits.max_cached_runs &&
-	                     stored_text_size <= core->limits.text_capacity - core->text_used &&
-	                     slot != UINT32_MAX && ctx->free_page_count;
-	if (can_build_once)
+	u32 reclaim_level = 0u;
+	// Every emitted glyph consumes at least one UTF-8 byte. Reserve this bounded
+	// upper limit only from available pages; overestimation must not evict runs.
+	u32 optimistic_pages = text_size && scale != 0.0f &&
+	                       text_size <= RG_GUI_RENDERER_OPTIMISTIC_TEXT_BYTES &&
+	                       text_size <= UINT32_MAX
+	                           ? rg_gui_renderer_pages_required(ctx, (u32)text_size) : 0u;
+	if (optimistic_pages && optimistic_pages <= ctx->total_pages &&
+	    stored_text_size <= core->limits.text_capacity)
 	{
-		first_page = rg_gui_renderer_allocate_pages(ctx, 1u);
+		// Run/text/hash storage can require reclamation independently of glyph
+		// count. Resolve that pressure first so short runs still build once after
+		// reclamation; capacity failures retain the exact-count fallback below.
+		while (!rg_gui_renderer_run_metadata_fits(core, stored_text_size, slot) && reclaim_level < 2u)
+		{
+			reclaim_level++;
+			rg_gui_renderer_reclaim(ctx, reclaim_level == 1u);
+			slot = rg_gui_renderer_base_find_slot(core, hash, text, text_size, scale_bits,
+			                                      cache_identity, &run_index);
+		}
+	}
+	if (optimistic_pages && optimistic_pages <= ctx->free_page_count &&
+	    rg_gui_renderer_run_metadata_fits(core, stored_text_size, slot))
+	{
+		first_page = rg_gui_renderer_allocate_pages(ctx, optimistic_pages);
 		if (first_page != UINT32_MAX)
 		{
 			quad_count = rg_gui_renderer_build_pages(
-			    ctx, text, text_size, scale, first_page, ctx->page_quads);
-			page_count = quad_count ? 1u : 0u;
-			if (!quad_count)
+			    ctx, text, text_size, scale, first_page, optimistic_pages * ctx->page_quads);
+			page_count = rg_gui_renderer_pages_required(ctx, quad_count);
+			if (page_count < optimistic_pages)
 			{
-				rg_gui_renderer_free_pages(ctx, first_page, 1u, 0u);
-				first_page = UINT32_MAX;
+				u32 unused_page = first_page;
+				if (page_count)
+				{
+					u32 last_page = first_page;
+					for (u32 i = 1u; i < page_count; i++) last_page = ctx->page_next[last_page];
+					unused_page = ctx->page_next[last_page];
+					ctx->page_next[last_page] = UINT32_MAX;
+				}
+				else first_page = UINT32_MAX;
+				// These glyphs have not entered live_quad_count yet. Free only the
+				// unused pages, leaving initialized tails in all retained pages.
+				rg_gui_renderer_free_pages(ctx, unused_page, optimistic_pages - page_count, 0u);
 			}
 			built_optimistically = 1;
 		}
@@ -1738,27 +1811,15 @@ static RgGuiRendererBaseRunResult rg_gui_renderer_get_run(RgGuiRenderer* ctx, co
 	{
 		if (stored_text_size > core->limits.text_capacity ||
 		    page_count > ctx->total_pages) goto bypass;
-		int needs_reclaim = core->run_count >= core->limits.max_cached_runs ||
-		                    stored_text_size > core->limits.text_capacity - core->text_used ||
-		                    page_count > ctx->free_page_count || slot == UINT32_MAX;
-		if (needs_reclaim)
+		while ((!rg_gui_renderer_run_metadata_fits(core, stored_text_size, slot) ||
+		        page_count > ctx->free_page_count) && reclaim_level < 2u)
 		{
-			rg_gui_renderer_reclaim(ctx, 1);
+			reclaim_level++;
+			rg_gui_renderer_reclaim(ctx, reclaim_level == 1u);
 			slot = rg_gui_renderer_base_find_slot(core, hash, text, text_size, scale_bits,
 			                                      cache_identity, &run_index);
 		}
-		if (slot == UINT32_MAX ||
-		    core->run_count >= core->limits.max_cached_runs ||
-		    stored_text_size > core->limits.text_capacity - core->text_used ||
-		    page_count > ctx->free_page_count)
-		{
-			rg_gui_renderer_reclaim(ctx, 0);
-			slot = rg_gui_renderer_base_find_slot(core, hash, text, text_size, scale_bits,
-			                                      cache_identity, &run_index);
-		}
-		if (slot == UINT32_MAX ||
-		    core->run_count >= core->limits.max_cached_runs ||
-		    stored_text_size > core->limits.text_capacity - core->text_used ||
+		if (!rg_gui_renderer_run_metadata_fits(core, stored_text_size, slot) ||
 		    page_count > ctx->free_page_count) goto bypass;
 
 		first_page = rg_gui_renderer_allocate_pages(ctx, page_count);
@@ -1818,6 +1879,8 @@ RGINLINE void rg_gui_renderer_clear_cache(RgGuiRenderer* ctx)
 	ctx->dirty_page_count = 0u;
 	ctx->live_quad_count = 0u;
 	ctx->allocated_page_count = 0u;
+	memset(ctx->page_revisions, 0, sizeof(u64) * ctx->total_pages);
+	ctx->cache_revision++;
 	rg_gui_renderer_sync_allocator_stats(ctx);
 }
 
@@ -1831,6 +1894,36 @@ RGINLINE void rg_gui_renderer_begin_frame(RgGuiRenderer* ctx)
 	ctx->allocator_stats.frame_extra_segments = 0u;
 	ctx->allocator_stats.frame_reclaims = 0u;
 	ctx->allocator_stats.frame_escalated_reclaims = 0u;
+}
+
+/** Snapshot sorted, coalesced whole-page writes newer than a submitted revision.
+ * Every allocated page is initialized in full, including its unused tail.
+ * Pass NULL ranges to count storage. Returns UINT32_MAX for insufficient output. */
+RGINLINE u32 rg_gui_renderer_upload_ranges(const RgGuiRenderer* ctx,
+                                            u64 after_revision,
+                                            RgGuiRendererRange* ranges,
+                                            u32 capacity, u32* out_quads)
+{
+	u32 count = 0u, quads = 0u;
+	if (!ctx || !ctx->initialized) return UINT32_MAX;
+	for (u32 page = 0u; page < ctx->next_fresh_page;)
+	{
+		if (ctx->page_revisions[page] <= after_revision) { page++; continue; }
+		u32 first = page++;
+		while (page < ctx->next_fresh_page && ctx->page_revisions[page] > after_revision)
+			page++;
+		u32 length = (page - first) * ctx->page_quads;
+		if (ranges)
+		{
+			if (count >= capacity) return UINT32_MAX;
+			ranges[count].first_quad = first * ctx->page_quads;
+			ranges[count].quad_count = length;
+		}
+		quads += length;
+		count++;
+	}
+	if (out_quads) *out_quads = quads;
+	return count;
 }
 
 /** Emit one compact descriptor for each cached page segment. */
@@ -1918,7 +2011,7 @@ RGINLINE int rg_gui_renderer_prepare(RgGuiRenderer* ctx,
 		}
 		if (!quad_count) continue;
 		u32 segment_count = rg_gui_renderer_pages_required(ctx, quad_count);
-		if (segment_count > core->limits.max_frame_instances -
+		if (segment_count > core->limits.max_frame_runs -
 		                        core->frame_instance_count ||
 		    quad_count > core->limits.max_frame_instances - output_glyph_count)
 		{

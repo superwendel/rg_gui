@@ -22,9 +22,9 @@
 //   #define RG_GUI_ASSERT(x)            - Custom assert macro (default: assert)
 //   #define RG_GUI_MAX_DRAW_CMDS        - Default draw command capacity (default: 4096)
 //   #define RG_GUI_TEXT_BUFFER_SIZE     - Default text buffer size (default: 64 KB)
-//   #define RG_GUI_TEXT_MEASURE_CACHE_SIZE - Static text width cache size (default: 256 when RG_GUI_ASSUME_STATIC_LABELS)
-//   #define RG_GUI_TEXT_LENGTH_CACHE_SIZE  - Static text length cache size (default: 256 when RG_GUI_ASSUME_STATIC_LABELS)
-//   #define RG_GUI_MENU_WIDTH_CACHE_SIZE   - Menu max-width cache size (default: 64 when RG_GUI_ASSUME_STATIC_LABELS)
+//   #define RG_GUI_TEXT_MEASURE_CACHE_SIZE - Static text width cache size (default: 0)
+//   #define RG_GUI_TEXT_LENGTH_CACHE_SIZE  - Static text length cache size (default: 0)
+//   #define RG_GUI_MENU_WIDTH_CACHE_SIZE   - Menu max-width cache size (default: 0)
 //   #define RG_GUI_TAB_SCROLL_CACHE_SIZE   - Tab scroll cache size (default: 64)
 //   #define RG_GUI_TEXT_PREFIX_CACHE_SIZE  - Text input prefix cache size (default: 16)
 //   #define RG_GUI_IME_PREEDIT_SIZE     - Bounded IME composition buffer size (default: 256)
@@ -56,16 +56,16 @@
 //   #define RG_GUI_TABLE_RESIZE_GRIP    - Column resize grip width (default: 6)
 //   #define RG_GUI_ROW_CACHE_BLOCK     - Row cache block size for clipped panels (default: 64)
 //   #define RG_GUI_NO_STRING_IDS        - Remove string-ID APIs at compile time (use explicit cached IDs)
-//   #define RG_GUI_ASSUME_STATIC_LABELS - Treat all labels as static text
-//   #define RG_GUI_COPY_DYNAMIC_TEXT    - Copy input/value text into frame buffer (default: 0)
+//   RG_GUI_LABEL_COPY and RG_GUI_COPY_DYNAMIC_TEXT must be 1 if defined.
 //
 // NOTES:
 //   - Requires rg_input.h (SDL3) for input state.
 //   - Requires rg_text.h for font measurement and renderer cache identity.
-//   - Use rg_gui_label_static for constant labels to skip text copies (or RG_GUI_ASSUME_STATIC_LABELS).
+//   - Ordinary label and dynamic-value APIs snapshot text in the current frame.
+//     Use rg_gui_label_static for constant labels to skip text copies.
 //     Strings passed to any *_static API must remain at the same address and their bytes must not
 //     change for the lifetime of the GUI context; static-text caches use pointer identity.
-//     With RG_GUI_ASSUME_STATIC_LABELS, this contract applies to every label API.
+//     RG_GUI_ASSUME_STATIC_LABELS is no longer supported.
 //   - This header intentionally has no include guard and should be included once.
 //   - All functions have internal linkage and work in unity builds.
 //
@@ -125,27 +125,15 @@
 #endif
 
 #ifndef RG_GUI_TEXT_MEASURE_CACHE_SIZE
-#if defined(RG_GUI_ASSUME_STATIC_LABELS)
-#define RG_GUI_TEXT_MEASURE_CACHE_SIZE 256u
-#else
 #define RG_GUI_TEXT_MEASURE_CACHE_SIZE 0u
-#endif
 #endif
 
 #ifndef RG_GUI_TEXT_LENGTH_CACHE_SIZE
-#if defined(RG_GUI_ASSUME_STATIC_LABELS)
-#define RG_GUI_TEXT_LENGTH_CACHE_SIZE 256u
-#else
 #define RG_GUI_TEXT_LENGTH_CACHE_SIZE 0u
-#endif
 #endif
 
 #ifndef RG_GUI_MENU_WIDTH_CACHE_SIZE
-#if defined(RG_GUI_ASSUME_STATIC_LABELS)
-#define RG_GUI_MENU_WIDTH_CACHE_SIZE 64u
-#else
 #define RG_GUI_MENU_WIDTH_CACHE_SIZE 0u
-#endif
 #endif
 
 #ifndef RG_GUI_TAB_SCROLL_CACHE_SIZE
@@ -236,16 +224,22 @@
 #define RG_GUI_UNUSED(x) (void)(x)
 #endif
 
-#ifndef RG_GUI_LABEL_COPY
 #if defined(RG_GUI_ASSUME_STATIC_LABELS)
-#define RG_GUI_LABEL_COPY 0
-#else
+#error RG_GUI_ASSUME_STATIC_LABELS is unsafe; use explicit *_static APIs for immutable text
+#endif
+
+#ifndef RG_GUI_LABEL_COPY
 #define RG_GUI_LABEL_COPY 1
 #endif
+#if RG_GUI_LABEL_COPY != 1
+#error RG_GUI_LABEL_COPY must be 1; use explicit *_static APIs for immutable text
 #endif
 
 #ifndef RG_GUI_COPY_DYNAMIC_TEXT
-#define RG_GUI_COPY_DYNAMIC_TEXT 0
+#define RG_GUI_COPY_DYNAMIC_TEXT 1
+#endif
+#if RG_GUI_COPY_DYNAMIC_TEXT != 1
+#error RG_GUI_COPY_DYNAMIC_TEXT must be 1; mutable editor and value text requires frame snapshots
 #endif
 
 #ifndef RG_GUI_TEXT_CACHE_IDENTITY
@@ -653,6 +647,20 @@ typedef struct RgGuiDrawList
 	u32 capacity;
 } RgGuiDrawList;
 
+#if defined(RG_GUI_ENABLE_VIEWPORTS)
+/** Supply persistent command arrays for a viewport slot on its first use.
+ * Return nonzero with two aligned, nonoverlapping arrays of the requested
+ * capacities. Storage must also be distinct from every other GUI draw array.
+ * The caller owns all storage, including outputs from a failed callback, and
+ * keeps successful arrays alive until the context is no longer used. Release
+ * and reuse of a viewport retain its arrays; rg_gui never frees them. Do not
+ * reenter the GUI from this callback. A failed request may be retried later.
+ */
+typedef int (*RgGuiViewportStorageCallback)(
+    void* user_data, u32 slot_index, u32 draw_capacity, u32 overlay_capacity,
+    RgGuiDrawCmd** draw_commands, RgGuiDrawCmd** overlay_commands);
+#endif
+
 typedef u32 RgGuiDiagnosticFlags;
 
 enum
@@ -665,7 +673,8 @@ enum
 	RG_GUI_DIAGNOSTIC_STACK_UNDERFLOW = 1u << 4,
 	RG_GUI_DIAGNOSTIC_STACK_IMBALANCE = 1u << 5,
 	RG_GUI_DIAGNOSTIC_INPUT_CAPACITY = 1u << 6,
-	RG_GUI_DIAGNOSTIC_ACTIVE_ID_RECOVERED = 1u << 7
+	RG_GUI_DIAGNOSTIC_ACTIVE_ID_RECOVERED = 1u << 7,
+	RG_GUI_DIAGNOSTIC_VIEWPORT_STORAGE = 1u << 8
 };
 
 /** Per-frame capacity, scope, input, and stale-capture diagnostics. */
@@ -733,6 +742,7 @@ typedef struct RgGuiRowCache
 typedef struct RgGuiTextAreaState
 {
 	RgGuiPanelState panel;
+	struct RgGuiTextAreaLayoutCache* layout_cache; // Optional caller-owned persistent cache.
 } RgGuiTextAreaState;
 
 typedef struct RgGuiTextAreaVisualLine
@@ -1628,6 +1638,10 @@ typedef struct RgGuiContext
 	RgGuiId input_events_submit_id;
 	RgGuiDiagnostics diagnostics;
 	const RgGuiTextLookup* text_lookup;
+#if defined(RG_GUI_ENABLE_VIEWPORTS)
+	RgGuiViewportStorageCallback viewport_storage;
+	void* viewport_storage_user;
+#endif
 } RgGuiContext;
 
 typedef struct RgGuiInputRouter
@@ -1663,6 +1677,12 @@ typedef struct RgGuiInitDesc
 	u32 menu_width_cache_size;
 	u32 tab_scroll_cache_size;
 	const RgGuiTextLookup* text_lookup; // Optional; ignored when its font differs from font.
+#if defined(RG_GUI_ENABLE_VIEWPORTS)
+	/* Optional caller-owned viewport arrays, acquired on first use. Null retains
+	 * the default eager arena allocation included in rg_gui_memory_required. */
+	RgGuiViewportStorageCallback viewport_storage;
+	void* viewport_storage_user;
+#endif
 } RgGuiInitDesc;
 
 typedef enum RgGuiTextInputFlags
@@ -5885,8 +5905,13 @@ RGINLINE void rg_gui_push_icon(RgGuiContext* ctx, const RgGuiIcon* icon, RgGuiRe
 	rg_gui_push_icon_to(ctx, rg_gui_draw_list_target(ctx), icon, rect, dimmed);
 }
 
-RGINLINE void rg_gui_push_text_scaled_ex_to(RgGuiContext* ctx, RgGuiDrawList* list, const char* text,
-                                            rg_vec2 pos, rg_vec4 color, f32 scale, int copy)
+/* Ownership and cache policy are independent. Frame-arena substrings may be
+ * borrowed without another copy, but only explicit static APIs may promise
+ * immutable bytes across frames and use the pointer as a cache identity. */
+RGINLINE void rg_gui_push_text_scaled_internal_to(RgGuiContext* ctx, RgGuiDrawList* list,
+                                                  const char* text, rg_vec2 pos,
+                                                  rg_vec4 color, f32 scale,
+                                                  int copy, int immutable)
 {
 	if (!list || list->count >= list->capacity)
 	{
@@ -5911,8 +5936,16 @@ RGINLINE void rg_gui_push_text_scaled_ex_to(RgGuiContext* ctx, RgGuiDrawList* li
 		cmd->data.text.text = text ? text : "";
 	}
 #if defined(RG_GUI_TEXT_CACHE_IDENTITY)
-	cmd->data.text.cache_identity = !copy && text ? (uintptr_t)text : 0u;
+	cmd->data.text.cache_identity = immutable && text ? (uintptr_t)text : 0u;
 #endif
+}
+
+/* Low-level frame-text emission: with copy=0 the bytes must already remain
+ * valid until preparation, and are still keyed by their contents. */
+RGINLINE void rg_gui_push_text_scaled_ex_to(RgGuiContext* ctx, RgGuiDrawList* list, const char* text,
+                                            rg_vec2 pos, rg_vec4 color, f32 scale, int copy)
+{
+	rg_gui_push_text_scaled_internal_to(ctx, list, text, pos, color, scale, copy, 0);
 }
 
 RGINLINE void rg_gui_push_text_ex_to(RgGuiContext* ctx, RgGuiDrawList* list, const char* text,
@@ -5934,7 +5967,7 @@ RGINLINE void rg_gui_push_text_scaled_to(RgGuiContext* ctx, RgGuiDrawList* list,
 RGINLINE void rg_gui_push_text_scaled_static_to(RgGuiContext* ctx, RgGuiDrawList* list, const char* text,
                                                 rg_vec2 pos, rg_vec4 color, f32 scale)
 {
-	rg_gui_push_text_scaled_ex_to(ctx, list, text, pos, color, scale, 0);
+	rg_gui_push_text_scaled_internal_to(ctx, list, text, pos, color, scale, 0, 1);
 }
 
 RGINLINE void rg_gui_push_text_to(RgGuiContext* ctx, RgGuiDrawList* list, const char* text, rg_vec2 pos, rg_vec4 color)
@@ -5948,7 +5981,7 @@ RGINLINE void rg_gui_push_text_to(RgGuiContext* ctx, RgGuiDrawList* list, const 
  */
 RGINLINE void rg_gui_push_text_static_to(RgGuiContext* ctx, RgGuiDrawList* list, const char* text, rg_vec2 pos, rg_vec4 color)
 {
-	rg_gui_push_text_ex_to(ctx, list, text, pos, color, 0);
+	rg_gui_push_text_scaled_static_to(ctx, list, text, pos, color, 1.0f);
 }
 
 RGINLINE void rg_gui_push_rect_outline_to(RgGuiContext* ctx, RgGuiDrawList* list, RgGuiRect rect, rg_vec4 color, f32 thickness)
@@ -6011,7 +6044,7 @@ RGINLINE void rg_gui_push_text_scaled(RgGuiContext* ctx, const char* text, rg_ve
 RGINLINE void rg_gui_push_text_scaled_static(RgGuiContext* ctx, const char* text, rg_vec2 pos,
                                              rg_vec4 color, f32 scale)
 {
-	rg_gui_push_text_scaled_ex_to(ctx, rg_gui_draw_list_target(ctx), text, pos, color, scale, 0);
+	rg_gui_push_text_scaled_static_to(ctx, rg_gui_draw_list_target(ctx), text, pos, color, scale);
 }
 
 RGINLINE void rg_gui_push_text(RgGuiContext* ctx, const char* text, rg_vec2 pos, rg_vec4 color)
@@ -6025,7 +6058,7 @@ RGINLINE void rg_gui_push_text(RgGuiContext* ctx, const char* text, rg_vec2 pos,
  */
 RGINLINE void rg_gui_push_text_static(RgGuiContext* ctx, const char* text, rg_vec2 pos, rg_vec4 color)
 {
-	rg_gui_push_text_ex_to(ctx, rg_gui_draw_list_target(ctx), text, pos, color, 0);
+	rg_gui_push_text_static_to(ctx, rg_gui_draw_list_target(ctx), text, pos, color);
 }
 
 RGINLINE void rg_gui_push_close_glyph_to(RgGuiContext* ctx, RgGuiDrawList* list,
@@ -8354,44 +8387,179 @@ RGINLINE u32 rg_gui_text_area_build_visual_lines(const RgGuiContext* ctx,
 	return count;
 }
 
-// This cache lives only for one widget invocation. Content edits change the
-// version, and IME display text uses a different buffer. No text storage is
-// retained between frames, so external edits are observed on the next call.
+/* Optional persistent editor layout cache. Storage is supplied by the caller and must live
+ * as long as it is attached; no frame-arena pointers are retained. Font/lookup
+ * contents remain immutable until explicit cache invalidation and lookup rebuild.
+ * GPU cache invalidation alone does not invalidate these CPU wrap descriptors.
+ * Use one cache per live editor; initialize/rebind storage only between widget
+ * invocations. Source text, storage, and the cache object must be disjoint. */
+typedef struct RgGuiTextAreaCacheKey
+{
+    const RgTextFont* font;
+    const RgGuiTextLookup* lookup;
+    const RgTextFont* lookup_font;
+    const RgTextGlyph* glyphs;
+    const RgTextKerning* kernings;
+    u32 glyph_count, kerning_count, fallback_codepoint, font_lookup_flags;
+    i32 line_height;
+    u32 scale_bits, wrap_width_bits, text_height_bits, char_width_bits;
+    u32 reserved;
+} RgGuiTextAreaCacheKey;
+
+typedef struct RgGuiTextAreaLayoutCache
+{
+    char* text;
+    size_t text_capacity;
+    RgGuiTextAreaVisualLine* lines;
+    u32 line_capacity;
+    size_t length;
+    u32 count;
+    u32 valid;
+    RgGuiTextAreaCacheKey key;
+    u64 epoch;
+    u64 hits, rebuilds, bypasses;
+} RgGuiTextAreaLayoutCache;
+
+RGINLINE void rg_gui_text_area_cache_init(RgGuiTextAreaLayoutCache* cache,
+                                          char* text_storage, size_t text_capacity,
+                                          RgGuiTextAreaVisualLine* line_storage, u32 line_capacity)
+{
+    if (!cache) return;
+    memset(cache, 0, sizeof(*cache));
+    cache->text = text_storage;
+    cache->text_capacity = text_capacity;
+    cache->lines = line_storage;
+    cache->line_capacity = line_capacity;
+    cache->epoch = 1u;
+}
+
+/* Required after in-place font/glyph/kerning/lookup edits or GUI reinitialization.
+ * Rebuild a mutated font's shared lookup separately, then invalidate every attached
+ * CPU layout cache and the renderer's text cache/mirror as appropriate. */
+RGINLINE void rg_gui_text_area_cache_invalidate(RgGuiTextAreaLayoutCache* cache)
+{
+    if (!cache) return;
+    cache->valid = 0u;
+    ++cache->epoch;
+}
+
+RGINLINE RgGuiTextAreaCacheKey rg_gui_text_area_cache_key(const RgGuiContext* ctx, f32 wrap_width)
+{
+    RgGuiTextAreaCacheKey key;
+    memset(&key, 0, sizeof(key));
+    key.font = ctx->font;
+    key.lookup = ctx->text_lookup;
+    key.lookup_font = ctx->text_lookup ? ctx->text_lookup->font : NULL;
+    if (ctx->font)
+    {
+        key.glyphs = ctx->font->glyphs;
+        key.kernings = ctx->font->kernings;
+        key.glyph_count = ctx->font->glyph_count;
+        key.kerning_count = ctx->font->kerning_count;
+        key.fallback_codepoint = ctx->font->fallback_codepoint;
+        key.font_lookup_flags = ctx->font->internal_lookup_flags;
+        key.line_height = ctx->font->metrics.line_height;
+    }
+    key.scale_bits = rg_gui_text_scale_bits(ctx);
+    memcpy(&key.wrap_width_bits, &wrap_width, sizeof(wrap_width));
+    memcpy(&key.text_height_bits, &ctx->style.text_height, sizeof(f32));
+    memcpy(&key.char_width_bits, &ctx->style.char_width, sizeof(f32));
+    return key;
+}
+
+/* Invocation-local reuse still avoids repeated checks while handling one event
+ * sequence. Cross-frame reuse always compares the complete owned byte snapshot;
+ * an unchanged buffer address or editor version is never sufficient proof. */
 typedef struct RgGuiTextAreaLayout
 {
-	RgGuiTextAreaVisualLine* lines;
-	const char* buffer;
-	const RgTextFont* font;
-	size_t length;
-	u32 content_version;
-	u32 scale_bits;
-	u32 wrap_width_bits;
-	u32 count;
+    RgGuiTextAreaVisualLine* lines;
+    RgGuiTextAreaVisualLine* scratch_lines;
+    RgGuiTextAreaLayoutCache* cache;
+    const char* buffer;
+    size_t length;
+    u32 content_version;
+    u32 count;
+    RgGuiTextAreaCacheKey key;
+    u64 cache_epoch;
 } RgGuiTextAreaLayout;
+
+/* Difference-based overlap checks do not overflow pointer endpoint sums. */
+RGINLINE int rg_gui_text_area_cache_overlaps(const void* first, size_t first_size,
+                                             const void* second, size_t second_size)
+{
+    if (!first || !second || !first_size || !second_size) return 0;
+    uintptr_t a = (uintptr_t)first, b = (uintptr_t)second;
+    return a <= b ? b - a < first_size : a - b < second_size;
+}
+
+RGINLINE int rg_gui_text_area_cache_storage_usable(const RgGuiContext* ctx,
+                                                   const RgGuiTextAreaLayout* layout,
+                                                   const char* buffer, size_t length)
+{
+    const RgGuiTextAreaLayoutCache* cache = layout->cache;
+    if (!cache || !cache->text || !cache->lines || !cache->line_capacity ||
+        length == SIZE_MAX || length > cache->text_capacity ||
+        (size_t)cache->line_capacity > SIZE_MAX / sizeof(*cache->lines)) return 0;
+    const size_t line_bytes = sizeof(*cache->lines) * (size_t)cache->line_capacity;
+    const size_t scratch_bytes = sizeof(*cache->lines) * RG_GUI_TEXT_AREA_VISUAL_LINE_MAX;
+    const size_t input_bytes = length + 1u; /* include even an empty input's NUL */
+    return !rg_gui_text_area_cache_overlaps(cache->text, cache->text_capacity, cache->lines, line_bytes) &&
+           !rg_gui_text_area_cache_overlaps(cache->text, cache->text_capacity, cache, sizeof(*cache)) &&
+           !rg_gui_text_area_cache_overlaps(cache->lines, line_bytes, cache, sizeof(*cache)) &&
+           !rg_gui_text_area_cache_overlaps(cache->text, cache->text_capacity, buffer, input_bytes) &&
+           !rg_gui_text_area_cache_overlaps(cache->lines, line_bytes, buffer, input_bytes) &&
+           !rg_gui_text_area_cache_overlaps(cache->text, cache->text_capacity, layout->scratch_lines, scratch_bytes) &&
+           !rg_gui_text_area_cache_overlaps(cache->lines, line_bytes, layout->scratch_lines, scratch_bytes) &&
+           !rg_gui_text_area_cache_overlaps(cache->text, cache->text_capacity, ctx->text_buffer, ctx->text_buffer_capacity) &&
+           !rg_gui_text_area_cache_overlaps(cache->lines, line_bytes, ctx->text_buffer, ctx->text_buffer_capacity);
+}
 
 RGINLINE u32 rg_gui_text_area_ensure_layout(const RgGuiContext* ctx,
                                             RgGuiTextAreaLayout* layout,
                                             const char* buffer, size_t length,
                                             u32 content_version, f32 wrap_width)
 {
-	u32 scale_bits = rg_gui_text_scale_bits(ctx);
-	u32 wrap_width_bits = 0u;
-	memcpy(&wrap_width_bits, &wrap_width, sizeof(wrap_width_bits));
-	if (layout->count == 0u || layout->buffer != buffer ||
-	    layout->length != length || layout->content_version != content_version ||
-	    layout->font != ctx->font || layout->scale_bits != scale_bits ||
-	    layout->wrap_width_bits != wrap_width_bits)
-	{
-		layout->count = rg_gui_text_area_build_visual_lines(
-		    ctx, buffer, length, wrap_width, layout->lines, RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
-		layout->buffer = buffer;
-		layout->font = ctx->font;
-		layout->length = length;
-		layout->content_version = content_version;
-		layout->scale_bits = scale_bits;
-		layout->wrap_width_bits = wrap_width_bits;
-	}
-	return layout->count;
+    const RgGuiTextAreaCacheKey key = rg_gui_text_area_cache_key(ctx, wrap_width);
+    RgGuiTextAreaLayoutCache* cache = layout->cache;
+    if (!layout->scratch_lines) layout->scratch_lines = layout->lines;
+    if (layout->count == 0u || layout->buffer != buffer || layout->length != length ||
+        layout->content_version != content_version || memcmp(&layout->key, &key, sizeof(key)) ||
+        (cache && layout->cache_epoch != cache->epoch))
+    {
+        const int fits = rg_gui_text_area_cache_storage_usable(ctx, layout, buffer, length);
+        if (fits && cache->valid && cache->count <= cache->line_capacity &&
+            cache->length == length && !memcmp(&cache->key, &key, sizeof(key)) &&
+            (!length || !memcmp(cache->text, buffer, length)))
+        {
+            layout->lines = cache->lines;
+            layout->count = cache->count;
+            ++cache->hits;
+        }
+        else
+        {
+            layout->lines = layout->scratch_lines;
+            layout->count = rg_gui_text_area_build_visual_lines(
+                ctx, buffer, length, wrap_width, layout->lines, RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
+            if (cache) ++cache->rebuilds;
+            if (fits && layout->count <= cache->line_capacity)
+            {
+                if (length) memcpy(cache->text, buffer, length);
+                memcpy(cache->lines, layout->lines, sizeof(*cache->lines) * layout->count);
+                cache->length = length;
+                cache->count = layout->count;
+                cache->key = key;
+                cache->valid = 1u;
+                layout->lines = cache->lines;
+            }
+            else if (cache) ++cache->bypasses;
+        }
+        layout->buffer = buffer;
+        layout->length = length;
+        layout->content_version = content_version;
+        layout->key = key;
+        layout->cache_epoch = cache ? cache->epoch : 0u;
+    }
+    return layout->count;
 }
 
 RGINLINE u32 rg_gui_text_area_find_visual_line(const RgGuiTextAreaVisualLine* lines,
@@ -8541,6 +8709,7 @@ static RG_NOINLINE void rg_gui_text_area_process_ordered_key(
 	                                     edit->length, edit->content_version, move->wrap_width)
 	    : rg_gui_text_area_build_visual_lines(ctx, edit->buffer, edit->length,
 	                                          move->wrap_width, lines, RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
+	if (move->layout) lines = move->layout->lines;
 	if (rg_gui_text_area_move_cursor_wrapped(
 	        ctx, edit, lines, line_count, direction, selecting))
 	{
@@ -9589,6 +9758,10 @@ RGINLINE int rg_gui_init_desc_resolve(const RgGuiInitDesc* desc, RgGuiInitDesc* 
 	out->text_length_cache_size = desc->text_length_cache_size ? desc->text_length_cache_size : RG_GUI_TEXT_LENGTH_CACHE_SIZE;
 	out->menu_width_cache_size = desc->menu_width_cache_size ? desc->menu_width_cache_size : RG_GUI_MENU_WIDTH_CACHE_SIZE;
 	out->tab_scroll_cache_size = desc->tab_scroll_cache_size ? desc->tab_scroll_cache_size : RG_GUI_TAB_SCROLL_CACHE_SIZE;
+#if defined(RG_GUI_ENABLE_VIEWPORTS)
+	out->viewport_storage = desc->viewport_storage;
+	out->viewport_storage_user = desc->viewport_storage_user;
+#endif
 	return 1;
 }
 
@@ -9657,10 +9830,13 @@ RGINLINE size_t rg_gui_memory_required(const RgGuiInitDesc* desc)
 	RG_GUI_MEMORY_ADD(RgGuiDockTab, (size_t)RG_GUI_MAX_DOCK_TABS + 1u);
 #if defined(RG_GUI_ENABLE_VIEWPORTS)
 	RG_GUI_MEMORY_ADD(RgGuiViewport, RG_GUI_MAX_VIEWPORTS);
-	for (u32 i = 0u; i < RG_GUI_MAX_VIEWPORTS; i++)
+	if (!init.viewport_storage)
 	{
-		RG_GUI_MEMORY_ADD(RgGuiDrawCmd, init.max_draw_cmds);
-		RG_GUI_MEMORY_ADD(RgGuiDrawCmd, init.max_draw_cmds);
+		for (u32 i = 0u; i < RG_GUI_MAX_VIEWPORTS; i++)
+		{
+			RG_GUI_MEMORY_ADD(RgGuiDrawCmd, init.max_draw_cmds);
+			RG_GUI_MEMORY_ADD(RgGuiDrawCmd, init.max_draw_cmds);
+		}
 	}
 #endif
 #undef RG_GUI_MEMORY_ADD
@@ -9866,6 +10042,8 @@ RGINLINE int rg_gui_init(RgGuiContext* ctx, RgArena* arena, const RgGuiInitDesc*
 	}
 
 #if defined(RG_GUI_ENABLE_VIEWPORTS)
+	ctx->viewport_storage = init.viewport_storage;
+	ctx->viewport_storage_user = init.viewport_storage_user;
 	ctx->viewports = RG_ARENA_PUSH_ARRAY(arena, RgGuiViewport, RG_GUI_MAX_VIEWPORTS);
 	ctx->viewport_capacity = RG_GUI_MAX_VIEWPORTS;
 	ctx->viewport_active_count = 0u;
@@ -9875,11 +10053,13 @@ RGINLINE int rg_gui_init(RgGuiContext* ctx, RgArena* arena, const RgGuiInitDesc*
 		memset(ctx->viewports, 0, sizeof(RgGuiViewport) * ctx->viewport_capacity);
 		for (u32 i = 0u; i < ctx->viewport_capacity; i++)
 		{
-			ctx->viewports[i].draw_list.cmds = RG_ARENA_PUSH_ARRAY(arena, RgGuiDrawCmd, init.max_draw_cmds);
+			if (!init.viewport_storage)
+				ctx->viewports[i].draw_list.cmds = RG_ARENA_PUSH_ARRAY(arena, RgGuiDrawCmd, init.max_draw_cmds);
 			ctx->viewports[i].draw_list.capacity = init.max_draw_cmds;
 			ctx->viewports[i].draw_list.count = 0u;
 
-			ctx->viewports[i].overlay_list.cmds = RG_ARENA_PUSH_ARRAY(arena, RgGuiDrawCmd, init.max_draw_cmds);
+			if (!init.viewport_storage)
+				ctx->viewports[i].overlay_list.cmds = RG_ARENA_PUSH_ARRAY(arena, RgGuiDrawCmd, init.max_draw_cmds);
 			ctx->viewports[i].overlay_list.capacity = init.max_draw_cmds;
 			ctx->viewports[i].overlay_list.count = 0u;
 			ctx->viewports[i].overlay_start = 0u;
@@ -9984,7 +10164,7 @@ RGINLINE int rg_gui_init(RgGuiContext* ctx, RgArena* arena, const RgGuiInitDesc*
 	                        (ctx->dock_tab_capacity > 0u && !ctx->dock_tabs);
 #if defined(RG_GUI_ENABLE_VIEWPORTS)
 	allocation_failed = allocation_failed || !ctx->viewports;
-	if (!allocation_failed)
+	if (!allocation_failed && !init.viewport_storage)
 	{
 		for (u32 i = 0u; i < ctx->viewport_capacity; i++)
 		{
@@ -11520,7 +11700,8 @@ RGINLINE void rg_gui_tooltip_ex(RgGuiContext* ctx, RgGuiRect rect, const char* t
 
 	rg_vec2 pos = rg_vec2(tip.x + pad,
 	                      tip.y + (tip.h - ctx->style.text_height) * 0.5f);
-	rg_gui_push_text_ex_to(ctx, overlay, text, pos, ctx->style.color_text, copy);
+	if (copy) rg_gui_push_text_to(ctx, overlay, text, pos, ctx->style.color_text);
+	else rg_gui_push_text_static_to(ctx, overlay, text, pos, ctx->style.color_text);
 }
 
 RGINLINE void rg_gui_tooltip(RgGuiContext* ctx, RgGuiRect rect, const char* text)
@@ -14597,6 +14778,64 @@ RGINLINE void rg_gui_viewport_state_reset(RgGuiViewport* viewport)
 	viewport->window_focused = 1;
 }
 
+RGINLINE int rg_gui_viewport_storage_valid(const RgGuiDrawCmd* commands, u32 capacity)
+{
+	if (!commands || !capacity || (uintptr_t)commands % RG_ALIGNOF(RgGuiDrawCmd) != 0u ||
+	    sizeof(RgGuiDrawCmd) > SIZE_MAX / (size_t)capacity)
+		return 0;
+	const size_t bytes = (size_t)capacity * sizeof(RgGuiDrawCmd);
+	return bytes <= UINTPTR_MAX - (uintptr_t)commands;
+}
+
+RGINLINE int rg_gui_viewport_storage_overlaps(const RgGuiDrawCmd* a, u32 a_count,
+                                            const RgGuiDrawCmd* b, u32 b_count)
+{
+	if (!a || !b || !a_count || !b_count) return 0;
+	const uintptr_t a_begin = (uintptr_t)a;
+	const uintptr_t b_begin = (uintptr_t)b;
+	return a_begin < b_begin + (size_t)b_count * sizeof(*b) &&
+	       b_begin < a_begin + (size_t)a_count * sizeof(*a);
+}
+
+RGINLINE int rg_gui_viewport_storage_acquire(RgGuiContext* ctx, RgGuiViewport* viewport)
+{
+	if (viewport->draw_list.cmds && viewport->overlay_list.cmds) return 1;
+	RgGuiDrawCmd* draw = NULL;
+	RgGuiDrawCmd* overlay = NULL;
+	const u32 draw_capacity = viewport->draw_list.capacity;
+	const u32 overlay_capacity = viewport->overlay_list.capacity;
+	const RgGuiDrawList* main_lists[2] = {&ctx->draw_list, &ctx->overlay_list};
+	if (!ctx->viewport_storage ||
+	    !ctx->viewport_storage(ctx->viewport_storage_user, (u32)(viewport - ctx->viewports),
+	                           draw_capacity, overlay_capacity, &draw, &overlay) ||
+	    !rg_gui_viewport_storage_valid(draw, draw_capacity) ||
+	    !rg_gui_viewport_storage_valid(overlay, overlay_capacity) ||
+	    rg_gui_viewport_storage_overlaps(draw, draw_capacity, overlay, overlay_capacity))
+		goto failure;
+	for (u32 i = 0u; i < 2u; i++)
+	{
+		const RgGuiDrawList* list = main_lists[i];
+		if (rg_gui_viewport_storage_overlaps(draw, draw_capacity, list->cmds, list->capacity) ||
+		    rg_gui_viewport_storage_overlaps(overlay, overlay_capacity, list->cmds, list->capacity))
+			goto failure;
+	}
+	for (u32 i = 0u; i < ctx->viewport_capacity; i++)
+	{
+		const RgGuiViewport* other = &ctx->viewports[i];
+		if (rg_gui_viewport_storage_overlaps(draw, draw_capacity, other->draw_list.cmds, other->draw_list.capacity) ||
+		    rg_gui_viewport_storage_overlaps(draw, draw_capacity, other->overlay_list.cmds, other->overlay_list.capacity) ||
+		    rg_gui_viewport_storage_overlaps(overlay, overlay_capacity, other->draw_list.cmds, other->draw_list.capacity) ||
+		    rg_gui_viewport_storage_overlaps(overlay, overlay_capacity, other->overlay_list.cmds, other->overlay_list.capacity))
+			goto failure;
+	}
+	viewport->draw_list.cmds = draw;
+	viewport->overlay_list.cmds = overlay;
+	return 1;
+failure:
+	ctx->diagnostics.flags |= RG_GUI_DIAGNOSTIC_VIEWPORT_STORAGE;
+	return 0;
+}
+
 RGINLINE RgGuiViewport* rg_gui_viewport_get(RgGuiContext* ctx, RgGuiId id)
 {
 	if (!ctx || !ctx->viewports || id == 0u)
@@ -14619,6 +14858,7 @@ RGINLINE RgGuiViewport* rg_gui_viewport_get(RgGuiContext* ctx, RgGuiId id)
 
 	if (free_slot)
 	{
+		if (!rg_gui_viewport_storage_acquire(ctx, free_slot)) return NULL;
 		free_slot->id = id;
 		rg_gui_viewport_state_reset(free_slot);
 		return free_slot;
@@ -18471,6 +18711,11 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 		ctx->cursor_visible = 1;
 		ctx->cursor_blink_timer = 0.0f;
 	}
+	// Mouse selection capture ends on release, independently of keyboard focus.
+	if (ctx->active_id == id && (!enabled || ctx->mouse_released))
+	{
+		ctx->active_id = 0u;
+	}
 
 	size_t text_length = buffer ? strlen(buffer) : 0u;
 	size_t preedit_length = 0u;
@@ -18737,6 +18982,8 @@ RGINLINE int rg_gui_text_area(RgGuiContext* ctx, RgGuiTextAreaState* area, char*
 	RgGuiTextAreaVisualLine visual_lines[RG_GUI_TEXT_AREA_VISUAL_LINE_MAX];
 	RgGuiTextAreaLayout layout = {0};
 	layout.lines = visual_lines;
+	layout.scratch_lines = visual_lines;
+	layout.cache = area->layout_cache;
 
 	int changed = 0;
 	if (enabled && ctx->input_events && ctx->input_event_focus_id == id)
@@ -18796,7 +19043,7 @@ RGINLINE int rg_gui_text_area(RgGuiContext* ctx, RgGuiTextAreaState* area, char*
 		u32 pick_line_count =
 		    rg_gui_text_area_ensure_layout(ctx, &layout, buffer, ctx->text_edit_state->length,
 		                                   ctx->text_edit_state->content_version, wrap_width);
-		size_t pick = rg_gui_text_area_pick_cursor_wrapped(ctx, visual_lines, pick_line_count,
+		size_t pick = rg_gui_text_area_pick_cursor_wrapped(ctx, layout.lines, pick_line_count,
 		                                                   inner, area->panel.scroll_y, line_height);
 		int click_count = rg_gui_text_edit_update_click(ctx, ctx->text_edit_state, id, ctx->mouse_pos);
 		if (click_count == 1)
@@ -18847,7 +19094,7 @@ RGINLINE int rg_gui_text_area(RgGuiContext* ctx, RgGuiTextAreaState* area, char*
 			    rg_gui_text_area_ensure_layout(ctx, &layout, buffer, ctx->text_edit_state->length,
 			                                   ctx->text_edit_state->content_version, wrap_width);
 			if (rg_gui_text_area_move_cursor_wrapped(ctx, ctx->text_edit_state,
-			                                         visual_lines, move_line_count,
+			                                         layout.lines, move_line_count,
 			                                         direction, selecting))
 			{
 				ctx->text_edit_state->dirty = 1;
@@ -18863,12 +19110,17 @@ RGINLINE int rg_gui_text_area(RgGuiContext* ctx, RgGuiTextAreaState* area, char*
 		u32 pick_line_count =
 		    rg_gui_text_area_ensure_layout(ctx, &layout, buffer, ctx->text_edit_state->length,
 		                                   ctx->text_edit_state->content_version, wrap_width);
-		size_t pick = rg_gui_text_area_pick_cursor_wrapped(ctx, visual_lines, pick_line_count,
+		size_t pick = rg_gui_text_area_pick_cursor_wrapped(ctx, layout.lines, pick_line_count,
 		                                                   inner, area->panel.scroll_y, line_height);
 		rg_gui_text_edit_set_cursor(ctx->text_edit_state, pick, 1);
 		ctx->text_edit_state->dirty = 1;
 		ctx->cursor_visible = 1;
 		ctx->cursor_blink_timer = 0.0f;
+	}
+	// Keep editing focus after releasing the mouse, including releases outside.
+	if (ctx->active_id == id && (!enabled || ctx->mouse_released))
+	{
+		ctx->active_id = 0u;
 	}
 
 	size_t length = strlen(buffer);
@@ -18902,8 +19154,8 @@ RGINLINE int rg_gui_text_area(RgGuiContext* ctx, RgGuiTextAreaState* area, char*
 	    rg_gui_text_area_ensure_layout(ctx, &layout, render_buffer, length,
 	                                   ctx->text_edit_state->content_version, wrap_width);
 	u32 cursor_line =
-	    rg_gui_text_area_find_visual_line(visual_lines, line_count, cursor);
-	RgGuiTextAreaVisualLine cursor_visual_line = visual_lines[cursor_line];
+	    rg_gui_text_area_find_visual_line(layout.lines, line_count, cursor);
+	RgGuiTextAreaVisualLine cursor_visual_line = layout.lines[cursor_line];
 	size_t cursor_line_start = cursor_visual_line.start;
 	size_t cursor_line_end = cursor_visual_line.end;
 
@@ -18990,7 +19242,7 @@ RGINLINE int rg_gui_text_area(RgGuiContext* ctx, RgGuiTextAreaState* area, char*
 
 	for (u32 line = start_line; line < end_line; line++)
 	{
-		RgGuiTextAreaVisualLine visual_line = visual_lines[line];
+		RgGuiTextAreaVisualLine visual_line = layout.lines[line];
 		size_t line_start_index = visual_line.start;
 		size_t line_end_index = visual_line.end;
 		size_t draw_end_index = line_end_index;
@@ -19217,6 +19469,7 @@ RGINLINE int rg_gui_keybind_internal(RgGuiContext* ctx, const char* label, RgGui
 	                         (focused || capturing) ? ctx->style.focus_border_thickness : ctx->style.border_thickness);
 
 	const char* display_text = NULL;
+	char display_buffer[64];
 	int copy_display = 0;
 	rg_vec4 text_color = ctx->style.color_text;
 	if (capturing)
@@ -19226,7 +19479,6 @@ RGINLINE int rg_gui_keybind_internal(RgGuiContext* ctx, const char* label, RgGui
 	}
 	else
 	{
-		char display_buffer[64];
 		display_text = rg_gui_shortcut_to_text(*shortcut, display_buffer, sizeof(display_buffer));
 		if (!display_text)
 		{
@@ -19244,7 +19496,8 @@ RGINLINE int rg_gui_keybind_internal(RgGuiContext* ctx, const char* label, RgGui
 	{
 		rg_vec2 text_pos = rg_vec2(field.x + ctx->style.padding,
 		                           field.y + (field.h - ctx->style.text_height) * 0.5f);
-		rg_gui_push_text_ex(ctx, display_text, text_pos, text_color, copy_display);
+		if (copy_display) rg_gui_push_text(ctx, display_text, text_pos, text_color);
+		else rg_gui_push_text_static(ctx, display_text, text_pos, text_color);
 	}
 
 	return changed;
@@ -25541,7 +25794,8 @@ RGINLINE int rg_gui_node_begin_ex(RgGuiContext* ctx, RgGuiNodeEditorState* edito
 		}
 		else
 		{
-			rg_gui_push_text_scaled_static(ctx, title_draw, text_pos, local_style.text, text_scale);
+			/* A clipped title has already been copied into this frame's arena. */
+			rg_gui_push_text_scaled_ex(ctx, title_draw, text_pos, local_style.text, text_scale, 0);
 		}
 	}
 

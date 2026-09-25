@@ -5,38 +5,45 @@
 `rg_gui` is a pre-1.0 C UI library. Public APIs and serialized state may change
 between 0.x releases.
 
-- Add application-defined GPU image materials while preserving draw-list order
-  and clipping.
-- Reduce repeated text preparation, text-area wrapping, and layout work. Add
-  optional shared ASCII lookup tables and optional SSE2 image packing; the
-  portable paths remain available.
-- Correct fallback-glyph spacing and text-command association when earlier
-  commands are skipped or dropped.
-- Reuse one hidden native tear-out window to reduce close/reopen stalls. Release
-  its resources at shutdown, and handle repeated native close events safely.
-- Add demo frame profiling and repeatable CPU, text, image, and native-window
-  benchmark workloads.
-- Add Mailbox presentation to the full and tear-out demos. The full showcase
-  exposes it as **View > Fast, no tearing**. Normal launches keep VSync enabled;
-  `--no-vsync` continues to request Immediate presentation.
-- Share the frontend ASCII lookup with text renderers, with descriptor-aware
-  arena sizing and an owned fallback for existing callers.
-- Reuse `rg_algo` selection for paired demo frame percentiles, copying the
-  history once. Use `rg_snprintf` for demo integer/string telemetry and status;
-  retain SDL decimal formatting to preserve its rounding behavior.
-- Update the `rg_core` baseline to `d478715`; demo input loops now call
-  `rg_input_begin_frame` before event polling and `rg_input_sample` afterward.
-  Integrations using the removed `rg_input_update` must migrate likewise.
-- Pin `rg_core`, `rg_text`, and CI tooling revisions for reproducible builds.
+### Added
 
-The demos enable the optional ASCII lookup and SSE2 paths on supported targets.
-Library consumers opt in explicitly. A shared lookup occupies 66,568 bytes per
-font on x64; its caller-owned font must remain immutable while attached. Native
-window reuse retains one window and swapchain until shutdown.
+- Optional caller-owned viewport command storage, allocated on first use and
+  retained for reopening. Eager arena allocation remains the default.
+- `rg_gui_gpu_upload_ring_size_required` to size an upload buffer for a maximum
+  frame and full cache upload.
+- A caller-owned text-area layout cache for reusing wrapped lines while edits,
+  selection, cursor movement, and IME remain interactive.
+- Application-defined GPU image materials with draw-list order and clipping.
+- Demo frame profiling and repeatable CPU, text, image, and native-window
+  workloads. See the [benchmark guide](benchmarks/README.md) and
+  [profiling guide](benchmarks/PROFILING.md).
 
-Local validation covers Windows x64/MSVC with SDL 3.4.10/D3D12, including GPU
-device execution and native-window lifecycle checks. Linux Clang ASan/UBSan is
-configured in CI; local GPU results do not establish Linux or macOS GPU support.
+### Changed
 
-See the [integration guide](docs/rg_gui.md) for API ownership rules and the
-[performance report](benchmarks/PERFORMANCE.md) for measurements and their scope.
+- Batch compatible text, shapes, and images through an indexed GPU stream.
+- Share optional ASCII lookup tables between the frontend and text renderers,
+  and offer optional SSE2 geometry packing alongside the portable path.
+- Bound frame-run capacity independently of glyph capacity and expose GPU
+  cache invalidation for font or CPU renderer reinitialization.
+- Add **View > Fast, no tearing** (Mailbox) to the full showcase. Full and
+  tear-out demos default to VSync; `--no-vsync` requests Immediate presentation.
+- Reuse one hidden native tear-out window and swapchain until shutdown.
+
+### Fixed
+
+- Editor mouse capture release and stale numeric text.
+- Fallback-glyph spacing and text-command association when earlier commands
+  are skipped or dropped.
+- Repeated native close events incorrectly quitting the tear-out demo.
+
+### Migration notes
+
+- Ordinary text APIs copy changing text. Use explicit `*_static` APIs only for
+  immutable strings; see [text ownership](docs/rg_gui.md#ownership-text-identity-and-threads).
+- GPU upload packets remain immutable until commit or abort. Pass the staged
+  packet to `rg_gui_gpu_draw` and `rg_gui_gpu_dispatch_upload`. Acknowledge
+  successful submission with
+  `rg_gui_gpu_upload_commit`; abort failed or discarded packets. See the
+  [frame and GPU flow](docs/rg_gui.md#frame-and-gpu-flow).
+- Replace `rg_input_update` with `rg_input_begin_frame` before SDL event polling
+  and `rg_input_sample` afterward. See [ordered input](docs/rg_gui.md#ordered-input).

@@ -642,6 +642,7 @@ int main(int argc, char** argv)
 	DemoFontAssets demo_font = {0};
 	DemoPlatformState platform_state = {0};
 	RgGuiContext gui = {0};
+	DemoViewportStorage viewport_storage = {0};
 	RgInputState input = {0};
 	TearoutDemoState state = {0};
 	void* gui_memory = NULL;
@@ -683,6 +684,8 @@ int main(int argc, char** argv)
 	gui_desc.text_lookup = &demo_font.text_lookup;
 	gui_desc.max_draw_cmds = 8192u;
 	gui_desc.text_buffer_size = KB(128);
+	gui_desc.viewport_storage = demo_viewport_storage_acquire;
+	gui_desc.viewport_storage_user = &viewport_storage;
 	size_t gui_memory_size = rg_gui_memory_required(&gui_desc);
 	if (!gui_memory_size)
 	{
@@ -704,6 +707,7 @@ int main(int argc, char** argv)
 
 	RgGuiRendererLimits limits = rg_gui_renderer_limits_default();
 	limits.max_frame_instances = 32768u;
+	limits.max_frame_runs = 2048u;
 	limits.max_batches = 4096u;
 	RgGuiRendererInitDesc text_desc = {0};
 	text_desc.font = &demo_font.font;
@@ -739,14 +743,16 @@ int main(int argc, char** argv)
 	gpu_desc.atlas_width = demo_font.atlas_width;
 	gpu_desc.atlas_height = demo_font.atlas_height;
 	gpu_desc.max_cached_quads = limits.max_cached_quads;
-	gpu_desc.max_runs = limits.max_frame_instances;
+	gpu_desc.max_runs = limits.max_frame_runs;
 	gpu_desc.max_text_instances = limits.max_frame_instances;
 	gpu_desc.max_geometry_vertices = 65536u;
 	gpu_desc.max_items = 8192u;
+	gpu_desc.frame_buffer_count = 2u;
 	gpu_desc.min_filter = SDL_GPU_FILTER_LINEAR;
 	gpu_desc.mag_filter = SDL_GPU_FILTER_LINEAR;
 	if (!rg_gui_gpu_create(&gpu, &gpu_desc)) goto cleanup;
-	if (!rg_gpu_upload_ring_init(&upload_ring, device, MB(8))) goto cleanup;
+	if (!rg_gpu_upload_ring_init(&upload_ring, device,
+	                            rg_gui_gpu_upload_ring_size_required(&gpu))) goto cleanup;
 
 	rg_input_init(&input);
 	RgInputEvent input_event_storage[512];
@@ -1183,6 +1189,7 @@ cleanup:
 	rg_gui_gpu_destroy(&gpu);
 	free(text_memory);
 	free(gui_memory);
+	demo_viewport_storage_destroy(&viewport_storage);
 	if (atlas) SDL_ReleaseGPUTexture(device, atlas);
 	demo_font_destroy(&demo_font);
 	demo_platform_destroy(&platform_state, &input);

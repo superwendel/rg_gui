@@ -23,6 +23,18 @@
 		checks++;                                                               \
 	} while (0)
 
+static u32 lifecycle_viewport_storage_calls;
+
+static int lifecycle_viewport_storage_acquire(void* user, u32 slot,
+                                              u32 draw_capacity, u32 overlay_capacity,
+                                              RgGuiDrawCmd** draw_commands,
+                                              RgGuiDrawCmd** overlay_commands)
+{
+	lifecycle_viewport_storage_calls++;
+	return demo_viewport_storage_acquire(user, slot, draw_capacity, overlay_capacity,
+	                                     draw_commands, overlay_commands);
+}
+
 static int lifecycle_geometry(SDL_Window* window, int x, int y, int width, int height)
 {
 	int actual_x = 0;
@@ -139,6 +151,9 @@ int main(void)
 	SDL_GPUDevice* device = NULL;
 	void* gui_memory = NULL;
 	RgGuiContext gui = {0};
+	DemoViewportStorage viewport_storage = {0};
+	RgGuiDrawCmd* retained_viewport_storage = NULL;
+	size_t retained_viewport_bytes = 0u;
 	RgInputState input = {0};
 	DemoPlatformState platform = {0};
 	TearoutDemoState state;
@@ -180,12 +195,18 @@ int main(void)
 	gui_desc.font = &font;
 	gui_desc.max_draw_cmds = 32u;
 	gui_desc.text_buffer_size = KB(1);
+	gui_desc.viewport_storage = lifecycle_viewport_storage_acquire;
+	gui_desc.viewport_storage_user = &viewport_storage;
 	size_t gui_size = rg_gui_memory_required(&gui_desc);
 	TEAROUT_CHECK(gui_size != 0u);
 	gui_memory = malloc(gui_size);
 	TEAROUT_CHECK(gui_memory != NULL);
 	RgArena gui_arena = {(char*)gui_memory, gui_size, 0u, gui_size};
 	TEAROUT_CHECK(rg_gui_init(&gui, &gui_arena, &gui_desc));
+	TEAROUT_CHECK(lifecycle_viewport_storage_calls == 0u && viewport_storage.reserved_bytes == 0u);
+	for (u32 i = 0u; i < gui.viewport_capacity; i++)
+		TEAROUT_CHECK(!viewport_storage.blocks[i] && !gui.viewports[i].draw_list.cmds &&
+		              !gui.viewports[i].overlay_list.cmds);
 
 	SDL_strlcpy(state.object_name, "Edited camera", sizeof(state.object_name));
 	SDL_strlcpy(state.console_text, "Persistent user edits\n", sizeof(state.console_text));
@@ -201,7 +222,15 @@ int main(void)
 	TEAROUT_CHECK(cached_id != 0u && state.native.claimed && !state.parked.window);
 	TEAROUT_CHECK(state.native_created_count == 1 && state.native_reused_count == 0);
 	TEAROUT_CHECK(lifecycle_geometry(state.native.window, 100, 90, 480, 360));
+	TEAROUT_CHECK(lifecycle_viewport_storage_calls == 0u && viewport_storage.reserved_bytes == 0u);
 	TEAROUT_CHECK(lifecycle_register_viewport(&gui, &input));
+	retained_viewport_storage = viewport_storage.blocks[0];
+	retained_viewport_bytes = (size_t)gui_desc.max_draw_cmds * 2u * sizeof(RgGuiDrawCmd);
+	TEAROUT_CHECK(retained_viewport_storage && lifecycle_viewport_storage_calls == 1u &&
+	              viewport_storage.reserved_bytes == retained_viewport_bytes);
+	TEAROUT_CHECK(gui.viewports[0].draw_list.cmds == retained_viewport_storage &&
+	              gui.viewports[0].overlay_list.cmds == retained_viewport_storage + gui_desc.max_draw_cmds);
+	for (u32 i = 1u; i < gui.viewport_capacity; i++) TEAROUT_CHECK(!viewport_storage.blocks[i]);
 	TEAROUT_CHECK(lifecycle_text_input(&platform, &input, state.native.window));
 	TEAROUT_CHECK(lifecycle_submit_clear(device, main_window));
 	TEAROUT_CHECK(lifecycle_submit_clear(device, state.native.window));
@@ -212,6 +241,9 @@ int main(void)
 	TEAROUT_CHECK(SDL_GetWindowFromID(cached_id) == state.parked.window);
 	TEAROUT_CHECK((SDL_GetWindowFlags(state.parked.window) & SDL_WINDOW_HIDDEN) != 0u);
 	TEAROUT_CHECK(!tearout_find_viewport(&gui, tearout_native_viewport_id()));
+	TEAROUT_CHECK(viewport_storage.blocks[0] == retained_viewport_storage &&
+	              gui.viewports[0].draw_list.cmds == retained_viewport_storage &&
+	              viewport_storage.reserved_bytes == retained_viewport_bytes && lifecycle_viewport_storage_calls == 1u);
 	TEAROUT_CHECK(!platform.text_input_window && !platform.ime_area_valid &&
 	              !input.text_input_active && !SDL_TextInputActive(state.parked.window));
 	TEAROUT_CHECK(!state.dock_request.pending && state.native_parked_count == 1 &&
@@ -235,6 +267,8 @@ int main(void)
 	              state.native_created_count == 1 && state.native_reused_count == 1);
 	TEAROUT_CHECK(lifecycle_geometry(state.native.window, 220, 170, 650, 500));
 	TEAROUT_CHECK(lifecycle_register_viewport(&gui, &input));
+	TEAROUT_CHECK(viewport_storage.blocks[0] == retained_viewport_storage &&
+	              viewport_storage.reserved_bytes == retained_viewport_bytes && lifecycle_viewport_storage_calls == 1u);
 	TEAROUT_CHECK(lifecycle_submit_clear(device, state.native.window));
 
 	// Settle native OS transitions before checking flags and requested geometry.
@@ -286,6 +320,8 @@ int main(void)
 	extra_id = state.native.window_id;
 	TEAROUT_CHECK(extra_id != cached_id && SDL_SyncWindow(state.native.window));
 	TEAROUT_CHECK(lifecycle_register_viewport(&gui, &input));
+	TEAROUT_CHECK(viewport_storage.blocks[0] == retained_viewport_storage &&
+	              viewport_storage.reserved_bytes == retained_viewport_bytes && lifecycle_viewport_storage_calls == 1u);
 	TEAROUT_CHECK(lifecycle_text_input(&platform, &input, state.native.window));
 	TEAROUT_CHECK(lifecycle_submit_clear(device, state.native.window));
 	TEAROUT_CHECK(!tearout_park_native(&gui, &input, &platform, &state));
@@ -302,6 +338,8 @@ int main(void)
 	TEAROUT_CHECK(SDL_GetWindowFromID(cached_id) == NULL && SDL_GetWindowFromID(extra_id) == NULL);
 	TEAROUT_CHECK(!platform.text_input_window && !input.text_input_active &&
 	              !tearout_find_viewport(&gui, tearout_native_viewport_id()));
+	TEAROUT_CHECK(viewport_storage.blocks[0] == retained_viewport_storage &&
+	              viewport_storage.reserved_bytes == retained_viewport_bytes && lifecycle_viewport_storage_calls == 1u);
 	tearout_destroy_native(device, &gui, &input, &platform, &state);
 	tearout_destroy_window(device, &state.parked, &state.native_destroyed_count);
 	TEAROUT_CHECK(state.native_destroyed_count == 2);
@@ -311,13 +349,14 @@ int main(void)
 	main_window = NULL;
 	TEAROUT_CHECK(SDL_GetWindowFromID(main_id) == NULL);
 	result = 0;
-	printf("tear-out lifecycle: %d checks passed (visible restore, cache ownership, IME, viewport, GPU cleanup)\n",
+	printf("tear-out lifecycle: %d checks passed (visible restore, cache ownership, IME, deferred viewport storage/reuse, GPU cleanup)\n",
 	       checks);
 
 cleanup:
 	if (device) SDL_WaitForGPUIdle(device);
 	tearout_destroy_native(device, &gui, &input, &platform, &state);
 	tearout_destroy_window(device, &state.parked, &state.native_destroyed_count);
+	demo_viewport_storage_destroy(&viewport_storage);
 	free(gui_memory);
 	if (main_claimed) SDL_ReleaseWindowFromGPUDevice(device, main_window);
 	if (device) SDL_DestroyGPUDevice(device);

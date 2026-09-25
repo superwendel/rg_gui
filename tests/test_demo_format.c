@@ -24,6 +24,7 @@
 #include <SDL3/SDL.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static u32 format_checks;
@@ -89,10 +90,45 @@ static int format_compare(const char* name, const char* format, ...)
 	return 1;
 }
 
+static int format_exact_heap_strings(void)
+{
+	static const size_t lengths[] = {
+		0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u,
+		15u, 16u, 17u, 31u, 32u, 33u, 63u, 64u
+	};
+	for (size_t offset = 0u; offset < 8u; offset++)
+	{
+		for (u32 i = 0u; i < RG_ARRAY_COUNT(lengths); i++)
+		{
+			size_t length = lengths[i];
+			// Alignment varies through a prefix, never through readable padding
+			// after the NUL. ASan must see any widened load beyond the terminator.
+			char* allocation = (char*)malloc(offset + length + 1u);
+			if (!allocation)
+			{
+				fprintf(stderr, "Exact heap string allocation failed\n");
+				return 0;
+			}
+			memset(allocation, 0x5a, offset);
+			char* text = allocation + offset;
+			for (size_t j = 0u; j < length; j++) text[j] = (char)('a' + j % 26u);
+			text[length] = '\0';
+			char name[80];
+			SDL_snprintf(name, sizeof(name), "Exact heap string length=%zu offset=%zu", length, offset);
+			int ok = format_compare(name, "%s", text) &&
+			         format_compare(name, "prefix[%s]suffix", text);
+			free(allocation);
+			if (!ok) return 0;
+		}
+	}
+	return 1;
+}
+
 #define FORMAT_CHECK(name, ...) do { if (!format_compare(name, __VA_ARGS__)) return 1; } while (0)
 
 int main(void)
 {
+	if (!format_exact_heap_strings()) return 1;
 	static const u32 counters[] = {0u, 1u, 120u, 4096u, 1048576u, UINT32_MAX};
 	static const char* modes[] = {"VSync", "Mailbox (no tearing)", "Immediate (may tear)"};
 	for (u32 i = 0u; i < RG_ARRAY_COUNT(counters); i++)

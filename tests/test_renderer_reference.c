@@ -168,7 +168,7 @@ static void test_ascii_lookup_table_equivalence(void)
 	font->kernings = pairs;
 	font->kerning_count = font->kerning_capacity = (u32)RG_ARRAY_COUNT(pairs);
 	const u32 fallbacks[] = {'?', 0xFFFDu, 0u, UINT32_MAX};
-	RgGuiRendererBaseLimits limits = {1u, 2u, 32u, 8u, 8u, 1u};
+	RgGuiRendererBaseLimits limits = {1u, 2u, 32u, 8u, 8u, 1u, 0u};
 	for (u32 variant = 0u; variant < RG_ARRAY_COUNT(fallbacks) + 2u; variant++)
 	{
 		font->fallback_codepoint = fallbacks[variant % RG_ARRAY_COUNT(fallbacks)];
@@ -230,7 +230,7 @@ static int test_cached_quad_matches(const RgGuiRendererBaseCachedQuad* actual,
 
 static void test_layout_fallbacks_and_capacity(void)
 {
-	RgGuiRendererBaseLimits limits = {1u, 2u, 64u, 8u, 8u, 1u};
+	RgGuiRendererBaseLimits limits = {1u, 2u, 64u, 8u, 8u, 1u, 0u};
 	for (u32 variant = 0u; variant < 3u; variant++)
 	{
 		TestRendererBaseFixture font_owner = {0}, fixture;
@@ -483,7 +483,7 @@ static void test_static_identity_and_dynamic_fallback(void)
 
 static void test_run_stream_output_and_compaction_offsets(void)
 {
-	RgGuiRendererBaseLimits limits = {2u, 4u, 16u, 4u, 8u, 4u};
+	RgGuiRendererBaseLimits limits = {2u, 4u, 16u, 4u, 8u, 4u, 0u};
 	TestRendererBaseFixture fixture;
 	TEST_ASSERT(test_fixture_init(&fixture, &limits), "run stream fixture init");
 	RgGuiDrawCmd cmds[2] =
@@ -541,7 +541,7 @@ static void test_run_stream_output_and_compaction_offsets(void)
 
 static void test_cache_compaction_bypass_and_lifetimes(void)
 {
-	RgGuiRendererBaseLimits limits = {2u, 2u, 4u, 3u, 8u, 4u};
+	RgGuiRendererBaseLimits limits = {2u, 2u, 4u, 3u, 8u, 4u, 0u};
 	TestRendererBaseFixture fixture;
 	TEST_ASSERT(test_fixture_init(&fixture, &limits), "small fixture init");
 
@@ -623,7 +623,7 @@ static void test_cache_compaction_bypass_and_lifetimes(void)
 
 static void test_atomic_capacity_drops(void)
 {
-	RgGuiRendererBaseLimits instance_limits = {8u, 16u, 64u, 16u, 2u, 4u};
+	RgGuiRendererBaseLimits instance_limits = {8u, 16u, 64u, 16u, 2u, 4u, 0u};
 	TestRendererBaseFixture fixture;
 	TEST_ASSERT(test_fixture_init(&fixture, &instance_limits), "instance fixture init");
 	RgGuiDrawCmd cmds[2] =
@@ -642,7 +642,7 @@ static void test_atomic_capacity_drops(void)
 	            "instance capacity diagnostic");
 	test_fixture_free(&fixture);
 
-	RgGuiRendererBaseLimits batch_limits = {8u, 16u, 64u, 16u, 8u, 1u};
+	RgGuiRendererBaseLimits batch_limits = {8u, 16u, 64u, 16u, 8u, 1u, 0u};
 	TEST_ASSERT(test_fixture_init(&fixture, &batch_limits), "batch fixture init");
 	RgGuiDrawCmd clipped[6] =
 	    {
