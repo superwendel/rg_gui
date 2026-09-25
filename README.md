@@ -1,4 +1,4 @@
-# rg_gui
+# rg_gui by Reverse Gravity
 
 Immediate-mode C UI with docking, native viewports, persistent text caching,
 and SDL3 GPU rendering.
@@ -94,37 +94,36 @@ capacity behavior, platform output, and ownership rules.
 
 ## Dependencies
 
-Use the latest `rg_core` and `rg_text` default branches, plus SDL3 and
-SDL_shadercross. The vcpkg manifest installs the SDL dependencies automatically.
-The demos include prebuilt font assets, so no font-baking tools are needed.
+Use the latest `rg_core` and `rg_text` default branches, plus SDL3.
+SDL_shadercross is required to compile the demo shaders. The demos include
+prebuilt font assets, so no font-baking tools are needed.
 
 ## Clean Windows setup
 
-Use a Visual Studio 2022 Developer Command Prompt with the Desktop development
-with C++ workload. Clone the repositories beside one another so the default
-dependency paths resolve. These commands use their latest default branches:
+Install Visual Studio 2022 with the Desktop development with C++ workload and
+open an **x64 Native Tools Command Prompt**. Keep the `rg_core` and `rg_text`
+folders beside `rg_gui`, or set `RG_CORE_DIR` and `RG_TEXT_DIR` to their roots.
+
+Download and extract the
+[SDL3 Visual C++ development package](https://github.com/libsdl-org/SDL/releases)
+and the
+[SDL_shadercross Windows x64 package](https://github.com/libsdl-org/SDL_shadercross/releases).
+Keep the shadercross executable and its bundled DLLs together in its `bin`
+directory.
+
+From the `rg_gui` directory, set the paths to your extracted packages and build:
 
 ```bat
-git clone https://github.com/superwendel/rg_core.git
-git clone https://github.com/superwendel/rg_text.git
-git clone https://github.com/superwendel/rg_gui.git
-git clone https://github.com/microsoft/vcpkg.git
-
-call vcpkg\bootstrap-vcpkg.bat -disableMetrics
-
-cd rg_gui
-set "VCPKG_ROOT=%CD%\..\vcpkg"
-"%VCPKG_ROOT%\vcpkg.exe" install --triplet x64-windows
+set "SDL3_DIR=C:\path\to\SDL3"
+set "SHADERCROSS_EXE=C:\path\to\SDL_shadercross\bin\shadercross.exe"
+set "PATH=%SDL3_DIR%\lib\x64;%PATH%"
 build.bat test_ci
 ```
 
-The manifest install creates `vcpkg_installed\x64-windows`. `build.bat` detects
-that layout. For an existing SDL installation, set `SDL3_DIR`; advanced builds
-can instead set `SDL3_INCLUDE_DIR`, `SDL3_LIB_DIR`, and `SDL3_BIN_DIR`.
-`SHADERCROSS_EXE` selects an explicit SDL_shadercross executable.
-
-If the repositories are not siblings, set `RG_CORE_DIR` and `RG_TEXT_DIR` to
-their repository roots before invoking `build.bat`.
+Replace the example paths with your installation locations. `SDL3_DIR` should
+contain `include\SDL3\SDL.h` and `lib\x64\SDL3.lib`; that `lib\x64` directory
+also contains the runtime `SDL3.dll`. For custom layouts, set
+`SDL3_INCLUDE_DIR`, `SDL3_LIB_DIR`, and `SDL3_BIN_DIR` explicitly.
 
 ## Build and test
 
