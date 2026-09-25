@@ -20,8 +20,6 @@ jobs:
     env:
       RG_CORE_DIR: ${{ github.workspace }}\_deps\rg_core
       RG_TEXT_DIR: ${{ github.workspace }}\_deps\rg_text
-      VCPKG_ROOT: ${{ github.workspace }}\_deps\vcpkg
-      VCPKG_DISABLE_METRICS: 1
 
     steps:
       - name: Check out rg_gui
@@ -29,89 +27,23 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check out pinned rg_core
+      - name: Check out rg_core dependency
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: superwendel/rg_core
-          ref: d4787158faa3366357d16ba2e1e466ee40276749
           path: _deps/rg_core
           persist-credentials: false
 
-      - name: Check out pinned rg_text
+      - name: Check out rg_text dependency
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: superwendel/rg_text
-          ref: 4b98c6d38d4de1398ebb0970fc8e0e3db01bafa5
           path: _deps/rg_text
           persist-credentials: false
 
-      - name: Check out pinned vcpkg
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: microsoft/vcpkg
-          ref: 91e8cb4be8195112ea3a9c7e5846bd0b3ff74673
-          path: _deps/vcpkg
-          # Versioned ports require Git trees from the baseline's history.
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Initialize vcpkg paths
+      - name: Install standalone SDL development tools
         shell: pwsh
-        run: |
-          Add-Content -Path $env:GITHUB_ENV -Value "VCPKG_INSTALLED_DIR=$env:RUNNER_TEMP\vcpkg-installed"
-          Add-Content -Path $env:GITHUB_ENV -Value "VCPKG_BINARY_CACHE=$env:RUNNER_TEMP\vcpkg-binary-cache"
-          Add-Content -Path $env:GITHUB_ENV -Value "VCPKG_BINARY_SOURCES=clear;files,$env:RUNNER_TEMP\vcpkg-binary-cache,readwrite"
-
-      - name: Restore vcpkg binary cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: ${{ runner.temp }}\vcpkg-binary-cache
-          key: vcpkg-${{ runner.os }}-x64-windows-${{ hashFiles('vcpkg.json') }}
-
-      - name: Bootstrap vcpkg
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path $env:VCPKG_BINARY_CACHE | Out-Null
-          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
-
-      - name: Install pinned SDL development tools
-        shell: pwsh
-        run: |
-          & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet x64-windows "--x-install-root=$env:VCPKG_INSTALLED_DIR"
-
-      - name: Configure explicit dependency paths
-        shell: pwsh
-        run: |
-          $prefix = Join-Path $env:VCPKG_INSTALLED_DIR 'x64-windows'
-          $shadercross = @(
-            (Join-Path $prefix 'tools\sdl3-shadercross\shadercross.exe'),
-            (Join-Path $prefix 'tools\sdl3_shadercross\shadercross.exe')
-          ) | Where-Object {
-            Test-Path -LiteralPath $_ -PathType Leaf
-          } | Select-Object -First 1
-          if (-not $shadercross) {
-            throw 'shadercross.exe was not found in either vcpkg tool directory spelling.'
-          }
-          $required = @(
-            (Join-Path $prefix 'include\SDL3\SDL.h'),
-            (Join-Path $prefix 'lib\SDL3.lib'),
-            (Join-Path $prefix 'bin\SDL3.dll'),
-            $shadercross,
-            (Join-Path $env:RG_CORE_DIR 'src\rg_defs.h'),
-            (Join-Path $env:RG_TEXT_DIR 'src\rg_text.h')
-          )
-          foreach ($path in $required) {
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-              throw "Required dependency output is missing: $path"
-            }
-          }
-
-          Add-Content -Path $env:GITHUB_ENV -Value "SDL3_INCLUDE_DIR=$(Join-Path $prefix 'include')"
-          Add-Content -Path $env:GITHUB_ENV -Value "SDL3_LIB_DIR=$(Join-Path $prefix 'lib')"
-          Add-Content -Path $env:GITHUB_ENV -Value "SDL3_BIN_DIR=$(Join-Path $prefix 'bin')"
-          Add-Content -Path $env:GITHUB_ENV -Value "SHADERCROSS_EXE=$shadercross"
-          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $prefix 'bin')
-          Add-Content -Path $env:GITHUB_PATH -Value (Split-Path -Parent $shadercross)
+        run: ./.github/scripts/setup-windows-deps.ps1
 
       - name: Build tests, validate assets, compile shaders, device target, and all demos
         shell: pwsh
@@ -173,26 +105,25 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check out pinned rg_core
+      - name: Check out rg_core dependency
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: superwendel/rg_core
-          ref: d4787158faa3366357d16ba2e1e466ee40276749
           path: _deps/rg_core
           persist-credentials: false
 
-      - name: Check out pinned rg_text
+      - name: Check out rg_text dependency
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: superwendel/rg_text
-          ref: 4b98c6d38d4de1398ebb0970fc8e0e3db01bafa5
           path: _deps/rg_text
           persist-credentials: false
 
-      - name: Build pinned SDL for sanitizer tests
+      - name: Build SDL test dependency
         id: sdl
         uses: libsdl-org/setup-sdl@afd98199e97f9c2aa739474be7e0886d149a5e47 # Node 24 main, 2026-08-29
         with:
+          # Tested CI dependency, not an exact-version requirement for rg_gui.
           version: 147a8ee32dbf9ac02f3794964490687b6bbda1bc # release-3.4.14
           build-type: Release
           install-linux-dependencies: true

@@ -98,20 +98,32 @@ Use the latest `rg_core` and `rg_text` default branches, plus SDL3.
 SDL_shadercross is required to compile the demo shaders. The demos include
 prebuilt font assets, so no font-baking tools are needed.
 
+No exact SDL3 release is enforced by the library or `build.bat`. You can use
+your own compatible SDL3 installation. CI and the setup script select a tested
+release for repeatable builds.
+
 ## Clean Windows setup
 
 Install Visual Studio 2022 with the Desktop development with C++ workload and
 open an **x64 Native Tools Command Prompt**. Keep the `rg_core` and `rg_text`
 folders beside `rg_gui`, or set `RG_CORE_DIR` and `RG_TEXT_DIR` to their roots.
 
-Download and extract the
-[SDL3 Visual C++ development package](https://github.com/libsdl-org/SDL/releases)
-and the
-[SDL_shadercross Windows x64 package](https://github.com/libsdl-org/SDL_shadercross/releases).
-Keep the shadercross executable and its bundled DLLs together in its `bin`
-directory.
+To install SDL3 and build SDL_shadercross without a package manager, run the
+[Windows dependency setup script](.github/scripts/setup-windows-deps.ps1) in
+PowerShell with CMake available:
 
-From the `rg_gui` directory, set the paths to your extracted packages and build:
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+./.github/scripts/setup-windows-deps.ps1 -Destination ./out/windows-deps
+./build.bat test_ci
+```
+
+The script downloads the official SDL3 development package and shader compiler
+dependencies, builds SDL_shadercross, and sets the paths for that PowerShell
+session. SDL_shadercross currently has no published release package.
+
+If you already have SDL3 and SDL_shadercross installed, set their paths in the
+x64 Native Tools Command Prompt instead:
 
 ```bat
 set "SDL3_DIR=C:\path\to\SDL3"
@@ -123,7 +135,8 @@ build.bat test_ci
 Replace the example paths with your installation locations. `SDL3_DIR` should
 contain `include\SDL3\SDL.h` and `lib\x64\SDL3.lib`; that `lib\x64` directory
 also contains the runtime `SDL3.dll`. For custom layouts, set
-`SDL3_INCLUDE_DIR`, `SDL3_LIB_DIR`, and `SDL3_BIN_DIR` explicitly.
+`SDL3_INCLUDE_DIR`, `SDL3_LIB_DIR`, and `SDL3_BIN_DIR` explicitly. Keep
+`shadercross.exe` and its runtime DLLs together in its `bin` directory.
 
 ## Build and test
 
