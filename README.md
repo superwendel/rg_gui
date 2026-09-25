@@ -13,6 +13,49 @@ The library depends directly on
 frontend, persistent text preparation, and SDL3 GPU backend used by the example
 applications in this repository.
 
+## Feature previews
+
+Move a docked panel into a separate native window and dock it again. The main
+and detached windows' contents are shown together below.
+
+![Inspector detached into a native window and returned to the main dockspace](docs/media/native-windows.gif)
+
+<details>
+<summary>Docking and split resizing</summary>
+
+Rearrange tool panels and adjust the space between them.
+
+![Panels being docked, rearranged, and resized](docs/media/docking.gif)
+
+</details>
+
+<details>
+<summary>Color picker and live theme changes</summary>
+
+Choose a color and see the accent update across interactive controls.
+
+![HSV color picker changing the accent of buttons, sliders, and other controls](docs/media/color-theme.gif)
+
+</details>
+
+<details>
+<summary>Curve and gradient editing</summary>
+
+Drag curve points and gradient stops to edit their values directly.
+
+![Interactive curve points and gradient stops being adjusted](docs/media/curves-gradient.gif)
+
+</details>
+
+<details>
+<summary>Node graph interactions</summary>
+
+Move nodes and connect their ports to build a graph.
+
+![Nodes being moved and connected in the node graph editor](docs/media/node-graph.gif)
+
+</details>
+
 ## Contents
 
 - `src/rg_gui.h` - widgets, layout, interaction, docking, viewports, and ordered
