@@ -203,6 +203,9 @@ if not errorlevel 0 exit /b 1
 test_assets.exe
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
+rem pwsh-to-cmd launches can leave incompatible PowerShell 7 module paths.
+rem Let Windows PowerShell rebuild its defaults; SETLOCAL preserves the caller.
+set "PSModulePath="
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\test_asset_hashes.ps1
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
