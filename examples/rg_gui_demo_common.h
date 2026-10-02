@@ -730,7 +730,7 @@ done:
 	return result;
 }
 
-static int demo_render_draw_list(SDL_GPUDevice* device, SDL_Window* window,
+RGINLINE int demo_render_draw_list(SDL_GPUDevice* device, SDL_Window* window,
                                  RgGuiGpuRenderer* gpu, RgGuiRenderer* text_renderer,
                                  RgGpuUploadRing* upload_ring,
                                  const RgGuiDrawList* draw_list, u32 overlay_start,
@@ -740,7 +740,7 @@ static int demo_render_draw_list(SDL_GPUDevice* device, SDL_Window* window,
 	                                      draw_list, overlay_start, out_presented, NULL);
 }
 
-static int demo_render_frame_profiled(SDL_GPUDevice* device, SDL_Window* window,
+RGINLINE int demo_render_frame_profiled(SDL_GPUDevice* device, SDL_Window* window,
                                       RgGuiGpuRenderer* gpu, RgGuiRenderer* text_renderer,
                                       RgGpuUploadRing* upload_ring, RgGuiContext* gui,
                                       int* out_presented, DemoRenderMetrics* metrics)
@@ -750,7 +750,7 @@ static int demo_render_frame_profiled(SDL_GPUDevice* device, SDL_Window* window,
 	                                      rg_gui_draw_list_overlay_start(gui), out_presented, metrics);
 }
 
-static int demo_render_frame(SDL_GPUDevice* device, SDL_Window* window,
+RGINLINE int demo_render_frame(SDL_GPUDevice* device, SDL_Window* window,
                              RgGuiGpuRenderer* gpu, RgGuiRenderer* text_renderer,
                              RgGpuUploadRing* upload_ring, RgGuiContext* gui,
                              int* out_presented)

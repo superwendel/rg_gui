@@ -1132,10 +1132,10 @@ RGINLINE int rg_gui_gpu_create(RgGuiGpuRenderer* renderer, const RgGuiGpuDesc* d
 	u64 frame_bytes = (u64)desc->max_runs * sizeof(RgGuiRendererRun) +
 	                  (u64)renderer->vertex_capacity * sizeof(RgGuiGpuVertex);
 	frame_bytes = ((frame_bytes + 7u) & ~(u64)7u) + refs * 8u;
-	if (!refs || refs > UINT32_MAX / 24u || frame_bytes > UINT32_MAX ||
+	if (!refs || !renderer->item_capacity || refs > UINT32_MAX / 24u || frame_bytes > UINT32_MAX ||
 	    renderer->vertex_capacity > UINT32_MAX / (u32)sizeof(RgGuiGpuVertex) ||
-	    (size_t)renderer->item_capacity > SIZE_MAX / sizeof(RgGuiGpuIndexedBatch) ||
-	    (size_t)renderer->item_capacity > SIZE_MAX / sizeof(RgGuiGpuItem))
+	    sizeof(RgGuiGpuIndexedBatch) > SIZE_MAX / (size_t)renderer->item_capacity ||
+	    sizeof(RgGuiGpuItem) > SIZE_MAX / (size_t)renderer->item_capacity)
 	{
 		return 0;
 	}

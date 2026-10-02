@@ -1,4 +1,4 @@
-/* Windows CPU geometry benchmark. Compile the identical source with
+/* CPU geometry benchmark. Compile the identical source with
  * RG_GUI_GPU_USE_SSE2=0 and =1, keeping optimization and dependencies fixed.
  * Run with "check" for guarded byte-equality and full-preparation checks.
  * Otherwise emits JSONL for 1/128/1024 image commands: packing alone and
@@ -10,13 +10,11 @@
 #if RG_GUI_GPU_USE_SSE2 && !RG_GUI_GPU_SSE2_ENABLED
 #error Geometry SSE2 measurements require a compiler target with SSE2 enabled.
 #endif
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
+#include <SDL3/SDL_timer.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-static __declspec(noinline) int reference_pack(RgGuiGpuRenderer* renderer,
+static RG_NOINLINE int reference_pack(RgGuiGpuRenderer* renderer,
                                           RgGuiRect rect, RgGuiRect uv, u32 color)
 {
 	if (renderer->vertex_count > renderer->vertex_capacity ||
@@ -36,7 +34,7 @@ static __declspec(noinline) int reference_pack(RgGuiGpuRenderer* renderer,
 
 static volatile u64 sink;
 static double clock_scale;
-static double now(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return (double)t.QuadPart * clock_scale; }
+static double now(void) { return (double)SDL_GetPerformanceCounter() * clock_scale; }
 static void fail(const char* reason) { fprintf(stderr,"error: %s\n",reason); exit(1); }
 static f32 from_bits(u32 bits) { f32 f; memcpy(&f,&bits,4); return f; }
 static u64 hash(const void* p,size_t n) { const u8* b=p; u64 h=14695981039346656037ull; for(size_t i=0;i<n;i++) h=(h^b[i])*1099511628211ull; return h; }
@@ -45,7 +43,7 @@ static void check(void) {
     // Use one NaN payload: optimized C itself chooses different payloads when
     // adding two distinct NaNs, depending on register allocation/inlining.
     static const u32 bits[]={0,0x80000000u,0x3f800000u,0xbf800000u,1,0x807fffffu,0x7f7fffffu,0xff7fffffu,0x7f800000u,0xff800000u,0x7fc00001u,0x40490fdbu};
-    __declspec(align(16)) u8 expected[512],actual[512];
+    _Alignas(16) u8 expected[512],actual[512];
     for(u32 align=0;align<16;align+=4) for(u32 a=0;a<RG_ARRAY_COUNT(bits);a++) for(u32 b=0;b<RG_ARRAY_COUNT(bits);b++) {
         RgGuiRect r={from_bits(bits[a]),from_bits(bits[b]),from_bits(bits[(a+3)%RG_ARRAY_COUNT(bits)]),from_bits(bits[(b+7)%RG_ARRAY_COUNT(bits)])};
         RgGuiRect uv={from_bits(bits[b]),from_bits(bits[a]),from_bits(bits[(b+5)%RG_ARRAY_COUNT(bits)]),from_bits(bits[(a+1)%RG_ARRAY_COUNT(bits)])};
@@ -80,7 +78,8 @@ static void init(Bench* b) {
     b->glyph.codepoint='?';b->glyph.w=8;b->glyph.h=12;b->glyph.x_advance=8;
     b->font.glyphs=&b->glyph;b->font.glyph_count=1;b->font.fallback_codepoint='?';
     RgGuiRendererInitDesc d={0}; d.font=&b->font;
-    d.limits=(RgGuiRendererLimits){8,16,1024,64,8192,16}; d.page_quads=32;
+    d.limits=(RgGuiRendererLimits){.max_cached_runs=8,.hash_slot_count=16,.text_capacity=1024,
+        .max_cached_quads=64,.max_frame_instances=8192,.max_batches=16}; d.page_quads=32;
     size_t n=rg_gui_renderer_memory_required(&d.limits,32);
     b->text_memory=malloc(n); if(!b->text_memory) fail("allocation");
     RgArena arena={(char*)b->text_memory,n,0,n};
@@ -100,7 +99,7 @@ static void init(Bench* b) {
     b->list=(RgGuiDrawList){b->commands,1024,1024};
 }
 
-static __declspec(noinline) void frame(Bench* b,u32 count,int full) {
+static RG_NOINLINE void frame(Bench* b,u32 count,int full) {
     if(full) {
         b->list.count=count;
         rg_gui_renderer_begin_frame(&b->text);
@@ -119,7 +118,7 @@ static int cmp(const void* a,const void* b) { double x=*(const double*)a,y=*(con
 int main(int argc,char** argv) {
     int checking=argc>1 && strcmp(argv[1],"check")==0;
     if(checking) check();
-    LARGE_INTEGER freq; QueryPerformanceFrequency(&freq);clock_scale=1.0/(double)freq.QuadPart;
+    Uint64 freq=SDL_GetPerformanceFrequency();if(!freq)fail("performance counter");clock_scale=1.0/(double)freq;
     Bench* b=calloc(1,sizeof(*b)); if(!b)fail("bench allocation");init(b);
     const u32 counts[]={1,128,1024};
     for(int full=0;full<2;full++) for(u32 k=0;k<3;k++) {

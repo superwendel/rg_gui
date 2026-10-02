@@ -175,7 +175,7 @@ static double unicode_reference(UnicodeBench* u, u64* geometry, u64* widths, u64
     return sum;
 }
 
-__declspec(noinline) static void unicode_frame(UnicodeBench* u, int mode, u32 index) {
+RG_NOINLINE static void unicode_frame(UnicodeBench* u, int mode, u32 index) {
     if (mode != 6) { frame(&u->base, mode, index); return; }
     double sum = 0.0;
     for (u32 i = 0u; i < LABEL_COUNT; ++i) {
@@ -240,7 +240,7 @@ static void unicode_case(UnicodeBench* u, int mode, const char* name, int verify
         stats->frame_cache_hits != (mode == 2 ? LABEL_COUNT : 0u) ||
         stats->frame_cache_misses != (mode == 4 ? LABEL_COUNT : 0u))) fail("renderer geometry/glyph/cache validation");
     printf("{\"kind\":\"result\",\"font\":\"%s\",\"corpus\":\"%s\",\"case\":\"%s\",\"median_ns_per_frame\":%.3f,\"cycle_checksum\":\"%llu\",\"geometry_checksum\":\"%llu\",\"cache_hits\":%u,\"cache_misses\":%u,\"glyphs\":%u}\n",
-        u->font_name, u->corpus, name, times[SAMPLE_COUNT / 2u], cycle_hash, geometry,
+        u->font_name, u->corpus, name, times[SAMPLE_COUNT / 2u], (unsigned long long)cycle_hash, (unsigned long long)geometry,
         renderer ? stats->frame_cache_hits : 0u, renderer ? stats->frame_cache_misses : 0u,
         LABEL_COUNT * UNICODE_LABEL_GLYPHS);
     fflush(stdout);
@@ -249,9 +249,9 @@ static void unicode_case(UnicodeBench* u, int mode, const char* name, int verify
 int main(int argc, char** argv) {
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "check"))) fail("usage: bench_unicode.exe [check]");
     const int verify_only = argc == 2;
-    LARGE_INTEGER frequency;
-    if (!QueryPerformanceFrequency(&frequency)) fail("performance counter");
-    timer_scale = 1.0 / (double)frequency.QuadPart;
+    Uint64 frequency = SDL_GetPerformanceFrequency();
+    if (!frequency) fail("performance counter");
+    timer_scale = 1.0 / (double)frequency;
     UnicodeBench* u = (UnicodeBench*)allocate(sizeof(*u));
     for (u32 count = 4096u; count <= 16384u; count *= 4u) {
         unicode_init(u, count);

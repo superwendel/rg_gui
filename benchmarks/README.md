@@ -11,10 +11,11 @@ For measured comparisons with another GUI library, see
 
 ## Requirements
 
-These runners require Windows, Python 3.9+, Visual Studio C++ tools, rg_core,
-rg_text, and an x64 SDL3 development package. Follow the repository's
+These runners support Linux and Windows with Python 3.9+, rg_core, rg_text,
+and SDL3 development files. Linux uses GCC (or `CC=clang`) and
+`pkg-config sdl3`; Windows uses the Visual Studio C++ tools. Follow the repository's
 [dependency setup](../README.md#dependencies) first. Nothing is downloaded by
-the benchmark runners. They use an existing x64 Developer Command Prompt when
+the benchmark runners. On Windows they use an existing x64 Developer Command Prompt when
 `cl.exe` is available; otherwise they locate Visual Studio with `vswhere` and
 initialize `VsDevCmd.bat`.
 
@@ -23,6 +24,22 @@ installation. Defaults use `RG_CORE_DIR`, `RG_TEXT_DIR`, and `SDL3_DIR` when set
 core/text otherwise default to sibling repositories. For a split SDL installation,
 use `--sdl-include` and `--sdl-lib` (the full `SDL3.lib` path), plus `--sdl-bin`
 for the DLL directory if needed. The DLL directory can also be on `PATH`.
+
+On Linux, omit the Windows SDL path options and select a custom SDL installation
+with `PKG_CONFIG_PATH`. For example:
+
+```sh
+python3 benchmarks/run.py build --suite extended --gui-root src --define RG_GUI_BENCH_LOOKUP=1 --output out/perf-current
+python3 benchmarks/run_geometry.py --gui-root src --build-only --output out/geometry-build
+python3 benchmarks/run_unicode.py --gui-root src --build-only --output out/unicode-build
+```
+
+Complete builds and correctness checks before timing. Use fresh output directories
+and preserve each executable's `.build.json` sidecar. CPU comparisons pin to the
+first CPU allowed by the process affinity (normally CPU 0), and record
+that choice. These are optimized builds with assertions disabled in library code;
+the harness's explicit correctness checks remain active. Portable clock and compiler
+helpers keep the workload and output-signature checks shared across platforms.
 
 ## Measure the current checkout
 
@@ -125,10 +142,11 @@ this environment variable before collecting measurements.
 
 The `run.py compare` command uses the following protocol:
 
-- Same `/std:c11 /O2 /DNDEBUG /W4 /WX` flags for both variants; no LTO.
+- Same optimized compiler settings for both variants; GNU11 on Linux,
+  `/std:c11 /O2 /DNDEBUG /W4 /WX` on Windows; no LTO.
 - Five process trials per variant, serial execution with alternating pair
   order: before/after, after/before, before/after, after/before, before/after.
-- Logical CPU 0 affinity, inherited by each child process. Failure to set
+- First allowed logical CPU, inherited by each child process. Failure to set
   affinity stops the comparison. Normal OS scheduling and power settings apply.
 - Seven calibrated samples per workload per process. Dynamic measurements
   cycle exactly 16 fixed frames, so differing calibration counts do not change
@@ -167,7 +185,7 @@ and hardware for each side of a comparison.
 `RG_GUI_GPU_USE_SSE2=1`, using identical current GUI and dependency headers.
 The six cases cover direct packing and complete CPU preparation for 1, 128,
 and 1,024 images. Both executables run guarded geometry checks before timing.
-This benchmark requires an x64 Windows host and uses the same MSVC setup as
+This benchmark requires an x86-64 host and uses the same compiler setup as
 the label runner; it does not submit GPU work.
 
 ```powershell
@@ -184,7 +202,7 @@ python benchmarks/run_geometry.py --portable-bin out/geometry-build/build/portab
 Prebuilt executables require their adjacent `.build.json` files, which are
 checked against executable/source hashes, backend defines, and identical header
 hashes. Comparison output directories must be new. Five serial process trials
-per backend alternate order on logical CPU 0. Raw trial JSONL, verified geometry
+per backend alternate order on the selected logical CPU. Raw trial JSONL, verified geometry
 signatures and vertex/item counts, process-median ranges, summaries, and build
 provenance remain in the output directory. Each process reports seven-sample
 timing minimum/median/maximum values for every case.

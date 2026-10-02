@@ -9,6 +9,8 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#elif defined(RG_GUI_TEST_X11_NATIVE_CLOSE)
+#include <X11/Xlib.h>
 #endif
 
 #define TEAROUT_CHECK(condition)                                                \
@@ -41,8 +43,11 @@ static int lifecycle_geometry(SDL_Window* window, int x, int y, int width, int h
 	int actual_y = 0;
 	int actual_width = 0;
 	int actual_height = 0;
-	if (!SDL_SyncWindow(window) ||
-	    !SDL_GetWindowPosition(window, &actual_x, &actual_y) ||
+	/* SDL 3.2 X11 can time out its pending-operation bookkeeping even when
+	 * the window manager has applied the exact requested geometry. Assert the
+	 * actual geometry and visibility below, rather than that bookkeeping. */
+	SDL_SyncWindow(window);
+	if (!SDL_GetWindowPosition(window, &actual_x, &actual_y) ||
 	    !SDL_GetWindowSize(window, &actual_width, &actual_height)) return 0;
 	if (actual_x != x || actual_y != y || actual_width != width || actual_height != height)
 	{
@@ -50,8 +55,42 @@ static int lifecycle_geometry(SDL_Window* window, int x, int y, int width, int h
 		             x, y, width, height, actual_x, actual_y, actual_width, actual_height);
 		return 0;
 	}
-	return (SDL_GetWindowFlags(window) &
-	        (SDL_WINDOW_HIDDEN | SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) == 0u;
+	SDL_WindowFlags flags = SDL_GetWindowFlags(window);
+	if (flags & (SDL_WINDOW_HIDDEN | SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED))
+	{
+		SDL_SetError("Expected a visible restored window; flags=0x%llx", (unsigned long long)flags);
+		return 0;
+	}
+	return 1;
+}
+
+static int lifecycle_client_coordinates(SDL_Window* window)
+{
+	int x, y, width, height;
+	TearoutMouseOrigin origin = {0};
+	SDL_SyncWindow(window);
+	if (!SDL_GetWindowPosition(window, &x, &y) ||
+	    !SDL_GetWindowSizeInPixels(window, &width, &height) ||
+	    !tearout_refresh_window_origin(window, &origin)) return 0;
+	/* Test without mouse focus: otherwise the focus-derived origin can hide
+	 * a decoration offset in the cached cross-window coordinates. */
+	if (origin.x != (f32)x || origin.y != (f32)y ||
+	    !tearout_window_local_mouse(window, (f32)x, (f32)y, NULL, 0, 0,
+	                                width, height, &origin) ||
+	    !tearout_window_local_mouse(window, (f32)(x + width - 1),
+	                                (f32)(y + height - 1), NULL, 0, 0,
+	                                width, height, &origin) ||
+	    tearout_window_local_mouse(window, (f32)(x - 1), (f32)y, NULL, 0, 0,
+	                               width, height, &origin) ||
+	    tearout_window_local_mouse(window, (f32)x, (f32)(y - 1), NULL, 0, 0,
+	                               width, height, &origin) ||
+	    tearout_point_in_window((f32)(x + width), (f32)y, &origin, width, height) ||
+	    tearout_point_in_window((f32)x, (f32)(y + height), &origin, width, height))
+	{
+		SDL_SetError("Client-area origin or cross-window edge hit testing is incorrect");
+		return 0;
+	}
+	return 1;
 }
 
 static int lifecycle_submit_clear(SDL_GPUDevice* device, SDL_Window* window)
@@ -112,12 +151,30 @@ static int lifecycle_text_input(DemoPlatformState* platform, RgInputState* input
 	return SDL_TextInputActive(window) && input->text_input_active;
 }
 
-#ifdef SDL_PLATFORM_WINDOWS
+#if defined(SDL_PLATFORM_WINDOWS) || defined(RG_GUI_TEST_X11_NATIVE_CLOSE)
 static int lifecycle_native_close(SDL_Window* window)
 {
+#ifdef SDL_PLATFORM_WINDOWS
 	HWND handle = (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(window),
 	                                           SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
 	if (!handle || !PostMessageW(handle, WM_CLOSE, 0, 0)) return 0;
+#else
+	Display* display = (Display*)SDL_GetPointerProperty(SDL_GetWindowProperties(window),
+	                                                   SDL_PROP_WINDOW_X11_DISPLAY_POINTER, NULL);
+	Window handle = (Window)SDL_GetNumberProperty(SDL_GetWindowProperties(window),
+	                                              SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
+	if (!display || !handle) return SDL_SetError("Native close test requires the X11 video driver");
+	XEvent event = {0};
+	event.xclient.type = ClientMessage;
+	event.xclient.display = display;
+	event.xclient.window = handle;
+	event.xclient.message_type = XInternAtom(display, "WM_PROTOCOLS", False);
+	event.xclient.format = 32;
+	event.xclient.data.l[0] = (long)XInternAtom(display, "WM_DELETE_WINDOW", False);
+	event.xclient.data.l[1] = CurrentTime;
+	if (!XSendEvent(display, handle, False, NoEventMask, &event)) return 0;
+	XFlush(display);
+#endif
 	SDL_WindowID id = SDL_GetWindowID(window);
 	u64 deadline = SDL_GetTicksNS() + 1000000000ull;
 	int received = 0;
@@ -222,6 +279,7 @@ int main(void)
 	TEAROUT_CHECK(cached_id != 0u && state.native.claimed && !state.parked.window);
 	TEAROUT_CHECK(state.native_created_count == 1 && state.native_reused_count == 0);
 	TEAROUT_CHECK(lifecycle_geometry(state.native.window, 100, 90, 480, 360));
+	TEAROUT_CHECK(lifecycle_client_coordinates(state.native.window));
 	TEAROUT_CHECK(lifecycle_viewport_storage_calls == 0u && viewport_storage.reserved_bytes == 0u);
 	TEAROUT_CHECK(lifecycle_register_viewport(&gui, &input));
 	retained_viewport_storage = viewport_storage.blocks[0];
@@ -250,8 +308,8 @@ int main(void)
 	              state.native_destroyed_count == 0);
 	TEAROUT_CHECK(tearout_park_native(&gui, &input, &platform, &state));
 	TEAROUT_CHECK(state.native_parked_count == 1 && state.parked.window_id == cached_id);
-#ifdef SDL_PLATFORM_WINDOWS
-	// Real WM_CLOSE exercises SDL's automatic quit inference; SDL_PushEvent
+#if defined(SDL_PLATFORM_WINDOWS) || defined(RG_GUI_TEST_X11_NATIVE_CLOSE)
+	// A native close exercises SDL's automatic quit inference; SDL_PushEvent
 	// would bypass it. Repeated closes of the parked window must remain local.
 	TEAROUT_CHECK(lifecycle_native_close(state.parked.window));
 	TEAROUT_CHECK(lifecycle_native_close(state.parked.window));
@@ -266,6 +324,7 @@ int main(void)
 	TEAROUT_CHECK(state.native.window_id == cached_id && !state.parked.window &&
 	              state.native_created_count == 1 && state.native_reused_count == 1);
 	TEAROUT_CHECK(lifecycle_geometry(state.native.window, 220, 170, 650, 500));
+	TEAROUT_CHECK(lifecycle_client_coordinates(state.native.window));
 	TEAROUT_CHECK(lifecycle_register_viewport(&gui, &input));
 	TEAROUT_CHECK(viewport_storage.blocks[0] == retained_viewport_storage &&
 	              viewport_storage.reserved_bytes == retained_viewport_bytes && lifecycle_viewport_storage_calls == 1u);
@@ -276,7 +335,7 @@ int main(void)
 	// changes on Windows if the native window is still maximized when they run.
 	TEAROUT_CHECK(SDL_SetWindowSize(state.native.window, 540, 400));
 	TEAROUT_CHECK(SDL_MaximizeWindow(state.native.window));
-	TEAROUT_CHECK(SDL_SyncWindow(state.native.window));
+	SDL_SyncWindow(state.native.window);
 	TEAROUT_CHECK((SDL_GetWindowFlags(state.native.window) & SDL_WINDOW_MAXIMIZED) != 0u);
 	TEAROUT_CHECK(tearout_park_native(&gui, &input, &platform, &state));
 	TEAROUT_CHECK(tearout_open_for_panel(device, main_window, &state,
@@ -287,7 +346,7 @@ int main(void)
 
 	TEAROUT_CHECK(SDL_SetWindowSize(state.native.window, 560, 420));
 	TEAROUT_CHECK(SDL_MinimizeWindow(state.native.window));
-	TEAROUT_CHECK(SDL_SyncWindow(state.native.window));
+	SDL_SyncWindow(state.native.window);
 	TEAROUT_CHECK((SDL_GetWindowFlags(state.native.window) & SDL_WINDOW_MINIMIZED) != 0u);
 	TEAROUT_CHECK(tearout_park_native(&gui, &input, &platform, &state));
 	TEAROUT_CHECK(tearout_open_for_panel(device, main_window, &state,
@@ -318,7 +377,8 @@ int main(void)
 	TEAROUT_CHECK(state.native.window != NULL);
 	state.native_created_count++;
 	extra_id = state.native.window_id;
-	TEAROUT_CHECK(extra_id != cached_id && SDL_SyncWindow(state.native.window));
+	TEAROUT_CHECK(extra_id != cached_id);
+	SDL_SyncWindow(state.native.window);
 	TEAROUT_CHECK(lifecycle_register_viewport(&gui, &input));
 	TEAROUT_CHECK(viewport_storage.blocks[0] == retained_viewport_storage &&
 	              viewport_storage.reserved_bytes == retained_viewport_bytes && lifecycle_viewport_storage_calls == 1u);

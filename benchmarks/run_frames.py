@@ -1,17 +1,17 @@
-"""Record serial, real-window demo frame profiles on Windows (stdlib only).
+"""Record serial, real-window demo frame profiles on Linux or Windows (stdlib only).
 
 Build the demos first. Example:
   python benchmarks/run_frames.py --output out/frame-profile --sdl-root C:/libs/SDL3-3.4.10
   python benchmarks/run_frames.py --output out/frame-edit --scenario edit --trials 3
+  python3 benchmarks/run_frames.py --output out/linux-frames --present vsync
 
-No CPU affinity is changed unless --cpu-zero is supplied. Windows remain visible;
+No CPU affinity is changed unless --pin-cpu is supplied. Windows remain visible;
 do not minimize or interact with them during scripted captures. CPU encoding times
 are not GPU execution times. Initialization before the frame loop is not measured.
 """
 
 import argparse
 import csv
-import ctypes
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -25,6 +25,8 @@ import subprocess
 import sys
 import time
 
+import platform_support as host
+
 
 REPO = Path(__file__).resolve().parent.parent
 SCENARIOS = ("idle", "text-idle", "edit", "scroll", "resize", "images", "images-grouped", "tearout")
@@ -36,6 +38,9 @@ RENDER_COUNTERS = ("submitted", "presented", "draw_commands", "draw_calls", "dis
                    "cache_upload_bytes", "geometry_upload_bytes", "full_cache_upload",
                    "cache_hits", "cache_misses", "cache_evictions", "cache_bypasses",
                    "dropped_runs", "dropped_glyphs", "renderer_diagnostics")
+UPLOAD_COUNTERS = ("copy_calls", "cache_upload_ranges")
+OPTIONAL_COUNTER_COLUMNS = tuple(f"{prefix}_{field}" for prefix in ("main", "secondary")
+                                 for field in UPLOAD_COUNTERS)
 FRAME_COUNTERS = ("frame", "warmup", "width", "height", "diagnostic_flags", "actions")
 TIMING_COLUMNS = FRAME_TIMINGS + tuple(f"{prefix}_{field}" for prefix in ("main", "secondary")
                                      for field in RENDER_TIMINGS)
@@ -84,33 +89,21 @@ def demo_present_arguments(args):
 
 
 def cpu_metadata(pin):
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.GetCurrentProcess.restype = ctypes.c_void_p
-    kernel.SetProcessAffinityMask.argtypes = (ctypes.c_void_p, ctypes.c_size_t)
-    kernel.SetProcessAffinityMask.restype = ctypes.c_int
-    kernel.GetProcessAffinityMask.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
-                                             ctypes.POINTER(ctypes.c_size_t))
-    kernel.GetProcessAffinityMask.restype = ctypes.c_int
-    handle = kernel.GetCurrentProcess()
-    if pin and not kernel.SetProcessAffinityMask(handle, 1):
-        raise ctypes.WinError(ctypes.get_last_error())
-    process_mask, system_mask = ctypes.c_size_t(), ctypes.c_size_t()
-    if not kernel.GetProcessAffinityMask(handle, ctypes.byref(process_mask), ctypes.byref(system_mask)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    model = platform.processor()
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
-            model = winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
-    except OSError:
-        pass
-    return {"model": model, "logical_processors": os.cpu_count(),
-            "affinity_policy": "CPU 0; inherited by children" if pin else "unchanged; OS scheduling",
-            "process_affinity_mask": process_mask.value, "system_affinity_mask": system_mask.value}
+    return host.cpu_metadata(pin)
+
+
+def build_provenance(binary, record):
+    path = binary.with_name(binary.name + ".build.json")
+    if not path.is_file():
+        return None
+    contents = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(contents, dict) or contents.get("executable_sha256") != record["sha256"]:
+        raise RuntimeError(f"Build provenance does not match its executable: {path}")
+    return {"file": describe_file(path), "contents": contents}
 
 
 def source_snapshot(args, scenarios):
-    files = [Path(__file__), REPO / "src/rg_gui.h", REPO / "src/rg_gui_renderer.h",
+    files = [Path(__file__), Path(host.__file__), REPO / "src/rg_gui.h", REPO / "src/rg_gui_renderer.h",
              REPO / "src/rg_gui_gpu.h", REPO / "examples/rg_gui_demo_common.h",
              REPO / "examples/rg_gui_demo_profile.h", REPO / "examples/rg_gui_demo_stats.h",
              REPO / "examples/rg_gui_demo_present.h"]
@@ -139,29 +132,26 @@ def source_snapshot(args, scenarios):
 
 
 def child_environment(args):
-    env = os.environ.copy()
-    folders = [args.bin_dir.resolve()]
-    if args.sdl_root:
-        folders.extend(args.sdl_root.resolve() / suffix for suffix in ("lib/x64", "bin", "lib"))
-    if env.get("SDL3_BIN_DIR"):
-        folders.append(Path(env["SDL3_BIN_DIR"]).resolve())
-    folders = [folder for folder in folders if folder.is_dir()]
-    env["PATH"] = os.pathsep.join(map(str, folders)) + os.pathsep + env.get("PATH", "")
-    runtime = next((folder / "SDL3.dll" for folder in folders if (folder / "SDL3.dll").is_file()), None)
+    env, runtime = host.runtime_environment(args.bin_dir, args.sdl_root)
     return env, describe_file(runtime) if runtime else None
 
 
-def read_capture(path, scenario, args, stdout):
+def read_capture(path, scenario, args, stdout, stderr=""):
     with path.open(newline="", encoding="utf-8-sig") as capture:
         reader = csv.DictReader(capture)
-        if reader.fieldnames is None or set(reader.fieldnames) != EXPECTED_COLUMNS or len(reader.fieldnames) != len(EXPECTED_COLUMNS):
+        columns = set(reader.fieldnames or ())
+        # Historical captures predate the upload counters. Accept either whole
+        # schema, but never silently turn absent measurements into zero values.
+        if (columns not in (EXPECTED_COLUMNS, EXPECTED_COLUMNS | set(OPTIONAL_COUNTER_COLUMNS)) or
+                reader.fieldnames is None or len(reader.fieldnames) != len(columns)):
             raise RuntimeError(f"Unexpected or duplicated CSV columns: {path}")
+        counter_columns = COUNTER_COLUMNS + tuple(column for column in OPTIONAL_COUNTER_COLUMNS if column in columns)
         rows = []
         for raw in reader:
             if None in raw or any(value is None for value in raw.values()):
                 raise RuntimeError(f"Malformed CSV row {len(rows)} in {path}")
             row = {"scenario": raw["scenario"]}
-            for column in COUNTER_COLUMNS:
+            for column in counter_columns:
                 row[column] = int(raw[column])
                 if row[column] < 0:
                     raise RuntimeError(f"Negative {column} at frame {len(rows)}")
@@ -207,6 +197,7 @@ def read_capture(path, scenario, args, stdout):
     if not included:
         raise RuntimeError("No fully presented measurement frames")
     checks = {"raw_frames": len(rows), "warmup_frames": args.warmup,
+              "unavailable_counters": sorted(set(OPTIONAL_COUNTER_COLUMNS) - columns),
               "setup_active_id_recoveries": sum(row["diagnostic_flags"] == 128 for row in rows),
               "measurement_frames": len(measured), "included_frames": len(included),
               "suppressed_presentation_frames": len(measured) - len(included),
@@ -214,6 +205,11 @@ def read_capture(path, scenario, args, stdout):
               "secondary_presented": secondary_presented,
               "measurement_actions": sum(row["actions"] for row in measured),
               "measurement_sizes": sorted({(row["width"], row["height"]) for row in included})}
+    expected_sizes = {(1220, 760)} if scenario == "tearout" else {(1280, 800)}
+    if scenario == "resize":
+        expected_sizes.add((1024, 720))
+    if not set(checks["measurement_sizes"]).issubset(expected_sizes):
+        raise RuntimeError("Unexpected measurement window size; keep scripted windows at their requested dimensions")
     interactions = re.search(r"Profile interactions: text_edits=(\d+) scroll_changes=(\d+)", stdout)
     if scenario != "tearout":
         if not interactions:
@@ -286,10 +282,32 @@ def read_capture(path, scenario, args, stdout):
         checks["present_mode"] = config[3]
     elif getattr(args, "present", None):
         raise RuntimeError("Demo did not report its actual presentation configuration")
+    # SDL logs physical GPU details for backends that expose them. These are
+    # observations from the process, distinct from the optional user label.
+    for field, label in (("gpu_device", "Device"), ("gpu_driver", "Driver")):
+        observed = re.search(rf"(?:Vulkan|D3D12|Metal) {label}: ([^\r\n]+)", stderr)
+        if observed:
+            checks[field] = observed[1].strip()
+    runtime = re.search(r"^Profile runtime: sdl=(\S+) video=(\S+) frame_buffers=([123])\s*$", stdout, re.MULTILINE)
+    if runtime:
+        checks.update(sdl_version=runtime[1], video_driver=runtime[2], frame_buffers=int(runtime[3]))
+        if getattr(args, "frame_buffers", None) is not None and checks["frame_buffers"] != args.frame_buffers:
+            raise RuntimeError("Demo frame-buffer count does not match requested profile")
+    elif getattr(args, "frame_buffers", None) is not None:
+        raise RuntimeError("Demo did not report its actual frame-buffer count; rebuild before profiling")
+    display = re.search(r"^Profile display: id=(\d+) size=(\d+)x(\d+) refresh_hz=(\S+) scale=(\S+)\s*$", stdout, re.MULTILINE)
+    if display:
+        checks["display"] = dict(id=int(display[1]), width=int(display[2]), height=int(display[3]),
+                                 refresh_hz=float(display[4]), scale=float(display[5]))
+        if (not math.isfinite(checks["display"]["scale"]) or checks["display"]["scale"] <= 0 or
+                not math.isfinite(checks["display"]["refresh_hz"]) or checks["display"]["refresh_hz"] < 0):
+            raise RuntimeError("Demo reported invalid display metadata")
     return rows, included, checks
 
 
 def summarize_frames(rows):
+    renderer_counters = RENDER_COUNTERS + tuple(field for field in UPLOAD_COUNTERS
+        if all(f"{prefix}_{field}" in row for prefix in ("main", "secondary") for row in rows))
     timings = {column: distribution([row[column] for row in rows]) for column in TIMING_COLUMNS}
     for field in RENDER_TIMINGS:
         timings[f"combined_{field}"] = distribution([row[f"main_{field}"] + row[f"secondary_{field}"] for row in rows])
@@ -299,10 +317,10 @@ def summarize_frames(rows):
     # This residual can still contain driver, submission, lifecycle, and OS waits.
     counters = {}
     for prefix in ("main", "secondary"):
-        for field in RENDER_COUNTERS:
+        for field in renderer_counters:
             values = [row[f"{prefix}_{field}"] for row in rows]
             counters[f"{prefix}_{field}"] = dict(distribution(values), total=sum(values))
-    for field in RENDER_COUNTERS:
+    for field in renderer_counters:
         values = [row[f"main_{field}"] + row[f"secondary_{field}"] for row in rows]
         counters[f"combined_{field}"] = dict(distribution(values), total=sum(values))
     for field in ("actions",):
@@ -336,12 +354,12 @@ def write_report(output, results, args):
                      f"{timings['frame_interval_ms']['p99']:.4f} | {timings['ui_ms']['p99']:.4f} | "
                      f"{timings['combined_swapchain_wait_ms']['p99']:.4f} |")
     lines += ["", "Full stage distributions, counters, action-frame breakdowns and validation appear in summary.json. Raw CSVs and console logs are adjacent.",
-              "Trials run serially with rotating scenario order. Default scheduling leaves CPU affinity unchanged; --cpu-zero is an explicit alternative.",
+              "Trials run serially with rotating scenario order. Default scheduling leaves CPU affinity unchanged; --pin-cpu is an explicit alternative.",
               "Frames with a suppressed main presentation or an attempted but suppressed secondary presentation are excluded from distributions and counted in validation.",
               "The runner verifies workloads and does not presume that grouped images or any other scenario is faster.", "",
-              "To inspect a scene manually, run:", "", "```powershell",
-              f"& '{args.bin_dir.resolve() / 'rg_gui_demo_full.exe'}' --scenario manual",
-              f"& '{args.bin_dir.resolve() / 'rg_gui_demo_tearout.exe'}' --start-torn-out", "```", ""]
+              "To inspect a scene manually, run:", "", "```" + ("powershell" if os.name == "nt" else "sh"),
+              f"{'& ' if os.name == 'nt' else ''}'{args.bin_dir.resolve() / host.executable_name('rg_gui_demo_full')}' --scenario manual",
+              f"{'& ' if os.name == 'nt' else ''}'{args.bin_dir.resolve() / host.executable_name('rg_gui_demo_tearout')}' --start-torn-out", "```", ""]
     (output / "summary.md").write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -352,9 +370,10 @@ def run(args):
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     env, runtime = child_environment(args)
-    executables = {case: args.bin_dir.resolve() / ("rg_gui_demo_tearout.exe" if case == "tearout" else "rg_gui_demo_full.exe")
+    executables = {case: args.bin_dir.resolve() / host.executable_name("rg_gui_demo_tearout" if case == "tearout" else "rg_gui_demo_full")
                    for case in scenarios}
     binaries = {str(path): describe_file(path) for path in sorted(set(executables.values()))}
+    provenance = {path: build_provenance(Path(path), record) for path, record in binaries.items()}
     snapshot = source_snapshot(args, scenarios)
     # This is a no-build runner. Refuse obviously stale binaries; hashes document
     # source/dependency snapshots but do not claim to reconstruct compiler flags.
@@ -367,11 +386,12 @@ def run(args):
             raise RuntimeError(f"Demo is older than its source headers; rebuild before profiling: {binary}")
     manifest = {"status": "incomplete", "started_utc": datetime.now(timezone.utc).isoformat(),
                 "platform": platform.platform(), "python": sys.version, "cpu": cpu_metadata(args.cpu_zero),
+                "environment": host.environment_metadata(), "build_provenance": provenance,
                 "gpu_label_supplied": args.gpu_label, "sdl_runtime_candidate": runtime,
                 "requested_present_mode": requested_present_mode(args),
                 "arguments": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
                 "scenarios": scenarios, "binaries": binaries, "source_and_dependency_snapshot": snapshot,
-                "provenance_note": "Current source/dependency hashes and executable hashes; rebuild beforehand. Compiler flags are not inferred.",
+                "provenance_note": "Current source/dependency hashes and executable hashes; rebuild beforehand. Optional hash-bound build sidecars record compiler flags; absent sidecars mean flags are unknown.",
                 "measurement_note": "CPU wall time with real presentation; not GPU timestamps. Nearest-rank per-frame percentiles. Warmup retained raw but excluded from summaries.",
                 "commands": []}
     write_json(output / "manifest.json", manifest)
@@ -383,7 +403,7 @@ def run(args):
                 stem = f"{scenario}_{trial + 1}"
                 csv_path = output / (stem + ".csv")
                 command = [str(executables[scenario]), "--profile", str(csv_path), "--profile-warmup", str(args.warmup),
-                           "--frames", str(args.frames), "--scenario", scenario]
+                           "--frames", str(args.frames), "--scenario", scenario, "--frame-buffers", str(args.frame_buffers)]
                 command.extend(demo_present_arguments(args))
                 manifest["commands"].append({"trial": trial + 1, "scenario": scenario, "argv": command})
                 write_json(output / "manifest.json", manifest)
@@ -395,9 +415,10 @@ def run(args):
                                              timeout=args.timeout, check=False)
                 elapsed = time.perf_counter() - started
                 stdout = (output / (stem + ".stdout.txt")).read_text(encoding="utf-8", errors="replace")
+                stderr = (output / (stem + ".stderr.txt")).read_text(encoding="utf-8", errors="replace")
                 if process.returncode:
                     raise RuntimeError(f"{scenario} trial {trial + 1} exited {process.returncode}; see {stem}.stderr.txt")
-                rows, included, validation = read_capture(csv_path, scenario, args, stdout)
+                rows, included, validation = read_capture(csv_path, scenario, args, stdout, stderr)
                 result = {"scenario": scenario, "trial": trial + 1, "process_elapsed_seconds": elapsed,
                           "csv": csv_path.name, "csv_sha256": digest(csv_path), "validation": validation,
                           "summary": summarize_frames(included),
@@ -420,6 +441,11 @@ def run(args):
             write_json(output / "image_control.json", controls)
         if source_snapshot(args, scenarios) != snapshot or any(describe_file(Path(path)) != value for path, value in binaries.items()):
             raise RuntimeError("Sources, dependencies, or demo binaries changed during profiling")
+        for record in provenance.values():
+            if record is not None and describe_file(Path(record["file"]["path"])) != record["file"]:
+                raise RuntimeError("A build provenance record changed during profiling")
+        if runtime is not None and describe_file(Path(runtime["path"])) != runtime:
+            raise RuntimeError("An SDL runtime candidate changed during profiling")
         manifest.update(status="complete", finished_utc=datetime.now(timezone.utc).isoformat())
     except Exception as error:
         manifest.update(status="failed", error=str(error), finished_utc=datetime.now(timezone.utc).isoformat())
@@ -441,15 +467,17 @@ def main():
     presentation.add_argument("--present", choices=("vsync", "mailbox", "immediate"),
                               help="Request a presentation mode; default is immediate")
     presentation.add_argument("--vsync", action="store_true", help="Alias for --present vsync")
-    parser.add_argument("--cpu-zero", action="store_true", help="Pin runner and children to logical CPU 0; default leaves affinity unchanged")
-    parser.add_argument("--bin-dir", type=Path, default=REPO, help="Directory containing freshly built demo executables")
+    parser.add_argument("--pin-cpu", "--cpu-zero", dest="cpu_zero", action="store_true",
+                        help="Pin runner and children to the first allowed CPU; default leaves affinity unchanged")
+    parser.add_argument("--frame-buffers", type=int, choices=(1, 2, 3), default=2,
+                        help="Renderer frame-buffer count; compare separate runs with 1, 2, or 3")
+    parser.add_argument("--bin-dir", type=Path, default=REPO if os.name == "nt" else REPO / "out/linux",
+                        help="Directory containing freshly built demo executables")
     parser.add_argument("--sdl-root", type=Path, default=os.environ.get("SDL3_DIR"))
     parser.add_argument("--core-root", type=Path, default=os.environ.get("RG_CORE_DIR"), help="Optional declared build dependency root for hashing")
     parser.add_argument("--text-root", type=Path, default=os.environ.get("RG_TEXT_DIR"), help="Optional declared build dependency root for hashing")
     parser.add_argument("--gpu-label", help="Optional GPU model label recorded verbatim; backend is also captured from demo output")
     args = parser.parse_args()
-    if os.name != "nt":
-        parser.error("Real-window profiling runner currently requires Windows")
     if not (1 <= args.trials <= 100 and 0 <= args.warmup < args.frames <= 100000):
         parser.error("Require 1 <= trials <= 100 and 0 <= warmup < frames <= 100000")
     if not math.isfinite(args.timeout) or args.timeout <= 0:

@@ -7,6 +7,10 @@ between 0.x releases.
 
 ### Added
 
+- Linux GCC/Clang builds, SPIR-V dependency setup, sanitizer CI, and native
+  X11/Vulkan validation through `build.sh`.
+- Linux CPU/frame profiling, compiler and runtime provenance, upload-copy
+  counters, and `--frame-buffers 1|2|3` controls in the profiling demos.
 - Optional caller-owned viewport command storage, allocated on first use and
   retained for reopening. Eager arena allocation remains the default.
 - `rg_gui_gpu_upload_ring_size_required` to size an upload buffer for a maximum
@@ -31,6 +35,9 @@ between 0.x releases.
 
 ### Fixed
 
+- Strict GCC builds on LP64 Linux and decorated-window tear-out hit testing.
+- Restore cached maximized/minimized tear-outs reliably on X11 before applying
+  their requested size and position.
 - Editor mouse capture release and stale numeric text.
 - Fallback-glyph spacing and text-command association when earlier commands
   are skipped or dropped.

@@ -91,11 +91,16 @@ jobs:
           }
           Write-Host 'GPU device execution is intentionally excluded on GitHub-hosted runners.'
 
-  sanitizers:
-    name: Linux / Clang ASan + UBSan
+  linux:
+    name: Linux / ${{ matrix.cc }} build + ASan + UBSan
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
     env:
+      CC: ${{ matrix.cc }}
       RG_CORE_DIR: ${{ github.workspace }}/_deps/rg_core
       RG_TEXT_DIR: ${{ github.workspace }}/_deps/rg_text
 
@@ -119,7 +124,7 @@ jobs:
           path: _deps/rg_text
           persist-credentials: false
 
-      - name: Build SDL test dependency
+      - name: Build SDL dependency
         id: sdl
         uses: libsdl-org/setup-sdl@afd98199e97f9c2aa739474be7e0886d149a5e47 # Node 24 main, 2026-08-29
         with:
@@ -129,61 +134,34 @@ jobs:
           install-linux-dependencies: true
           add-to-environment: true
 
-      - name: Build and run host-side sanitizer tests
+      - name: Configure SDL discovery and X11 lifecycle dependency
         shell: bash
         run: |
           set -euo pipefail
-          SANITIZER_DIR="$RUNNER_TEMP/rg-gui-sanitize"
-          mkdir -p "$SANITIZER_DIR"
           sdl_prefix='${{ steps.sdl.outputs.prefix }}'
-          export PKG_CONFIG_PATH="$sdl_prefix/lib/pkgconfig:$sdl_prefix/lib64/pkgconfig:$sdl_prefix/share/pkgconfig:${PKG_CONFIG_PATH:-}"
-          test -f "$sdl_prefix/include/SDL3/SDL.h"
-          pkg-config --modversion sdl3
-          read -r -a sdl_libs <<< "$(pkg-config --libs sdl3)"
+          echo "PKG_CONFIG_PATH=$sdl_prefix/lib/pkgconfig:$sdl_prefix/lib64/pkgconfig:$sdl_prefix/share/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$sdl_prefix/lib:$sdl_prefix/lib64:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          sudo apt-get update
+          sudo apt-get install --yes libx11-dev
 
-          common=(
-            -std=gnu11
-            -O1
-            -g
-            -Wall
-            -Wextra
-            -Werror
-            -fno-omit-frame-pointer
-            -fno-sanitize-recover=all
-            -fsanitize=address,undefined
-            -D_CRT_SECURE_NO_WARNINGS
-            # Dependency headers expose unused static helpers in unity builds.
-            -isystem "$RG_CORE_DIR/src"
-            -isystem "$RG_TEXT_DIR/src"
-          )
-          sdl_common=(
-            "${common[@]}"
-            -isystem "$sdl_prefix/include"
-          )
+      - name: Build pinned shader compiler dependencies
+        shell: bash
+        run: ./.github/scripts/setup-linux-deps.sh "$RUNNER_TEMP/rg-gui-linux-deps"
 
-          clang "${common[@]}" tests/test_assets.c -lm -o "$SANITIZER_DIR/test_assets"
-          clang "${sdl_common[@]}" tests/test_gui_no_string_ids.c "${sdl_libs[@]}" -lm -o "$SANITIZER_DIR/test_gui_no_string_ids"
-          if clang "${sdl_common[@]}" -DRG_GUI_TEST_EXPECT_STRING_ID_FAILURE \
-              tests/test_gui_no_string_ids.c "${sdl_libs[@]}" -lm \
-              -o "$SANITIZER_DIR/test_gui_no_string_ids_negative" >/dev/null 2>&1; then
-            echo 'RG_GUI_NO_STRING_IDS unexpectedly allowed a disabled string-ID API.' >&2
-            exit 1
-          fi
-          for target in test_gui test_renderer test_gui_gpu test_demo_profile test_demo_format; do
-            clang "${sdl_common[@]}" "tests/$target.c" "${sdl_libs[@]}" -lm -o "$SANITIZER_DIR/$target"
+      - name: Validate assets, shaders, host tests, demos, and native test builds
+        shell: bash
+        run: ./build.sh test_ci
+
+      - name: Run host tests with ASan and UBSan
+        shell: bash
+        run: ./build.sh test_sanitize
+
+      - name: Verify compile-only device and native artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          for artifact in test_gui_gpu_device test_demo_tearout rg_gui_demo_minimal rg_gui_demo_full rg_gui_demo_tearout; do
+            test -s "out/linux/$artifact"
+            test -s "out/linux/$artifact.build.json"
           done
-          clang "${sdl_common[@]}" -DRG_GUI_GPU_USE_SSE2=1 tests/test_gui_gpu.c "${sdl_libs[@]}" -lm -o "$SANITIZER_DIR/test_gui_gpu_sse2"
-          clang "${sdl_common[@]}" tests/test_gui_gpu_device.c "${sdl_libs[@]}" -lm -o "$SANITIZER_DIR/test_gui_gpu_device"
-
-          export ASAN_OPTIONS='detect_leaks=1:halt_on_error=1:strict_string_checks=1'
-          export UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1'
-          export SDL_VIDEODRIVER=dummy
-          "$SANITIZER_DIR/test_assets"
-          "$SANITIZER_DIR/test_gui_no_string_ids"
-          "$SANITIZER_DIR/test_demo_profile"
-          "$SANITIZER_DIR/test_demo_format"
-          "$SANITIZER_DIR/test_gui"
-          "$SANITIZER_DIR/test_renderer"
-          "$SANITIZER_DIR/test_gui_gpu"
-          "$SANITIZER_DIR/test_gui_gpu_sse2"
-          echo 'The sanitizer-instrumented GPU device binary was compiled but not run.'
+          echo 'GPU/display execution is a local test_release gate; hosted CI only compiles those targets.'

@@ -1,4 +1,4 @@
-"""Profile loaded-font Unicode CPU costs, or compare two header trees on Windows."""
+"""Profile loaded-font Unicode CPU costs, or compare two header trees on Linux or Windows."""
 
 import argparse
 from datetime import datetime, timezone
@@ -13,6 +13,7 @@ import sys
 
 sys.dont_write_bytecode = True
 import run as common
+import platform_support
 
 SOURCE = Path(__file__).with_name("bench_unicode.c")
 SOURCES = (SOURCE, SOURCE.with_name("bench_gui.c"))
@@ -102,7 +103,7 @@ def run(args):
     manifest = {
         "status": "incomplete", "started_utc": datetime.now(timezone.utc).isoformat(),
         "platform": platform.platform(), "processor": platform.processor(),
-        "cpu_affinity_mask": 1, "trials": 0 if args.build_only else TRIALS,
+        "trials": 0 if args.build_only else TRIALS,
         "harness_sources": {path.name: common.digest(path) for path in SOURCES},
         "runner_sha256": common.digest(Path(__file__)), "compiler_runner_sha256": common.digest(Path(common.__file__)),
         "variants": variants, "fonts": FONTS, "corpora": CORPORA, "cases": CASES, "binaries": {},
@@ -120,23 +121,23 @@ def run(args):
     for variant in variants:
         supplied = getattr(args, variant + "_bin")
         root = getattr(args, variant + "_root") if comparing else args.gui_root
-        binary = supplied.resolve() if supplied else build(root, args, output / "build" / (variant + ".exe"))
+        binary = supplied.resolve() if supplied else build(root, args, output / "build" / platform_support.executable_name(variant))
         metadata = json.loads(binary.with_suffix(".build.json").read_text(encoding="utf-8"))
         digest = common.digest(binary)
         if (metadata.get("executable_sha256") != digest or
                 metadata.get("harness_sources") != manifest["harness_sources"]):
             raise RuntimeError(f"Executable or harness does not match build provenance: {binary}")
-        if f"/DRG_GUI_BENCH_LOOKUP={args.lookup}" not in metadata["command"]:
+        if not common.has_define(metadata["command"], f"RG_GUI_BENCH_LOOKUP={args.lookup}"):
             raise RuntimeError(f"Executable does not match --lookup={args.lookup}: {binary}")
         binaries[variant] = binary
         manifest["binaries"][variant] = {"path": str(binary), "sha256": digest, "build": metadata}
     common.write_json(output / "manifest.json", manifest)
-    env = os.environ.copy()
-    dll_dirs = [args.sdl_bin] if args.sdl_bin else []
-    if args.sdl_root:
-        dll_dirs += [args.sdl_root / subdir for subdir in ("bin", "lib/x64", "lib")]
-    env["PATH"] = os.pathsep.join(str(path.resolve()) for path in dll_dirs if path.is_dir()) + os.pathsep + env.get("PATH", "")
-    common.pin_cpu_zero()
+    env = common.runtime_environment(args)
+    manifest["environment"] = platform_support.environment_metadata()
+    manifest["sdl_runtime_candidate"] = common.runtime_record(args)
+    manifest["cpu"] = common.pin_cpu_zero()
+    manifest["cpu_affinity_mask"] = manifest["cpu"]["process_affinity_mask"]
+    common.write_json(output / "manifest.json", manifest)
     signature = None
     for variant, binary in binaries.items():
         process = subprocess.run([str(binary), "check"], cwd=common.REPO, env=env, capture_output=True, text=True)
@@ -207,12 +208,13 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True, help="New directory; existing directories are refused")
+    parser.add_argument("--cc", default=os.environ.get("CC", "gcc"), help="Linux C compiler (default CC or gcc)")
     parser.add_argument("--gui-root", type=Path, default=common.REPO / "src")
     parser.add_argument("--core-root", type=Path, default=os.environ.get("RG_CORE_DIR", common.REPO.parent / "rg_core"))
     parser.add_argument("--text-root", type=Path, default=os.environ.get("RG_TEXT_DIR", common.REPO.parent / "rg_text"))
     parser.add_argument("--sdl-root", type=Path, default=os.environ.get("SDL3_DIR"))
     parser.add_argument("--sdl-include", type=Path, default=os.environ.get("SDL3_INCLUDE_DIR"))
-    parser.add_argument("--sdl-lib", type=Path, help="Full path to SDL3.lib")
+    parser.add_argument("--sdl-lib", type=Path, help="Full path to SDL3 library (Linux defaults to pkg-config sdl3)")
     parser.add_argument("--sdl-bin", type=Path, default=os.environ.get("SDL3_BIN_DIR"))
     parser.add_argument("--lookup", type=int, choices=(0, 1), default=1, help="Attach the optional ASCII lookup when the header supports it")
     parser.add_argument("--current-bin", type=Path, help="Profile an existing executable with adjacent .build.json")
@@ -222,8 +224,6 @@ def main():
     parser.add_argument("--after-bin", type=Path)
     parser.add_argument("--build-only", action="store_true", help="Compile and verify all cases without timing")
     args = parser.parse_args()
-    if os.name != "nt":
-        parser.error("Requires Windows, MSVC, and QueryPerformanceCounter")
     if bool(args.before_root) != bool(args.after_root) or bool(args.before_bin) != bool(args.after_bin):
         parser.error("Specify both before/after roots, or both before/after executables")
     if (args.before_root and args.before_bin) or (args.current_bin and (args.before_root or args.before_bin)):

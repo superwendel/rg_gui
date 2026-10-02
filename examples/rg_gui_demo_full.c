@@ -870,7 +870,7 @@ int main(int argc, char** argv)
 	gpu_desc.max_text_instances = limits.max_frame_instances;
 	gpu_desc.max_geometry_vertices = 65536u;
 	gpu_desc.max_items = 8192u;
-	gpu_desc.frame_buffer_count = 2u;
+	gpu_desc.frame_buffer_count = profile_options.frame_buffers;
 	gpu_desc.min_filter = SDL_GPU_FILTER_LINEAR;
 	gpu_desc.mag_filter = SDL_GPU_FILTER_LINEAR;
 	if (!rg_gui_gpu_create(&gpu, &gpu_desc)) goto cleanup;
@@ -900,6 +900,7 @@ int main(int argc, char** argv)
 	if (!full_apply_present_mode(device, window, &state)) goto cleanup;
 	printf("Profile configuration: backend=%s scenario=%s present=%s\n", SDL_GetGPUDeviceDriver(device),
 	       profile_options.scenario, demo_present_name(state.present_mode));
+	demo_profile_log_runtime(window, &profile_options);
 	if (capture_wait_ms) SDL_Delay((u32)capture_wait_ms);
 	u64 previous_ticks = SDL_GetTicksNS();
 	u64 previous_frame_start = previous_ticks;

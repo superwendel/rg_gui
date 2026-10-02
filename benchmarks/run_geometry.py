@@ -1,4 +1,4 @@
-"""Compare portable C and optional SSE2 image packing on Windows (stdlib only)."""
+"""Compare portable C and optional SSE2 image packing on Linux or Windows (stdlib only)."""
 
 import argparse
 from datetime import datetime, timezone
@@ -13,6 +13,7 @@ import sys
 
 sys.dont_write_bytecode = True
 import run as common
+import platform_support
 
 SOURCE = Path(__file__).with_name("bench_geometry.c")
 VARIANTS = ("portable", "sse2")
@@ -44,7 +45,7 @@ def compare(args):
     output.mkdir(parents=True, exist_ok=False)
     manifest = {"status": "incomplete", "started_utc": datetime.now(timezone.utc).isoformat(),
                 "platform": platform.platform(), "processor": platform.processor(),
-                "cpu_affinity_mask": 1, "trials": 0 if args.build_only else 5,
+                "trials": 0 if args.build_only else 5,
                 "source_sha256": common.digest(SOURCE), "cases": CASES, "binaries": {}}
     common.write_json(output / "manifest.json", manifest)
     # Reuse the label runner's compiler discovery, dependency resolution, and build provenance.
@@ -55,12 +56,12 @@ def compare(args):
         supplied = getattr(args, variant + "_bin")
         args.define = [f"RG_GUI_GPU_USE_SSE2={enabled}"]
         binary = Path(supplied).resolve() if supplied else common.build(
-            args.gui_root, args, output / "build" / (variant + ".exe"))
+            args.gui_root, args, output / "build" / platform_support.executable_name(variant))
         build = json.loads(binary.with_suffix(".build.json").read_text(encoding="utf-8"))
         digest = common.digest(binary)
         if build.get("executable_sha256") != digest or build.get("source_sha256") != manifest["source_sha256"]:
             raise RuntimeError(f"Executable or harness does not match build provenance: {binary}")
-        if "/D" + args.define[0] not in build["command"]:
+        if not common.has_define(build["command"], args.define[0]):
             raise RuntimeError(f"Build provenance does not select the expected {variant} backend")
         binaries[variant] = binary
         manifest["binaries"][variant] = {"path": str(binary), "sha256": digest, "build": build}
@@ -69,17 +70,16 @@ def compare(args):
     commands = []
     for variant in VARIANTS:
         command = manifest["binaries"][variant]["build"]["command"]
-        commands.append([arg for arg in command if not arg.startswith((
-            "/DRG_GUI_GPU_USE_SSE2=", "/Fo:", "/Fe:"))])
+        commands.append(common.comparable_build_command(command, "RG_GUI_GPU_USE_SSE2"))
     if commands[0] != commands[1]:
         raise RuntimeError("Both backends must use the same compiler, source, dependencies, and flags")
     common.write_json(output / "manifest.json", manifest)
-    env = os.environ.copy()
-    dll_dirs = [args.sdl_bin] if args.sdl_bin else []
-    if args.sdl_root:
-        dll_dirs += [args.sdl_root / subdir for subdir in ("bin", "lib/x64", "lib")]
-    env["PATH"] = os.pathsep.join(str(p.resolve()) for p in dll_dirs if p.is_dir()) + os.pathsep + env.get("PATH", "")
-    common.pin_cpu_zero()
+    env = common.runtime_environment(args)
+    manifest["environment"] = platform_support.environment_metadata()
+    manifest["sdl_runtime_candidate"] = common.runtime_record(args)
+    manifest["cpu"] = common.pin_cpu_zero()
+    manifest["cpu_affinity_mask"] = manifest["cpu"]["process_affinity_mask"]
+    common.write_json(output / "manifest.json", manifest)
     for variant, binary in binaries.items():
         process = subprocess.run([str(binary), "check"], cwd=common.REPO, env=env, capture_output=True, text=True)
         (output / f"{variant}.verify.log").write_text(process.stdout + process.stderr, encoding="utf-8")
@@ -129,19 +129,18 @@ def compare(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path, help="New output directory; existing directories are refused")
+    parser.add_argument("--cc", default=os.environ.get("CC", "gcc"), help="Linux C compiler (default CC or gcc)")
     parser.add_argument("--gui-root", type=Path, default=common.REPO / "src")
     parser.add_argument("--core-root", type=Path, default=os.environ.get("RG_CORE_DIR", common.REPO.parent / "rg_core"))
     parser.add_argument("--text-root", type=Path, default=os.environ.get("RG_TEXT_DIR", common.REPO.parent / "rg_text"))
     parser.add_argument("--sdl-root", type=Path, default=os.environ.get("SDL3_DIR"))
     parser.add_argument("--sdl-include", type=Path, default=os.environ.get("SDL3_INCLUDE_DIR"))
-    parser.add_argument("--sdl-lib", type=Path, help="Full path to SDL3.lib")
+    parser.add_argument("--sdl-lib", type=Path, help="Full path to SDL3 library (Linux defaults to pkg-config sdl3)")
     parser.add_argument("--sdl-bin", type=Path, default=os.environ.get("SDL3_BIN_DIR"))
     parser.add_argument("--portable-bin", type=Path, help="Previously built portable executable with adjacent .build.json")
     parser.add_argument("--sse2-bin", type=Path, help="Previously built SSE2 executable with adjacent .build.json")
     parser.add_argument("--build-only", action="store_true", help="Build and verify both backends without timing")
     args = parser.parse_args()
-    if os.name != "nt":
-        parser.error("Requires Windows, MSVC, and QueryPerformanceCounter")
     if bool(args.portable_bin) != bool(args.sse2_bin):
         parser.error("Supply both --portable-bin and --sse2-bin together")
     try:

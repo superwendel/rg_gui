@@ -1,6 +1,6 @@
 /* CPU-only rg_gui/rg_text A/B benchmark. Run from the rg_gui repository root.
  * Compile this identical file twice, changing only the header include roots.
- * See benchmarks/README.md and run.py for a reproducible Windows comparison.
+ * See benchmarks/README.md and run.py for a reproducible comparison.
  * Frontend cases explicitly measure labels as auto-sized menus/tabs do; simple
  * rg_gui_label() calls alone do not measure. No window, GPU, or atlas upload.
  * All fonts go through the loader, activating optimized lookup when available.
@@ -8,9 +8,7 @@
 #define RG_SPRINTF_NO_ASM 1
 #define RGINLINE static inline
 #include "rg_gui_renderer.h"
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
+#include <SDL3/SDL_timer.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,9 +64,7 @@ static volatile double sink;
 static double timer_scale;
 
 static double now_seconds(void) {
-    LARGE_INTEGER count;
-    QueryPerformanceCounter(&count);
-    return (double)count.QuadPart * timer_scale;
+    return (double)SDL_GetPerformanceCounter() * timer_scale;
 }
 
 static void fail(const char* message) {
@@ -130,8 +126,8 @@ static size_t utf8_encode(char* out, u32 cp) {
 static void init_renderer(Bench* b) {
     RgGuiRendererInitDesc desc = {0};
     desc.font = &b->font;
-    desc.limits = (RgGuiRendererLimits){512u, 1024u, 128u * 1024u,
-                                       32768u, 32768u, 16u};
+    desc.limits = (RgGuiRendererLimits){.max_cached_runs=512u, .hash_slot_count=1024u, .text_capacity=128u * 1024u,
+                                       .max_cached_quads=32768u, .max_frame_instances=32768u, .max_batches=16u};
     desc.page_quads = 32u;
 #if RG_GUI_BENCH_RENDERER_LOOKUP
     desc.text_lookup = b->gui.text_lookup;
@@ -177,8 +173,8 @@ static void init_bench(Bench* b, int synthetic) {
 
     RgGuiRendererInitDesc renderer_desc = {0};
     renderer_desc.font = &b->font;
-    renderer_desc.limits = (RgGuiRendererLimits){512u, 1024u, 128u * 1024u,
-                                               32768u, 32768u, 16u};
+    renderer_desc.limits = (RgGuiRendererLimits){.max_cached_runs=512u, .hash_slot_count=1024u, .text_capacity=128u * 1024u,
+                                               .max_cached_quads=32768u, .max_frame_instances=32768u, .max_batches=16u};
     renderer_desc.page_quads = 32u;
 #if RG_GUI_BENCH_RENDERER_LOOKUP
     renderer_desc.text_lookup = b->gui.text_lookup;
@@ -232,7 +228,7 @@ static void change_labels(Bench* b, u32 frame) {
 
 /* Modes: 0 frontend static, 1 frontend dynamic, 2 renderer static warm,
  * 3 renderer content warm, 4 renderer cold, 5 renderer initialization. */
-__declspec(noinline) static void frame(Bench* b, int mode, u32 index) {
+RG_NOINLINE static void frame(Bench* b, int mode, u32 index) {
     if (mode == 5) {
         init_renderer(b);
         sink += (double)b->renderer.initialized + b->renderer.core.ascii_kerning['A' * 128u + 'V'];
@@ -383,9 +379,9 @@ static void run_case(Bench* b, const char* font_name, int mode) {
 }
 
 int main(void) {
-    LARGE_INTEGER frequency;
-    if (!QueryPerformanceFrequency(&frequency)) fail("performance counter");
-    timer_scale = 1.0 / (double)frequency.QuadPart;
+    Uint64 frequency = SDL_GetPerformanceFrequency();
+    if (!frequency) fail("performance counter");
+    timer_scale = 1.0 / (double)frequency;
     Bench* b = (Bench*)allocate(sizeof(Bench));
     for (int synthetic = 0; synthetic <= 1; ++synthetic) {
         init_bench(b, synthetic);

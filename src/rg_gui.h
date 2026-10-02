@@ -8499,7 +8499,7 @@ RGINLINE int rg_gui_text_area_cache_storage_usable(const RgGuiContext* ctx,
     const RgGuiTextAreaLayoutCache* cache = layout->cache;
     if (!cache || !cache->text || !cache->lines || !cache->line_capacity ||
         length == SIZE_MAX || length > cache->text_capacity ||
-        (size_t)cache->line_capacity > SIZE_MAX / sizeof(*cache->lines)) return 0;
+        sizeof(*cache->lines) > SIZE_MAX / (size_t)cache->line_capacity) return 0;
     const size_t line_bytes = sizeof(*cache->lines) * (size_t)cache->line_capacity;
     const size_t scratch_bytes = sizeof(*cache->lines) * RG_GUI_TEXT_AREA_VISUAL_LINE_MAX;
     const size_t input_bytes = length + 1u; /* include even an empty input's NUL */
@@ -15803,10 +15803,12 @@ RGINLINE int rg_gui_dock_layout_read(FILE* file, RgGuiDockLayout* layout,
 	if (header_size > RG_GUI_DOCK_LAYOUT_HEADER_SIZE)
 	{
 		u32 skip = header_size - RG_GUI_DOCK_LAYOUT_HEADER_SIZE;
-		if ((u64)skip > (u64)LONG_MAX)
+#if LONG_MAX < UINT32_MAX
+		if (skip > (u32)LONG_MAX)
 		{
 			return 0;
 		}
+#endif
 		if (fseek(file, (long)skip, SEEK_CUR) != 0)
 		{
 			return 0;

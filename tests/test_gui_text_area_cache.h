@@ -138,7 +138,7 @@ static void text_area_cache_widget_parity(void)
     RgGuiInitDesc desc={0};desc.font=&font;desc.max_draw_cmds=256;desc.text_buffer_size=KB(4);
     const size_t bytes=rg_gui_memory_required(&desc);TEXT_AREA_CACHE_CHECK(bytes>0);
     void* memories[2]={malloc(bytes),malloc(bytes)};TEXT_AREA_CACHE_CHECK(memories[0]&&memories[1]);
-    RgGuiContext gui[2];RgGuiTextAreaState area[2]={{0}};
+    RgGuiContext gui[2];RgGuiTextAreaState area[2]={0};
     char text[2][256]={"AAAAAAAA","AAAAAAAA"};
     for(unsigned i=0;i<2;i++) {
         RgArena arena={(char*)memories[i],bytes,0,bytes};TEXT_AREA_CACHE_CHECK(rg_gui_init(&gui[i],&arena,&desc));

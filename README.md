@@ -98,9 +98,60 @@ Use the latest `rg_core` and `rg_text` default branches, plus SDL3.
 SDL_shadercross is required to compile the demo shaders. The demos include
 prebuilt font assets, so no font-baking tools are needed.
 
-No exact SDL3 release is enforced by the library or `build.bat`. You can use
-your own compatible SDL3 installation. CI and the setup script select a tested
-release for repeatable builds.
+No exact SDL3 release is enforced by the library or build scripts. You can use
+your own compatible SDL3 installation. CI and the Windows setup script select
+a tested SDL release for repeatable builds.
+
+## Linux setup
+
+Install GCC (or Clang), Python 3, `pkg-config`, the SDL3 development files, and
+X11 development headers (for example, `libx11-dev`).
+Keep `rg_core` and `rg_text` beside `rg_gui`, or set `RG_CORE_DIR` and
+`RG_TEXT_DIR`. `pkg-config --modversion sdl3` must find your SDL installation;
+set `PKG_CONFIG_PATH` for a custom prefix. The initial local baseline uses the
+installed SDL 3.2.18; CI builds the same pinned SDL release as Windows.
+
+For shader compilation, also install CMake, a C++ compiler, Make, curl, and
+unzip. Ninja can replace Make when `CMAKE_GENERATOR=Ninja` is set. Then run:
+
+```sh
+./.github/scripts/setup-linux-deps.sh
+./build.sh test_ci
+./build.sh test_sanitize
+```
+
+The setup script builds the same pinned shadercross and SPIRV-Cross revisions
+as Windows under `out/linux-deps`, using the installed SDL and a hash-verified official
+x86-64 DXC binary. It does not install system files or build LLVM. Keep that
+dependency directory intact because shadercross uses its runtime libraries.
+For another destination, pass a path to the setup script and source the printed
+`env.sh` path. An existing compiler can be selected with `SHADERCROSS_EXE`.
+
+`build.sh` defaults to GCC, GNU11, strict warnings, and optimized builds. Use
+`CC=clang ./build.sh test_ci` to select Clang. Executables go in `out/linux`
+(`RG_GUI_BUILD_DIR` overrides it), with sanitizer binaries in its `sanitize`
+subdirectory. Tests keep assertions enabled; demos use `-O2 -DNDEBUG`.
+Demo and native-test builds include a `.build.json` sidecar containing the
+executable hash, compiler command/version, SDL configuration, and source hashes
+for reproducible profiling. Leave the sidecar beside its executable.
+
+Linux provides matching test, shader, demo, and runtime targets. `test` also
+verifies demo asset hashes; `shaders` generates the eight SPIR-V binaries used by Vulkan.
+`test_ci` runs host checks and compiles all demos and native tests without opening
+a window. Hosted Linux CI covers GCC and Clang, including ASan/UBSan.
+
+Run the local display/GPU gate from an X11 desktop with working Vulkan drivers:
+
+```sh
+SDL_VIDEODRIVER=x11 SDL_GPU_DRIVER=vulkan ./build.sh test_release
+./build.sh run_demo_full --present vsync
+./build.sh run_demo_tearout --start-torn-out
+```
+
+`test_release` runs device readback, demo presentations, and native tear-out
+lifecycle checks. It must succeed on the intended hardware; a software Vulkan
+driver does not validate hardware performance. Native Wayland and expanded
+HiDPI coverage remain separate follow-up work.
 
 ## Clean Windows setup
 
@@ -142,7 +193,7 @@ also contains the runtime `SDL3.dll`. For custom layouts, set
 
 ## Build and test
 
-From the `rg_gui` directory:
+From the `rg_gui` directory on Windows (use `./build.sh` on Linux):
 
 ```bat
 build.bat test
@@ -157,9 +208,9 @@ build.bat test_release
 
 - `test` runs renderer-neutral and GPU-preparation tests without executing a GPU
   command buffer.
-- `test_ci` also translates every shader format, validates demo assets, builds
-  all demos, and compiles the GPU device and native lifecycle tests. It does
-  not execute GPU work.
+- `test_ci` also translates shaders (all formats on Windows, SPIR-V on Linux),
+  validates demo assets, builds all demos, and compiles the GPU device and native
+  lifecycle tests. It does not execute GPU work.
 - `test_gpu_device` executes the hidden-window SDL_GPU device test.
 - `test_demo_lifecycle` exercises native tear-out window reuse, restoration,
   text-input cleanup, and final destruction with actual SDL GPU windows.
@@ -175,6 +226,9 @@ Use the [benchmark guide](benchmarks/README.md) for repeatable CPU comparisons
 and the [profiling guide](benchmarks/PROFILING.md) to measure demo frame times
 and renderer activity. See [performance against Dear ImGui](benchmarks/PERFORMANCE.md)
 for workload comparisons, test settings, and tradeoffs.
+The [Linux X11 baseline](benchmarks/PROFILING.md#linux-x11-baseline--2026-10-02)
+records local validation, presentation/buffer comparisons, and remaining
+resize and native-window costs.
 
 ## Demos
 
@@ -208,9 +262,9 @@ window as well. Use `--smoke-test` separately from `--profile`; smoke tests end
 after only a few presented frames. See the [profiling guide](benchmarks/PROFILING.md)
 for CSV capture, repeatable frame workloads, and interpreting the telemetry.
 
-The demos compile with `/O2` and `NDEBUG` and use the portable C numeric
-formatter. The live FPS display measures frame production; visible updates
-also depend on the presentation mode and display refresh rate.
+The demos compile with `/O2` on Windows or `-O2` on Linux, plus `NDEBUG`, and use
+the portable C numeric formatter. The live FPS display measures frame production;
+visible updates also depend on the presentation mode and display refresh rate.
 
 When deploying a demo, copy its two font assets and `shaders/Compiled` beside
 it using the layouts described in [the asset notes](examples/assets/README.md)
@@ -224,14 +278,14 @@ The headers use internal linkage and are written for unity builds.
 included more than once in a translation unit. Include it once, normally
 through `rg_gui_gpu.h` when using the SDL3 GPU renderer.
 
-The tested language modes are C11 with MSVC and GNU11 with Clang. `rg_core`
-uses compiler extensions for type-safe utility macros, so this stack does not
-claim ISO C99 conformance.
+The supported build language modes are C11 with MSVC and GNU11 with GCC/Clang.
+`rg_core` uses compiler extensions for type-safe utility macros, so this stack
+does not claim ISO C99 conformance.
 
 | Platform | Build and runtime coverage |
 | --- | --- |
 | Windows x64 / MSVC | Full build, shader translation, demos, and local SDL_GPU device execution |
-| Linux x64 / Clang | CI configured for ASan/UBSan host tests and GPU device-target compilation; GPU execution untested |
+| Linux x64 / GCC and Clang | Strict host builds, ASan/UBSan, SPIR-V shaders, all demos, GPU/native-test compilation; local X11/Vulkan execution via `test_release` |
 | macOS | Not currently tested; emitting MSL shader output is not a macOS support claim |
 
 The demos build with portable C formatting. Projects that select rg_core's

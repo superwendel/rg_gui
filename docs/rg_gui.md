@@ -322,6 +322,16 @@ For multiple native viewports, obtain each secondary result with
 viewport and text/IME requests from the keyboard-focused viewport. Text input
 must be stopped on the old SDL window before it is started on another one.
 
+The native tear-out demo currently targets Windows and Linux X11. Its global
+hit testing uses the client-area position returned by `SDL_GetWindowPosition`;
+do not add window-decoration offsets. Wayland does not provide the global
+positioning and pointer behavior assumed by this demo. On X11, restoring a
+cached maximized/minimized window keeps that state until mapping, then waits
+for the normal state before applying its new geometry. Clearing hidden restore
+flags too early can leave older SDL versions out of sync with the window
+manager. A bounded retry loop handles this exceptional path; ordinary cache
+reuse avoids this additional restoration wait.
+
 ## Frame and GPU flow
 
 For each completed draw list:

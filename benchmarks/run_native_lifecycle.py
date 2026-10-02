@@ -31,7 +31,8 @@ import run_frames as frames
 
 
 REPO = frames.REPO
-MODES = ("immediate", "vsync")
+MODES = ("immediate", "vsync", "mailbox")
+DEFAULT_MODES = ("immediate", "vsync")
 VARIANTS = ("before", "after")
 ACTION_NAMES = {0: "activate", 180: "redock_close"}
 ACTION_TIMINGS = ("lifecycle_ms", "frame_work_ms", "platform_ms", "ui_ms",
@@ -41,7 +42,7 @@ ACTION_TIMINGS = ("lifecycle_ms", "frame_work_ms", "platform_ms", "ui_ms",
 def executable_path(value):
     path = value.resolve()
     if path.is_dir():
-        path /= "rg_gui_demo_tearout.exe"
+        path /= frames.host.executable_name("rg_gui_demo_tearout")
     if not path.is_file():
         raise RuntimeError(f"Tear-out executable does not exist: {path}")
     return path
@@ -58,24 +59,14 @@ def provenance_record(path, binary):
 
 
 def shared_inputs():
-    paths = [Path(__file__).resolve(), Path(frames.__file__).resolve()]
+    paths = [Path(__file__).resolve(), Path(frames.__file__).resolve(), Path(frames.host.__file__).resolve()]
     paths += sorted(path for path in (REPO / "examples/assets").glob("*inter_medium_16*") if path.is_file())
     paths += sorted(path for path in (REPO / "shaders/Compiled").rglob("*") if path.is_file())
     return {str(path): frames.describe_file(path) for path in paths}
 
 
 def child_environment(binary, sdl_root):
-    # Normalize Windows' case-insensitive environment names. This also avoids
-    # duplicate PATH/Path entries when the parent tool environment contains both.
-    env = {name.upper(): value for name, value in os.environ.items()}
-    folders = [binary.parent]
-    if sdl_root is not None:
-        folders += [sdl_root.resolve() / suffix for suffix in ("lib/x64", "bin", "lib")]
-    if env.get("SDL3_BIN_DIR"):
-        folders.append(Path(env["SDL3_BIN_DIR"]).resolve())
-    folders = [folder for folder in folders if folder.is_dir()]
-    env["PATH"] = os.pathsep.join(map(str, folders)) + os.pathsep + env.get("PATH", "")
-    runtime = next((folder / "SDL3.dll" for folder in folders if (folder / "SDL3.dll").is_file()), None)
+    env, runtime = frames.host.runtime_environment(binary.parent, sdl_root)
     return env, frames.describe_file(runtime) if runtime else None
 
 
@@ -217,12 +208,14 @@ def write_results(output, results, modes, args):
 
 
 def run(args):
-    modes = args.mode or list(MODES)
+    modes = args.mode or list(DEFAULT_MODES)
     if len(modes) != len(set(modes)):
         raise RuntimeError("Do not repeat the same --mode")
     binaries = {variant: executable_path(getattr(args, variant + "_bin")) for variant in VARIANTS}
     binary_records = {variant: frames.describe_file(path) for variant, path in binaries.items()}
-    provenance = {variant: provenance_record(getattr(args, variant + "_provenance"), binary_records[variant])
+    provenance = {variant: (provenance_record(getattr(args, variant + "_provenance"), binary_records[variant])
+                           if getattr(args, variant + "_provenance") is not None else
+                           frames.build_provenance(binaries[variant], binary_records[variant]))
                   for variant in VARIANTS}
     environments, runtimes = {}, {}
     for variant in VARIANTS:
@@ -235,6 +228,7 @@ def run(args):
     output.mkdir(parents=True, exist_ok=False)
     manifest = {"status": "incomplete", "started_utc": datetime.now(timezone.utc).isoformat(),
                 "platform": platform.platform(), "python": sys.version, "cpu": frames.cpu_metadata(False),
+                "environment": frames.host.environment_metadata(),
                 "arguments": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
                 "modes": modes, "binaries": binary_records, "supplied_build_provenance": provenance,
                 "sdl_runtime_candidates": runtimes, "shared_runtime_inputs": shared,
@@ -257,6 +251,10 @@ def run(args):
                                "--frames", str(args.frames), "--scenario", "tearout"]
                     if mode == "immediate":
                         command.append("--no-vsync")
+                    elif mode == "mailbox":
+                        command.extend(("--present", "mailbox"))
+                    if args.frame_buffers is not None:
+                        command.extend(("--frame-buffers", str(args.frame_buffers)))
                     execution_index = len(manifest["commands"])
                     manifest["commands"].append({"mode": mode, "trial": trial_index + 1, "variant": variant,
                                                  "execution_index": execution_index, "argv": command, "cwd": str(REPO)})
@@ -271,8 +269,11 @@ def run(args):
                     if process.returncode:
                         raise RuntimeError(f"{stem} exited {process.returncode}; see {stem}.stderr.txt")
                     stdout = (output / (stem + ".stdout.txt")).read_text(encoding="utf-8", errors="replace")
-                    capture_args = SimpleNamespace(frames=args.frames, warmup=args.warmup, vsync=mode == "vsync")
-                    rows, included, validation = frames.read_capture(csv_path, "tearout", capture_args, stdout)
+                    stderr = (output / (stem + ".stderr.txt")).read_text(encoding="utf-8", errors="replace")
+                    capture_args = SimpleNamespace(frames=args.frames, warmup=args.warmup, vsync=mode == "vsync",
+                                                   present="mailbox" if mode == "mailbox" else None,
+                                                   frame_buffers=args.frame_buffers)
+                    rows, included, validation = frames.read_capture(csv_path, "tearout", capture_args, stdout, stderr)
                     measured = [row for row in rows if not row["warmup"]]
                     result = {"mode": mode, "trial": trial_index + 1, "variant": variant,
                               "execution_index": execution_index, "process_elapsed_seconds": elapsed,
@@ -313,13 +314,13 @@ def main():
     parser.add_argument("--output", required=True, type=Path, help="New output directory; existing directories are refused")
     parser.add_argument("--sdl-root", type=Path, default=os.environ.get("SDL3_DIR"))
     parser.add_argument("--mode", action="append", choices=MODES, help="Repeat to select modes; default immediate and vsync")
+    parser.add_argument("--frame-buffers", type=int, choices=(1, 2, 3),
+                        help="Explicit renderer buffer count; omitted to support historical binaries")
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--frames", type=int, default=720)
     parser.add_argument("--warmup", type=int, default=120)
     parser.add_argument("--timeout", type=float, default=120.0, help="Maximum seconds per process")
     args = parser.parse_args()
-    if os.name != "nt":
-        parser.error("Real-window profiling runner currently requires Windows")
     if not (1 <= args.trials <= 100 and 0 <= args.warmup < args.frames <= 100000):
         parser.error("Require 1 <= trials <= 100 and 0 <= warmup < frames <= 100000")
     if not all(any(frame % 240 == offset for frame in range(args.warmup, args.frames)) for offset in ACTION_NAMES):

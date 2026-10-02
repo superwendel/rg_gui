@@ -158,16 +158,12 @@ static int tearout_refresh_window_origin(SDL_Window* window, TearoutMouseOrigin*
 	if (origin->valid) return 1;
 	int window_x = 0;
 	int window_y = 0;
-	int border_top = 0;
-	int border_left = 0;
-	int border_bottom = 0;
-	int border_right = 0;
-	if (!SDL_GetWindowPosition(window, &window_x, &window_y) ||
-	    !SDL_GetWindowBordersSize(window, &border_top, &border_left,
-	                              &border_bottom, &border_right))
+	if (!SDL_GetWindowPosition(window, &window_x, &window_y))
 		return 0;
-	origin->x = (f32)(window_x + border_left);
-	origin->y = (f32)(window_y + border_top);
+	/* SDL positions describe the client area already. Adding decorations here
+	 * shifts cross-window hit testing, particularly at the top and left edges. */
+	origin->x = (f32)window_x;
+	origin->y = (f32)window_y;
 	origin->valid = 1;
 	return 1;
 }
@@ -482,6 +478,41 @@ static int tearout_park_native(RgGuiContext* gui, RgInputState* input,
 	return 1;
 }
 
+static int tearout_restore_visible(SDL_Window* window)
+{
+	if (!SDL_ShowWindow(window)) return 0;
+	int x11 = SDL_strcmp(SDL_GetCurrentVideoDriver(), "x11") == 0;
+	u64 deadline = SDL_GetTicksNS() + 1000000000ull;
+	if (!SDL_RestoreWindow(window)) return 0;
+	if (!x11 && !SDL_SyncWindow(window)) return 0;
+	u64 retry_at = SDL_GetTicksNS() + 50000000ull;
+	for (;;)
+	{
+		/* X11's WM can acknowledge mapping before it accepts restoration. It
+		 * can also restore a minimized maximized window back to maximized first.
+		 * Pump without consuming application events and retry that transition;
+		 * SyncWindow alone does not guarantee the normal state on older SDL. */
+		if (x11) SDL_PumpEvents();
+		SDL_WindowFlags flags = SDL_GetWindowFlags(window);
+		if (!(flags & (SDL_WINDOW_HIDDEN | SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)))
+			return 1;
+		u64 now = SDL_GetTicksNS();
+		if (!x11 || now >= deadline)
+		{
+			SDL_SetError("Cached tear-out window did not restore to its normal state (flags=0x%llx)",
+			             (unsigned long long)flags);
+			return 0;
+		}
+		if (now >= retry_at)
+		{
+			if ((flags & SDL_WINDOW_HIDDEN) && !SDL_ShowWindow(window)) return 0;
+			if (!SDL_RestoreWindow(window)) return 0;
+			retry_at = SDL_GetTicksNS() + 50000000ull;
+		}
+		SDL_Delay(5);
+	}
+}
+
 static int tearout_open_for_panel(SDL_GPUDevice* device, SDL_Window* main_window,
                                   TearoutDemoState* state, u32 panel, int hidden,
                                   int pos_x, int pos_y, int width, int height)
@@ -491,6 +522,7 @@ static int tearout_open_for_panel(SDL_GPUDevice* device, SDL_Window* main_window
 	if (height < 280) height = 280;
 	int created = 0;
 	int reused = 0;
+	int restored = 0;
 	TearoutNativeWindow candidate = {0};
 	TearoutNativeWindow* target = &state->native;
 
@@ -500,9 +532,14 @@ static int tearout_open_for_panel(SDL_GPUDevice* device, SDL_Window* main_window
 		if (state->parked.window)
 		{
 			candidate = state->parked;
-			/* Hiding preserves maximized/minimized flags. Reopen at the requested
-			 * normal size, matching the behavior of a newly created window. */
-			if (!SDL_RestoreWindow(candidate.window)) return 0;
+			restored = (SDL_GetWindowFlags(candidate.window) &
+			            (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) != 0u;
+			/* Restore after mapping on X11: clearing the hidden pending flags
+			 * first can remap a normal WM window with stale SDL maximized flags.
+			 * That leaves later RestoreWindow calls unable to change SDL's state.
+			 * Other backends and intentionally hidden windows keep pending restore. */
+			if ((hidden || !restored || SDL_strcmp(SDL_GetCurrentVideoDriver(), "x11") != 0) &&
+			    !SDL_RestoreWindow(candidate.window)) return 0;
 			reused = 1;
 		}
 		else
@@ -518,10 +555,10 @@ static int tearout_open_for_panel(SDL_GPUDevice* device, SDL_Window* main_window
 	 * geometry requests until a maximized/minimized native window is shown
 	 * and restored, so complete that transition before applying new geometry. */
 	if (reused && !hidden &&
-	    (SDL_GetWindowFlags(target->window) & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)))
+	    (restored || (SDL_GetWindowFlags(target->window) & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED))))
 	{
-		if (!SDL_ShowWindow(target->window) || !SDL_RestoreWindow(target->window) ||
-		    !SDL_SyncWindow(target->window)) goto failed;
+		if (!tearout_restore_visible(target->window)) goto failed;
+		restored = 1;
 	}
 	int current_width = 0;
 	int current_height = 0;
@@ -530,6 +567,17 @@ static int tearout_open_for_panel(SDL_GPUDevice* device, SDL_Window* main_window
 	    !SDL_SetWindowSize(target->window, width, height)) goto failed;
 	if (!SDL_SetWindowPosition(target->window, pos_x, pos_y)) goto failed;
 	if (!hidden && !SDL_ShowWindow(target->window)) goto failed;
+	if (restored && !hidden && SDL_strcmp(SDL_GetCurrentVideoDriver(), "x11") == 0)
+	{
+		/* X11 can acknowledge restoration before the normal decoration extents
+		 * arrive. Settle the first move, then reapply the client position if it
+		 * used stale maximized borders. Ordinary cache reuse never waits here. */
+		SDL_SyncWindow(target->window);
+		int actual_x = 0, actual_y = 0;
+		if (!SDL_GetWindowPosition(target->window, &actual_x, &actual_y)) goto failed;
+		if ((actual_x != pos_x || actual_y != pos_y) &&
+		    !SDL_SetWindowPosition(target->window, pos_x, pos_y)) goto failed;
+	}
 	if (target == &candidate)
 	{
 		state->native = candidate;
@@ -673,6 +721,7 @@ int main(int argc, char** argv)
 	if (!demo_present_apply(device, main_window, present_mode)) goto cleanup;
 	printf("Profile configuration: backend=%s scenario=%s present=%s\n", SDL_GetGPUDeviceDriver(device),
 	       profile_options.scenario, demo_present_name(present_mode));
+	demo_profile_log_runtime(main_window, &profile_options);
 
 	if (!demo_font_load(&demo_font)) goto cleanup;
 	atlas = demo_atlas_create(device, demo_font.pixels,
@@ -747,7 +796,7 @@ int main(int argc, char** argv)
 	gpu_desc.max_text_instances = limits.max_frame_instances;
 	gpu_desc.max_geometry_vertices = 65536u;
 	gpu_desc.max_items = 8192u;
-	gpu_desc.frame_buffer_count = 2u;
+	gpu_desc.frame_buffer_count = profile_options.frame_buffers;
 	gpu_desc.min_filter = SDL_GPU_FILTER_LINEAR;
 	gpu_desc.mag_filter = SDL_GPU_FILTER_LINEAR;
 	if (!rg_gui_gpu_create(&gpu, &gpu_desc)) goto cleanup;

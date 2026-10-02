@@ -42,7 +42,7 @@ static void extended_init(Bench* b, ExtendedBench* e) {
     e->document[e->document_length] = 0;
 }
 
-__declspec(noinline) static void extended_frame(Bench* b, ExtendedBench* e, int mode) {
+RG_NOINLINE static void extended_frame(Bench* b, ExtendedBench* e, int mode) {
     if (mode < 3) {
         rg_gui_renderer_begin_frame(&b->renderer);
         if (!rg_gui_gpu_prepare(&e->gpu, &b->renderer, &b->list, b->list.count))
@@ -142,7 +142,7 @@ static void extended_case(Bench* b, ExtendedBench* e, const char* font, int mode
         extended_frame(b, e, mode);
     }
     if (getenv("RG_GUI_BENCH_VERIFY")) {
-        printf("verified %s %s %llu\n", font, names[mode], extended_signature(b, e, mode));
+        printf("verified %s %s %llu\n", font, names[mode], (unsigned long long)extended_signature(b, e, mode));
         return;
     }
     double calibration = extended_sample(b, e, mode, 2u);
@@ -164,7 +164,7 @@ static void extended_case(Bench* b, ExtendedBench* e, const char* font, int mode
     const RgGuiRendererStats* stats = rg_gui_renderer_stats(&b->renderer);
     printf("{\"kind\":\"result\",\"font\":\"%s\",\"case\":\"%s\",\"median_ns_per_frame\":%.3f,\"min_ns_per_frame\":%.3f,\"max_ns_per_frame\":%.3f,\"width_checksum\":%.3f,\"geometry_checksum\":\"%llu\",\"cache_hits\":%u,\"cache_misses\":%u,\"glyphs\":%u,\"renderer_arena_bytes\":%zu,\"renderer_lookup_shared\":%u,\"fixture_bytes\":%zu,\"frontend_lookup_count\":%u}\n",
         font, names[mode], times[3], times[0], times[6], mode >= 3 ? (double)e->document_length : 0.0,
-        hash, mode < 3 ? stats->frame_cache_hits : 0u, mode < 3 ? stats->frame_cache_misses : 0u,
+        (unsigned long long)hash, mode < 3 ? stats->frame_cache_hits : 0u, mode < 3 ? stats->frame_cache_misses : 0u,
         mode < 3 ? stats->frame_glyphs : 0u, b->renderer_memory_size,
         (unsigned)RG_GUI_BENCH_RENDERER_LOOKUP, sizeof(*b), (unsigned)RG_GUI_BENCH_HAS_LOOKUP);
     fflush(stdout);
@@ -175,9 +175,9 @@ int main(void) {
         "renderer_static_warm", "renderer_content_warm", "renderer_cold", "renderer_init"};
     static const char* more_cases[] = {"gpu_prepare_static_warm", "gpu_prepare_content_warm",
         "gpu_prepare_cold", "textarea_wrap_300", "textarea_wrap_1200", "textarea_click_drag"};
-    LARGE_INTEGER frequency;
-    if (!QueryPerformanceFrequency(&frequency)) fail("performance counter");
-    timer_scale = 1.0 / (double)frequency.QuadPart;
+    Uint64 frequency = SDL_GetPerformanceFrequency();
+    if (!frequency) fail("performance counter");
+    timer_scale = 1.0 / (double)frequency;
     Bench* b = (Bench*)allocate(sizeof(Bench));
     ExtendedBench* e = (ExtendedBench*)allocate(sizeof(ExtendedBench));
     for (int synthetic = 0; synthetic <= 1; synthetic++) {
