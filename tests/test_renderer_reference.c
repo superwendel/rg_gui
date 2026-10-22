@@ -62,11 +62,11 @@ static void test_font_init(TestRendererBaseFixture* fixture)
 	fixture->font.kerning_count = 1u;
 	fixture->font.kerning_capacity = 1u;
 
-	fixture->glyphs[0] = (RgTextGlyph){'?', 15, 0, 4, 7, 0, 1, 4};
-	fixture->glyphs[1] = (RgTextGlyph){'A', 0, 0, 5, 7, 0, 1, 6};
-	fixture->glyphs[2] = (RgTextGlyph){'B', 5, 0, 6, 7, 0, 1, 7};
-	fixture->glyphs[3] = (RgTextGlyph){' ', 20, 0, 0, 0, 0, 0, 3};
-	fixture->glyphs[4] = (RgTextGlyph){0xE9u, 11, 0, 4, 7, 0, 1, 5};
+	fixture->glyphs[0] = (RgTextGlyph){'?', 15, 0, 4, 7, 0, 1, 4, 0u, 0u};
+	fixture->glyphs[1] = (RgTextGlyph){'A', 0, 0, 5, 7, 0, 1, 6, 0u, 0u};
+	fixture->glyphs[2] = (RgTextGlyph){'B', 5, 0, 6, 7, 0, 1, 7, 0u, 0u};
+	fixture->glyphs[3] = (RgTextGlyph){' ', 20, 0, 0, 0, 0, 0, 3, 0u, 0u};
+	fixture->glyphs[4] = (RgTextGlyph){0xE9u, 11, 0, 4, 7, 0, 1, 5, 0u, 0u};
 	fixture->kernings[0] = (RgTextKerning){'A', 'B', -1};
 }
 
@@ -152,10 +152,10 @@ static void test_ascii_lookup_table_equivalence(void)
 {
 	/* Manual fonts retain their first matching entry, even if its advance is zero. */
 	RgTextGlyph glyphs[] = {
-	    {'A', 0, 0, 5, 7, 0, 1, 0}, {0xFFFDu, 5, 0, 4, 7, 0, 1, 5},
-	    {'?', 9, 0, 4, 7, 0, 1, 4}, {0u, 0, 0, 0, 0, 0, 0, 0},
-	    {127u, 13, 0, 4, 7, 0, 1, 4}, {'A', 17, 0, 5, 7, 0, 1, 99},
-	    {0xFFFDu, 22, 0, 4, 7, 0, 1, 99}};
+	    {'A', 0, 0, 5, 7, 0, 1, 0, 0u, 0u}, {0xFFFDu, 5, 0, 4, 7, 0, 1, 5, 0u, 0u},
+	    {'?', 9, 0, 4, 7, 0, 1, 4, 0u, 0u}, {0u, 0, 0, 0, 0, 0, 0, 0, 0u, 0u},
+	    {127u, 13, 0, 4, 7, 0, 1, 4, 0u, 0u}, {'A', 17, 0, 5, 7, 0, 1, 99, 0u, 0u},
+	    {0xFFFDu, 22, 0, 4, 7, 0, 1, 99, 0u, 0u}};
 	RgTextKerning pairs[] = {
 	    {'A', '?', 0}, {127u, 0u, -3}, {'A', '?', 8}, {0u, 'A', 2},
 	    {'A', 128u, -9}, {128u, 'A', 9}, {'A', 'A', -1},

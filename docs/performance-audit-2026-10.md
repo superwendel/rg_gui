@@ -241,11 +241,15 @@ invalidation, as the level-one skip already requires.
    non-static text command each frame; the frontend already knows the length
    when it copies the text. There is unused padding in the text union member
    for a 32-bit length. Expected gain: a few microseconds per frame.
-4. **Larger fonts.** Fonts above 4,096 glyphs still pay the binary searches.
-   Either raise the slot counts (16 KiB per 8,192 slots) or add per-glyph
-   kerning ranges to `rg_text`'s loader so kerning lookup becomes a short
-   search within one glyph's pairs. The loader already sorts, so the ranges
-   are free to compute at load time.
+4. **Larger fonts.** Done on the rg_text side on 2026-10-22: its loader now
+   builds an ASCII glyph table, a cached fallback index, and per-glyph kerning
+   ranges, and aligned layout resolves each glyph once. rg_text's own paired
+   benchmark improved 35 to 88 percent across every workload with identical
+   output. For rg_gui this makes the no-lookup and over-4,096-glyph paths much
+   cheaper; the hash tables here remain worthwhile because a non-ASCII glyph
+   in rg_text is still a binary search (3 to 4x slower than the table on the
+   4,096-glyph benchmark font). Raising the slot counts is the remaining knob
+   for very large fonts.
 5. **Text-area relayout on edit.** Each keystroke re-wraps the whole document.
    At the current 1,024-visual-line cap that is 100-200 us for 8 KiB of ASCII,
    acceptable, but a paragraph-local relayout would make it independent of
