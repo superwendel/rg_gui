@@ -84,12 +84,15 @@ int main(int argc, char** argv)
 	int hidden = 0;
 	int frame_limit = 0;
 	int smoke_test = 0;
+	int skip_unchanged = 1;
 	for (int i = 1; i < argc; i++)
 	{
 		if (strcmp(argv[i], "--hidden") == 0)
 			hidden = 1;
 		else if (strcmp(argv[i], "--smoke-test") == 0)
 			smoke_test = 1;
+		else if (strcmp(argv[i], "--no-skip") == 0)
+			skip_unchanged = 0;
 		else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc)
 		{
 			frame_limit = atoi(argv[++i]);
@@ -234,6 +237,10 @@ int main(int argc, char** argv)
 	int running = 1;
 	int submitted_frames = 0;
 	int presented_frames = 0;
+	/* Frames whose signature matches the presented frame skip all GPU work.
+	 * Smoke tests count real presentations, so they keep rendering. */
+	DemoFrameSkip frame_skip = {0};
+	frame_skip.enabled = skip_unchanged && !smoke_test;
 
 	while (running)
 	{
@@ -261,6 +268,8 @@ int main(int argc, char** argv)
 		progress += delta_time * 0.25f;
 		if (progress > 1.0f)
 			progress -= 1.0f;
+		/* Step the animation so idle frames repeat and can be skipped. */
+		f32 shown_progress = SDL_floorf(progress * 64.0f) / 64.0f;
 
 		int width = 0;
 		int height = 0;
@@ -268,7 +277,7 @@ int main(int argc, char** argv)
 			goto cleanup;
 		rg_gui_begin_frame_ex(&gui, &input, &input_events, window_id, delta_time);
 		demo_build_ui(&gui, width, height, &window_state, &active_tab,
-		              &enabled, &intensity, name, sizeof(name), &click_count, progress);
+		              &enabled, &intensity, name, sizeof(name), &click_count, shown_progress);
 		rg_gui_end_frame(&gui);
 
 		const RgGuiPlatformOutput* platform = rg_gui_platform_output(&gui);
@@ -278,11 +287,16 @@ int main(int argc, char** argv)
 			goto cleanup;
 
 		int presented = 0;
-		if (!demo_render_frame(device, window, &gpu, &text_renderer, &upload_ring, &gui,
-		                       &presented))
+		DemoRenderMetrics metrics;
+		if (!demo_render_frame_skippable(device, window, &gpu, &text_renderer, &upload_ring,
+		                                 &gui, &frame_skip, &presented, &metrics))
 			goto cleanup;
 		submitted_frames++;
 		presented_frames += presented;
+		/* Nothing was submitted, so the swapchain cannot pace this loop. Sleep
+		 * until input arrives or the next animation step is due. */
+		if (metrics.skipped)
+			SDL_WaitEventTimeout(NULL, 16);
 		if (smoke_test && presented_frames >= frame_limit)
 			running = 0;
 		else if (smoke_test && submitted_frames >= 120)
@@ -299,8 +313,9 @@ int main(int argc, char** argv)
 		SDL_SetError("Demo smoke test ended before presenting three frames");
 		goto cleanup;
 	}
-	printf("rg_gui demo completed %d submitted frame%s (%d presented)\n",
-	       submitted_frames, submitted_frames == 1 ? "" : "s", presented_frames);
+	printf("rg_gui demo completed %d frame%s (%d presented, %u unchanged and skipped)\n",
+	       submitted_frames, submitted_frames == 1 ? "" : "s", presented_frames,
+	       frame_skip.skipped_frames);
 	result = 0;
 
 cleanup:

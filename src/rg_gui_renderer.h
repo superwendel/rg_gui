@@ -211,11 +211,16 @@ typedef struct RgGuiRendererBaseContext
 	RgGuiRendererBaseBatch* frame_batches;
 	const RgTextGlyph* const* ascii_glyphs;
 	const i32* ascii_kerning;
+	/* Borrowed or arena-owned table backing the ASCII pointers above. */
+	const RgGuiTextLookup* lookup;
 	u32 run_count;
 	u32 hash_slot_mask;
 	size_t text_used;
 	u32 cache_quad_count;
 	u64 cache_rewrite_revision;
+	/* Order-sensitive digest of every text key (content or identity, with scale)
+	 * requested since begin_frame. Feeds the GPU frame signature. */
+	u64 frame_content_hash;
 	u8 frame_index;
 	u32 frame_instance_count;
 	u32 frame_batch_count;
@@ -409,6 +414,7 @@ static int rg_gui_renderer_base_init(RgGuiRendererBaseContext* ctx, RgArena* are
 	}
 	ctx->ascii_glyphs = lookup ? lookup->ascii_glyphs : NULL;
 	ctx->ascii_kerning = lookup ? lookup->ascii_kerning : NULL;
+	ctx->lookup = lookup;
 
 	if (!ctx->runs || !ctx->run_generations || !ctx->hash_slots ||
 	    !ctx->cache_text || !ctx->cache_quads ||
@@ -469,6 +475,7 @@ RGINLINE void rg_gui_renderer_base_begin_frame(RgGuiRendererBaseContext* ctx)
 	}
 	ctx->frame_instance_count = 0u;
 	ctx->frame_batch_count = 0u;
+	ctx->frame_content_hash = 0x6a09e667f3bcc909ull;
 #if defined(RG_GUI_RENDERER_TEST_REFERENCE)
 	ctx->prepared.instance_count = 0u;
 	ctx->prepared.batch_count = 0u;
@@ -498,7 +505,7 @@ RGINLINE void rg_gui_renderer_base_begin_frame(RgGuiRendererBaseContext* ctx)
 
 RGINLINE const RgTextGlyph* rg_gui_renderer_base_find_glyph(const RgGuiRendererBaseContext* ctx, u32 cp)
 {
-	return cp < 128u ? ctx->ascii_glyphs[cp] : rg_text_find_glyph(ctx->font, cp);
+	return rg_gui_text_lookup_glyph(ctx->lookup, cp);
 }
 
 RGINLINE u32 rg_gui_renderer_base_u32_add_saturate(u32 left, u32 right)
@@ -513,11 +520,7 @@ RGINLINE u64 rg_gui_renderer_base_u64_add_saturate(u64 left, u64 right)
 
 RGINLINE i32 rg_gui_renderer_base_find_kerning(const RgGuiRendererBaseContext* ctx, u32 left, u32 right)
 {
-	if (left < 128u && right < 128u)
-	{
-		return ctx->ascii_kerning[left * 128u + right];
-	}
-	return rg_text_find_kerning(ctx->font, left, right);
+	return rg_gui_text_lookup_kerning(ctx->lookup, left, right);
 }
 
 RGINLINE u32 rg_gui_renderer_base_count_quads(const RgGuiRendererBaseContext* ctx, const char* text, size_t text_size)
@@ -671,6 +674,14 @@ RGINLINE u64 rg_gui_renderer_base_key_hash(const char* text, size_t text_size,
 		return hash;
 	}
 	return rg_hash_bytes(text, text_size, (u64)scale_bits);
+}
+
+/** One order-sensitive 64-bit mixing round (xxHash64 accumulate step). */
+RGINLINE u64 rg_gui_renderer_base_mix(u64 hash, u64 value)
+{
+	hash += value * 0xC2B2AE3D27D4EB4Full;
+	hash = (hash << 31u) | (hash >> 33u);
+	return hash * 0x9E3779B185EBCA87ull;
 }
 
 RGINLINE u32 rg_gui_renderer_base_float_bits(f32 value)
@@ -1724,6 +1735,7 @@ static RgGuiRendererBaseRunResult rg_gui_renderer_get_run(RgGuiRenderer* ctx, co
 	RgGuiRendererBaseContext* core = &ctx->core;
 	u32 scale_bits = rg_gui_renderer_base_float_bits(scale);
 	u64 hash = rg_gui_renderer_base_key_hash(text, text_size, scale_bits, cache_identity);
+	core->frame_content_hash = rg_gui_renderer_base_mix(core->frame_content_hash, hash);
 	u32 run_index = UINT32_MAX;
 	u32 slot = rg_gui_renderer_base_find_slot(core, hash, text, text_size, scale_bits,
 	                                          cache_identity, &run_index);

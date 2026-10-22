@@ -69,9 +69,9 @@ arena usage back on failure. There is no frontend destroy call: keep the arena
 unchanged while the context is in use, then release the entire arena when the
 context is no longer needed.
 
-For frequent measurement of changing ASCII labels, an optional shared lookup
-table avoids glyph and kerning searches. Initialize it once per immutable font
-and attach it to the descriptor **before** calling `rg_gui_init`:
+For frequent measurement of changing labels, an optional shared lookup table
+avoids glyph and kerning searches. Initialize it once per immutable font and
+attach it to the descriptor **before** calling `rg_gui_init`:
 
 ```c
 // Store this alongside the font in application-owned state.
@@ -83,12 +83,21 @@ if (!rg_gui_text_lookup_init(&text_lookup, &font))
 gui_desc.text_lookup = &text_lookup;
 ```
 
-The table occupies 66,568 bytes on 64-bit targets and can serve multiple GUI
+The table occupies 99,352 bytes on 64-bit targets and can serve multiple GUI
 contexts using the same font. It adds no arena allocation. Leave `text_lookup`
 null to use ordinary measurement without allocating a frontend lookup. The font,
 glyph/kerning arrays, and lookup object must stay alive and unchanged while
-attached; a lookup for a different font is ignored. Unicode uses the general
-lookup path. The supplied demos enable this option.
+attached; a lookup for a different font is ignored. The supplied demos enable
+this option.
+
+ASCII glyphs and kerning pairs use direct arrays. Every other glyph codepoint
+and kerning pair is indexed in fixed open-addressed tables sized by
+`RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS` and `RG_GUI_TEXT_LOOKUP_KERNING_SLOTS` (8,192
+each by default, 16 KiB apiece). A font with more than half that many glyphs or
+pairs, or one whose arrays disagree with `rg_text`'s own search results, leaves
+the corresponding table disabled and keeps `rg_text`'s binary searches for
+non-ASCII lookups. Results are identical either way; only the lookup cost
+changes. Define a slot count of zero to omit a table.
 
 Text-area wrapping accumulates advances in one pass and reuses visual lines
 within a widget invocation. Edits, font/scale changes, and IME display text
@@ -448,6 +457,47 @@ completion or buffer-cycling requirements before reusing upload storage.
 The prepared item stream preserves rectangles, triangles, images, text, clip
 stack changes, and overlay ordering. Adjacent compatible items are combined,
 but items are not moved across unlike commands.
+
+### Skipping unchanged frames
+
+An immediate-mode application rebuilds its draw list every frame, but it does
+not have to repaint when that list would produce the pixels already on screen.
+After a successful `rg_gui_gpu_prepare`, `rg_gui_gpu_frame_signature(&gpu)`
+returns a 64-bit digest of the prepared list: command types and order,
+rectangles, triangles, image rectangles/UVs/textures/materials, clip pushes,
+colors, text positions, text scale, text bytes (or static-text identity), the
+command count, and the overlay boundary. Preparation costs a few nanoseconds per
+command for this digest; text bytes are hashed once by the text renderer, which
+already hashes them for its cache.
+
+```c
+rg_gui_renderer_begin_frame(&text_renderer);
+if (!rg_gui_gpu_prepare(&gpu, &text_renderer, list, overlay_start)) { /* ... */ }
+u64 signature = rg_gui_gpu_frame_signature(&gpu);
+if (presented_once && signature == presented_signature &&
+    pixel_width == presented_width && pixel_height == presented_height)
+{
+	/* Identical pixels are already on screen: stage, encode, draw, and present
+	 * nothing. Wait for input or the next animation step instead of spinning. */
+	SDL_WaitEventTimeout(NULL, 16);
+	return;
+}
+/* ... stage, encode, draw, submit ... */
+presented_signature = signature;
+presented_width = width;
+presented_height = height;
+presented_once = 1;
+```
+
+The digest describes rg_gui's inputs only. The caller must also require an
+unchanged output size, draw offset, clear color, atlas texture, and the
+contents of every texture referenced by image commands; include an
+application revision for render-target previews or animated images. Static
+text is keyed by address, as its contract already requires unchanged bytes.
+Skipped frames leave the text cache in a consistent state: new runs stay
+dirty until the next staged packet uploads them. Equal digests for different
+lists are possible only with 64-bit collision probability. The minimal demo
+skips unchanged frames and reports the count on exit; `--no-skip` disables it.
 
 ## Capacity and diagnostics
 

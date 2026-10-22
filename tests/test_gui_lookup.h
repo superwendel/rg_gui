@@ -32,6 +32,28 @@ static void lookup_test_font(RgTextFont* font)
     for (u32 cp = 128u; cp < 0x20000u; cp += 117u) {
         LOOKUP_TEST_CHECK(rg_gui_text_find_glyph(&ctx, cp) == rg_text_find_glyph(font, cp));
     }
+    /* Every glyph codepoint, neighbors, and pairs with non-ASCII members must
+     * match rg_text through the general tables and through their disabled path. */
+    for (u32 i = 0u; i < font->glyph_count; i++) {
+        u32 cp = font->glyphs[i].codepoint;
+        for (u32 delta = 0u; delta < 3u; delta++) {
+            LOOKUP_TEST_CHECK(rg_gui_text_find_glyph(&ctx, cp + delta) == rg_text_find_glyph(font, cp + delta));
+            LOOKUP_TEST_CHECK(rg_gui_text_lookup_glyph(lookup, cp + delta) == rg_text_find_glyph(font, cp + delta));
+        }
+        for (u32 j = 0u; j < font->glyph_count; j++) {
+            u32 other = font->glyphs[j].codepoint;
+            LOOKUP_TEST_CHECK(rg_gui_text_find_kerning(&ctx, cp, other) == rg_text_find_kerning(font, cp, other));
+            LOOKUP_TEST_CHECK(rg_gui_text_find_kerning(&ctx, cp, other + 1u) == rg_text_find_kerning(font, cp, other + 1u));
+        }
+    }
+    for (u32 i = 0u; font->kernings && i < font->kerning_count; i++) {
+        u32 left = font->kernings[i].left, right = font->kernings[i].right;
+        LOOKUP_TEST_CHECK(rg_gui_text_lookup_kerning(lookup, left, right) == rg_text_find_kerning(font, left, right));
+        LOOKUP_TEST_CHECK(rg_gui_text_lookup_kerning(lookup, right, left) == rg_text_find_kerning(font, right, left));
+        LOOKUP_TEST_CHECK(rg_gui_text_lookup_kerning(lookup, left, 0x10FFFFu) == rg_text_find_kerning(font, left, 0x10FFFFu));
+    }
+    LOOKUP_TEST_CHECK(rg_gui_text_lookup_glyph(lookup, 0x10FFFFu) == rg_text_find_glyph(font, 0x10FFFFu));
+    LOOKUP_TEST_CHECK(rg_gui_text_lookup_glyph(lookup, font->fallback_codepoint) == rg_text_find_glyph(font, font->fallback_codepoint));
     static const char* corpus[] = {
         "", "A", "AA", "A B", "A\tB", "A?B", "AXAXB", "A\rB", "A\nB", "A\r\nB",
         "\n\r\n\r", "A\xC3\xA9" "A", "\xEF\xBF\xBD" "AA", "A\xF0\x9F\x98\x80" "B",
@@ -128,7 +150,10 @@ static int test_text_lookup(void)
     RgGuiTextLookup* lookup = (RgGuiTextLookup*)malloc(sizeof(*lookup));
     LOOKUP_TEST_CHECK(lookup);
     size_t lookup_bytes = sizeof(*lookup);
-    LOOKUP_TEST_CHECK(lookup_bytes == sizeof(void*) * 129u + sizeof(i32) * 128u * 128u);
+    LOOKUP_TEST_CHECK(lookup_bytes >= sizeof(void*) * 130u + sizeof(i32) * 128u * 128u + 2u * sizeof(u32) +
+                      sizeof(u16) * (RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS + RG_GUI_TEXT_LOOKUP_KERNING_SLOTS));
+    LOOKUP_TEST_CHECK(lookup_bytes <= sizeof(void*) * 130u + sizeof(i32) * 128u * 128u + 2u * sizeof(u32) +
+                      sizeof(u16) * (RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS + RG_GUI_TEXT_LOOKUP_KERNING_SLOTS) + 16u);
     LOOKUP_TEST_CHECK(rg_gui_text_lookup_init(lookup, &font));
     RgGuiInitDesc desc = {0}, normalized;
     desc.font = &font;
@@ -158,7 +183,62 @@ static int test_text_lookup(void)
     LOOKUP_TEST_CHECK(rg_gui_text_find_kerning(NULL, 65u, 63u) == 0);
     LOOKUP_TEST_CHECK(rg_gui_text_measure_prefix(NULL, "A", 1u) == 0.0f);
     free(lookup);
-    printf("ASCII lookup checks passed: %u\n", lookup_test_checks);
+
+    /* Loaded fonts of several sizes: within the general tables and beyond them. */
+    static const u32 sizes[] = {300u, RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS / 2u, RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS / 2u + 1u};
+    for (size_t n = 0u; n < sizeof(sizes) / sizeof(sizes[0]); n++) {
+        u32 count = sizes[n];
+        size_t capacity = 64u + (size_t)count * 96u;
+        char* text = (char*)malloc(capacity);
+        RgTextGlyph* big_glyphs = (RgTextGlyph*)malloc(sizeof(*big_glyphs) * count);
+        RgTextKerning* big_pairs = (RgTextKerning*)malloc(sizeof(*big_pairs) * count);
+        LOOKUP_TEST_CHECK(text && big_glyphs && big_pairs);
+        size_t used = (size_t)sprintf(text, "rgfont 1\natlas 1024 1024\nline_height 16\nascent 13\ndescent 3\nfallback 63\n");
+        for (u32 i = 0u; i < count; i++)
+            used += (size_t)sprintf(text + used, "glyph %u %u %u 7 12 0 1 %u\n", 32u + i * 3u, (i % 64u) * 8u, ((i / 64u) % 64u) * 16u, 5u + i % 7u);
+        for (u32 i = 0u; i < count; i++)
+            used += (size_t)sprintf(text + used, "kerning %u %u %d\n", 32u + i * 3u, 32u + ((i * 7u + 1u) % count) * 3u, -(int)(i % 5u) - 1);
+        LOOKUP_TEST_CHECK(used < capacity);
+        RgTextFont big = {0};
+        RgTextFontLoadDesc big_load = {text, used, big_glyphs, count, big_pairs, count};
+        LOOKUP_TEST_CHECK(rg_text_font_load_rgfont(&big, &big_load));
+        RgGuiTextLookup* big_lookup = (RgGuiTextLookup*)malloc(sizeof(*big_lookup));
+        LOOKUP_TEST_CHECK(big_lookup && rg_gui_text_lookup_init(big_lookup, &big));
+#if RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS > 0
+        LOOKUP_TEST_CHECK(big_lookup->glyph_table_enabled == (count <= RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS / 2u));
+#endif
+#if RG_GUI_TEXT_LOOKUP_KERNING_SLOTS > 0
+        LOOKUP_TEST_CHECK(big_lookup->kerning_table_enabled == (count <= RG_GUI_TEXT_LOOKUP_KERNING_SLOTS / 2u));
+#endif
+        for (u32 cp = 0u; cp < 32u + count * 3u + 8u; cp++)
+            LOOKUP_TEST_CHECK(rg_gui_text_lookup_glyph(big_lookup, cp) == rg_text_find_glyph(&big, cp));
+        for (u32 i = 0u; i < count; i++) {
+            LOOKUP_TEST_CHECK(rg_gui_text_lookup_kerning(big_lookup, big_pairs[i].left, big_pairs[i].right) == big_pairs[i].x_advance);
+            LOOKUP_TEST_CHECK(rg_gui_text_lookup_kerning(big_lookup, big_pairs[i].right, big_pairs[i].left) ==
+                              rg_text_find_kerning(&big, big_pairs[i].right, big_pairs[i].left));
+            LOOKUP_TEST_CHECK(rg_gui_text_lookup_kerning(big_lookup, big_pairs[i].left, big_pairs[i].right + 1u) ==
+                              rg_text_find_kerning(&big, big_pairs[i].left, big_pairs[i].right + 1u));
+        }
+        RgGuiContext big_ctx;
+        memset(&big_ctx, 0, sizeof(big_ctx));
+        big_ctx.font = &big;
+        big_ctx.text_lookup = big_lookup;
+        big_ctx.style.text_height = 16.0f;
+        char sample[256];
+        size_t sample_len = 0u;
+        for (u32 i = 0u; i < 40u; i++) {
+            u32 cp = 32u + ((i * 37u) % count) * 3u;
+            if (cp < 0x80u) sample[sample_len++] = (char)cp;
+            else if (cp < 0x800u) { sample[sample_len++] = (char)(0xC0u | (cp >> 6u)); sample[sample_len++] = (char)(0x80u | (cp & 63u)); }
+            else { sample[sample_len++] = (char)(0xE0u | (cp >> 12u)); sample[sample_len++] = (char)(0x80u | ((cp >> 6u) & 63u)); sample[sample_len++] = (char)(0x80u | (cp & 63u)); }
+        }
+        for (size_t prefix = 0u; prefix <= sample_len; prefix++) lookup_test_measure(&big_ctx, sample, prefix);
+        free(big_lookup);
+        free(big_pairs);
+        free(big_glyphs);
+        free(text);
+    }
+    printf("Text lookup checks passed: %u\n", lookup_test_checks);
     return 1;
 }
 

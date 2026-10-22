@@ -132,6 +132,24 @@
 #define RG_GUI_TEXT_LENGTH_CACHE_SIZE 0u
 #endif
 
+// Longest linear probe in the pointer-keyed measurement and length caches. A
+// saturated table replaces an entry's home slot instead of scanning every slot.
+#ifndef RG_GUI_TEXT_CACHE_MAX_PROBES
+#define RG_GUI_TEXT_CACHE_MAX_PROBES 8u
+#endif
+
+// RgGuiTextLookup also indexes every glyph codepoint and kerning pair in fixed
+// open-addressed tables (power-of-two slot counts; zero omits a table). Fonts
+// with more than half as many glyphs or pairs as slots keep using rg_text's
+// binary searches for non-ASCII lookups. The ASCII arrays are unaffected.
+#ifndef RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS
+#define RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS 8192u
+#endif
+
+#ifndef RG_GUI_TEXT_LOOKUP_KERNING_SLOTS
+#define RG_GUI_TEXT_LOOKUP_KERNING_SLOTS 8192u
+#endif
+
 #ifndef RG_GUI_MENU_WIDTH_CACHE_SIZE
 #define RG_GUI_MENU_WIDTH_CACHE_SIZE 0u
 #endif
@@ -400,7 +418,29 @@ typedef struct RgGuiTextLookup
 	const RgTextFont* font;
 	const RgTextGlyph* ascii_glyphs[128];
 	i32 ascii_kerning[128 * 128];
+	/* Result of rg_text_find_glyph for a codepoint absent from the font. */
+	const RgTextGlyph* fallback_glyph;
+	/* Nonzero when the general tables below describe every glyph or pair. */
+	u32 glyph_table_enabled;
+	u32 kerning_table_enabled;
+#if RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS > 0
+	/* Glyph index + 1 per slot; zero is empty. */
+	u16 glyph_slots[RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS];
+#endif
+#if RG_GUI_TEXT_LOOKUP_KERNING_SLOTS > 0
+	/* Kerning index + 1 per slot; zero is empty. */
+	u16 kerning_slots[RG_GUI_TEXT_LOOKUP_KERNING_SLOTS];
+#endif
 } RgGuiTextLookup;
+
+#if RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS > 0
+typedef char RgGuiTextLookupGlyphSlotsMustBePowerOfTwo[
+    (RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS & (RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS - 1u)) == 0u ? 1 : -1];
+#endif
+#if RG_GUI_TEXT_LOOKUP_KERNING_SLOTS > 0
+typedef char RgGuiTextLookupKerningSlotsMustBePowerOfTwo[
+    (RG_GUI_TEXT_LOOKUP_KERNING_SLOTS & (RG_GUI_TEXT_LOOKUP_KERNING_SLOTS - 1u)) == 0u ? 1 : -1];
+#endif
 
 typedef struct RgGuiContext RgGuiContext;
 typedef struct RgGuiTableColumn RgGuiTableColumn;
@@ -3646,6 +3686,117 @@ RGINLINE RgGuiStyle rg_gui_style_default(void)
 	return style;
 }
 
+RGINLINE u32 rg_gui_text_lookup_glyph_slot(u32 codepoint)
+{
+	u32 hash = codepoint * 0x9E3779B1u;
+	hash ^= hash >> 15u;
+	hash *= 0x85EBCA6Bu;
+	return hash ^ (hash >> 13u);
+}
+
+RGINLINE u32 rg_gui_text_lookup_kerning_slot(u32 left, u32 right)
+{
+	u32 hash = left * 0x9E3779B1u + right * 0x85EBCA6Bu;
+	hash ^= hash >> 15u;
+	hash *= 0x2C1B3C6Du;
+	return hash ^ (hash >> 12u);
+}
+
+/* rg_text_find_glyph_exact returns the first match in an unsorted array and the
+ * unique match in a loader-sorted array. Inserting first occurrences reproduces
+ * both, provided a sorted array really is strictly ascending. */
+RGINLINE int rg_gui_text_lookup_font_order_valid(const RgTextFont* font)
+{
+	if (!(font->internal_lookup_flags & RG_TEXT_LOOKUP_SORTED))
+	{
+		return 1;
+	}
+	for (u32 i = 1u; i < font->glyph_count; i++)
+	{
+		if (font->glyphs[i - 1u].codepoint >= font->glyphs[i].codepoint)
+		{
+			return 0;
+		}
+	}
+	for (u32 i = 1u; font->kernings && i < font->kerning_count; i++)
+	{
+		const RgTextKerning* a = &font->kernings[i - 1u];
+		const RgTextKerning* b = &font->kernings[i];
+		if (a->left > b->left || (a->left == b->left && a->right >= b->right))
+		{
+			return 0;
+		}
+	}
+	return 1;
+}
+
+#if RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS > 0
+RGINLINE int rg_gui_text_lookup_build_glyphs(RgGuiTextLookup* lookup, const RgTextFont* font)
+{
+	const u32 mask = RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS - 1u;
+	if (font->glyph_count > RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS / 2u || font->glyph_count >= 0xFFFFu)
+	{
+		return 0;
+	}
+	for (u32 i = 0u; i < font->glyph_count; i++)
+	{
+		u32 codepoint = font->glyphs[i].codepoint;
+		u32 slot = rg_gui_text_lookup_glyph_slot(codepoint) & mask;
+		int present = 0;
+		while (lookup->glyph_slots[slot])
+		{
+			if (font->glyphs[lookup->glyph_slots[slot] - 1u].codepoint == codepoint)
+			{
+				present = 1;
+				break;
+			}
+			slot = (slot + 1u) & mask;
+		}
+		if (!present)
+		{
+			lookup->glyph_slots[slot] = (u16)(i + 1u);
+		}
+	}
+	return 1;
+}
+#endif
+
+#if RG_GUI_TEXT_LOOKUP_KERNING_SLOTS > 0
+RGINLINE int rg_gui_text_lookup_build_kernings(RgGuiTextLookup* lookup, const RgTextFont* font)
+{
+	const u32 mask = RG_GUI_TEXT_LOOKUP_KERNING_SLOTS - 1u;
+	if (!font->kernings || font->kerning_count == 0u)
+	{
+		return 1;
+	}
+	if (font->kerning_count > RG_GUI_TEXT_LOOKUP_KERNING_SLOTS / 2u || font->kerning_count >= 0xFFFFu)
+	{
+		return 0;
+	}
+	for (u32 i = 0u; i < font->kerning_count; i++)
+	{
+		const RgTextKerning* pair = &font->kernings[i];
+		u32 slot = rg_gui_text_lookup_kerning_slot(pair->left, pair->right) & mask;
+		int present = 0;
+		while (lookup->kerning_slots[slot])
+		{
+			const RgTextKerning* stored = &font->kernings[lookup->kerning_slots[slot] - 1u];
+			if (stored->left == pair->left && stored->right == pair->right)
+			{
+				present = 1;
+				break;
+			}
+			slot = (slot + 1u) & mask;
+		}
+		if (!present)
+		{
+			lookup->kerning_slots[slot] = (u16)(i + 1u);
+		}
+	}
+	return 1;
+}
+#endif
+
 RGINLINE int rg_gui_text_lookup_init(RgGuiTextLookup* lookup, const RgTextFont* font)
 {
 	if (!lookup)
@@ -3687,17 +3838,99 @@ RGINLINE int rg_gui_text_lookup_init(RgGuiTextLookup* lookup, const RgTextFont* 
 			}
 		}
 	}
+	lookup->fallback_glyph = rg_text_find_glyph_exact(font, font->fallback_codepoint);
+	int order_valid = rg_gui_text_lookup_font_order_valid(font);
+#if RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS > 0
+	lookup->glyph_table_enabled = order_valid && rg_gui_text_lookup_build_glyphs(lookup, font);
+	if (!lookup->glyph_table_enabled) memset(lookup->glyph_slots, 0, sizeof(lookup->glyph_slots));
+#endif
+#if RG_GUI_TEXT_LOOKUP_KERNING_SLOTS > 0
+	lookup->kerning_table_enabled = order_valid && rg_gui_text_lookup_build_kernings(lookup, font);
+	if (!lookup->kerning_table_enabled) memset(lookup->kerning_slots, 0, sizeof(lookup->kerning_slots));
+#endif
+	RG_GUI_UNUSED(order_valid);
 	lookup->font = font;
 	return 1;
+}
+
+static RG_NOINLINE const RgTextGlyph* rg_gui_text_lookup_glyph_general(const RgGuiTextLookup* lookup,
+                                                                       u32 codepoint)
+{
+#if RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS > 0
+	if (lookup->glyph_table_enabled)
+	{
+		const RgTextFont* font = lookup->font;
+		const u32 mask = RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS - 1u;
+		u32 slot = rg_gui_text_lookup_glyph_slot(codepoint) & mask;
+		for (;;)
+		{
+			u32 entry = lookup->glyph_slots[slot];
+			if (!entry)
+			{
+				break;
+			}
+			const RgTextGlyph* glyph = &font->glyphs[entry - 1u];
+			if (glyph->codepoint == codepoint)
+			{
+				return glyph;
+			}
+			slot = (slot + 1u) & mask;
+		}
+		return codepoint != font->fallback_codepoint ? lookup->fallback_glyph : NULL;
+	}
+#endif
+	return rg_text_find_glyph(lookup->font, codepoint);
+}
+
+static RG_NOINLINE i32 rg_gui_text_lookup_kerning_general(const RgGuiTextLookup* lookup,
+                                                          u32 left, u32 right)
+{
+#if RG_GUI_TEXT_LOOKUP_KERNING_SLOTS > 0
+	if (lookup->kerning_table_enabled)
+	{
+		const RgTextFont* font = lookup->font;
+		const u32 mask = RG_GUI_TEXT_LOOKUP_KERNING_SLOTS - 1u;
+		u32 slot = rg_gui_text_lookup_kerning_slot(left, right) & mask;
+		for (;;)
+		{
+			u32 entry = lookup->kerning_slots[slot];
+			if (!entry)
+			{
+				return 0;
+			}
+			const RgTextKerning* pair = &font->kernings[entry - 1u];
+			if (pair->left == left && pair->right == right)
+			{
+				return pair->x_advance;
+			}
+			slot = (slot + 1u) & mask;
+		}
+	}
+#endif
+	return rg_text_find_kerning(lookup->font, left, right);
+}
+
+/** Glyph lookup through an initialized table; identical to rg_text_find_glyph(lookup->font, cp). */
+RGINLINE const RgTextGlyph* rg_gui_text_lookup_glyph(const RgGuiTextLookup* lookup, u32 codepoint)
+{
+	return codepoint < 128u ? lookup->ascii_glyphs[codepoint]
+	                        : rg_gui_text_lookup_glyph_general(lookup, codepoint);
+}
+
+/** Kerning lookup through an initialized table; identical to rg_text_find_kerning(lookup->font, l, r). */
+RGINLINE i32 rg_gui_text_lookup_kerning(const RgGuiTextLookup* lookup, u32 left, u32 right)
+{
+	return (left | right) < 128u ? lookup->ascii_kerning[left * 128u + right]
+	                             : rg_gui_text_lookup_kerning_general(lookup, left, right);
 }
 
 RGINLINE const RgTextGlyph* rg_gui_text_find_glyph(const RgGuiContext* ctx, u32 codepoint)
 {
 	const RgTextFont* font = ctx ? ctx->font : NULL;
 	const RgGuiTextLookup* lookup = ctx ? ctx->text_lookup : NULL;
-	if (lookup && lookup->font == font && codepoint < 128u)
+	if (lookup && lookup->font == font && font)
 	{
-		return lookup->ascii_glyphs[codepoint];
+		return rg_gui_text_lookup_glyph(lookup, codepoint);
 	}
 	return rg_text_find_glyph(font, codepoint);
 }
@@ -3706,9 +3939,9 @@ RGINLINE i32 rg_gui_text_find_kerning(const RgGuiContext* ctx, u32 left, u32 rig
 {
 	const RgTextFont* font = ctx ? ctx->font : NULL;
 	const RgGuiTextLookup* lookup = ctx ? ctx->text_lookup : NULL;
-	if (lookup && lookup->font == font && left < 128u && right < 128u)
+	if (lookup && lookup->font == font && font)
 	{
-		return lookup->ascii_kerning[left * 128u + right];
+		return rg_gui_text_lookup_kerning(lookup, left, right);
 	}
 	return rg_text_find_kerning(font, left, right);
 }
@@ -6194,7 +6427,13 @@ RGINLINE size_t rg_gui_utf8_next_boundary(const char* text, size_t length,
 	{
 		return length;
 	}
-	position = rg_gui_utf8_boundary_before_or_at(text, length, position);
+	// A lead or ASCII byte is already a boundary; only a continuation byte
+	// needs the backward scan. Trailing stray continuation bytes still attach
+	// to the preceding character below, matching the general path.
+	if (rg_gui_utf8_is_continuation((unsigned char)text[position]))
+	{
+		position = rg_gui_utf8_boundary_before_or_at(text, length, position);
+	}
 	position++;
 	while (position < length && rg_gui_utf8_is_continuation((unsigned char)text[position]))
 	{
@@ -8254,7 +8493,8 @@ RGINLINE size_t rg_gui_text_area_wrap_line_end(const RgGuiContext* ctx, const ch
 	f32 max_width = 0.0f;
 	const RgTextGlyph* previous = NULL;
 	size_t offset = start;
-	for (size_t i = start; i < hard_end; i = rg_gui_utf8_next_boundary(buffer, hard_end, i))
+	size_t candidate = start;
+	for (size_t i = start; i < hard_end; i = candidate)
 	{
 		if (buffer[i] == ' ' || buffer[i] == '\t')
 		{
@@ -8262,7 +8502,7 @@ RGINLINE size_t rg_gui_text_area_wrap_line_end(const RgGuiContext* ctx, const ch
 			has_space = 1;
 		}
 
-		size_t candidate = rg_gui_utf8_next_boundary(buffer, hard_end, i);
+		candidate = rg_gui_utf8_next_boundary(buffer, hard_end, i);
 		// Accumulate the same operations as rg_text_measure without remeasuring
 		// each growing prefix. Decode up to the GUI boundary, including malformed
 		// byte sequences that produce more than one replacement glyph.
@@ -8993,7 +9233,7 @@ RGINLINE f32 rg_gui_text_measure_prefix(const RgGuiContext* ctx, const char* tex
 			previous = NULL;
 			continue;
 		}
-		const RgTextGlyph* glyph = cp < 128u ? lookup->ascii_glyphs[cp] : rg_text_find_glyph(ctx->font, cp);
+		const RgTextGlyph* glyph = rg_gui_text_lookup_glyph(lookup, cp);
 		if (!glyph)
 		{
 			previous = NULL;
@@ -9001,10 +9241,7 @@ RGINLINE f32 rg_gui_text_measure_prefix(const RgGuiContext* ctx, const char* tex
 		}
 		if (previous)
 		{
-			u32 left = previous->codepoint;
-			u32 right = glyph->codepoint;
-			i32 kerning = left < 128u && right < 128u ? lookup->ascii_kerning[left * 128u + right] :
-			    rg_text_find_kerning(ctx->font, left, right);
+			i32 kerning = rg_gui_text_lookup_kerning(lookup, previous->codepoint, glyph->codepoint);
 			line_width += (f32)kerning * scale;
 		}
 		line_width += (f32)glyph->x_advance * scale;
@@ -9107,9 +9344,11 @@ RGINLINE size_t rg_gui_text_len_cached(RgGuiContext* ctx, const char* text)
 
 	u32 hash = (u32)rg_hash_ptr(text);
 	u32 mask = ctx->text_length_cache_mask;
-	u32 index = mask ? (hash & mask) : (hash % capacity);
+	u32 home = mask ? (hash & mask) : (hash % capacity);
+	u32 index = home;
+	u32 probes = capacity < RG_GUI_TEXT_CACHE_MAX_PROBES ? capacity : RG_GUI_TEXT_CACHE_MAX_PROBES;
 
-	for (u32 probe = 0u; probe < capacity; probe++)
+	for (u32 probe = 0u; probe < probes; probe++)
 	{
 		RgGuiTextLengthCacheEntry* entry = &cache[index];
 		if (!entry->text)
@@ -9126,9 +9365,10 @@ RGINLINE size_t rg_gui_text_len_cached(RgGuiContext* ctx, const char* text)
 		index = mask ? ((index + 1u) & mask) : ((index + 1u) % capacity);
 	}
 
+	// Bounded probing keeps a saturated table O(1): replace the home slot.
 	size_t length = strlen(text);
-	cache[index].text = text;
-	cache[index].length = length;
+	cache[home].text = text;
+	cache[home].length = length;
 	return length;
 }
 
@@ -9167,9 +9407,11 @@ RGINLINE f32 rg_gui_text_measure_cached(RgGuiContext* ctx, const char* text, siz
 	key ^= (u64)scale_bits * 0xd6e8feb86659fd93ull;
 	u32 hash = (u32)rg_hash_u64(key);
 	u32 mask = ctx->text_measure_cache_mask;
-	u32 index = mask ? (hash & mask) : (hash % capacity);
+	u32 home = mask ? (hash & mask) : (hash % capacity);
+	u32 index = home;
+	u32 probes = capacity < RG_GUI_TEXT_CACHE_MAX_PROBES ? capacity : RG_GUI_TEXT_CACHE_MAX_PROBES;
 
-	for (u32 probe = 0u; probe < capacity; probe++)
+	for (u32 probe = 0u; probe < probes; probe++)
 	{
 		RgGuiTextMeasureCacheEntry* entry = &cache[index];
 		if (!entry->text)
@@ -9188,11 +9430,12 @@ RGINLINE f32 rg_gui_text_measure_cached(RgGuiContext* ctx, const char* text, siz
 		index = mask ? ((index + 1u) & mask) : ((index + 1u) % capacity);
 	}
 
+	// Bounded probing keeps a saturated table O(1): replace the home slot.
 	f32 width = rg_gui_text_measure_prefix(ctx, text, length);
-	cache[index].text = text;
-	cache[index].length = length;
-	cache[index].scale_bits = scale_bits;
-	cache[index].width = width;
+	cache[home].text = text;
+	cache[home].length = length;
+	cache[home].scale_bits = scale_bits;
+	cache[home].width = width;
 	return width;
 }
 

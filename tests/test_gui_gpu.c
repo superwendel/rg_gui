@@ -916,6 +916,118 @@ static int test_upload_ring_size_boundaries(void)
 	return 1;
 }
 
+/* Frame signatures must agree for identical frames and differ for any change
+ * the GPU would render differently, including text bytes behind a reused
+ * frame-arena address. */
+static int test_frame_signature(void)
+{
+	TestGpuFixture fixture;
+	TEST_CHECK(test_fixture_init(&fixture, test_limits()));
+	char mutable_text[8] = "A";
+	static const char static_text[] = "A";
+	RgGuiDrawCmd cmds[6];
+	cmds[0] = test_rect_command();
+	cmds[1].type = RG_GUI_CMD_CLIP_PUSH;
+	cmds[1].data.clip.rect = rg_gui_make_rect(1.0f, 2.0f, 30.0f, 40.0f);
+	cmds[2] = test_text_command(mutable_text, 1.0f, 0);
+	cmds[3] = test_text_command(static_text, 1.0f, 1);
+	cmds[4].type = RG_GUI_CMD_CLIP_POP;
+	cmds[5].type = RG_GUI_CMD_IMAGE;
+	cmds[5].data.image.rect = rg_gui_make_rect(5.0f, 5.0f, 8.0f, 8.0f);
+	cmds[5].data.image.uv = rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f);
+	cmds[5].data.image.color = rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f);
+	cmds[5].data.image.texture = (RgGuiTexture)(uintptr_t)1u;
+	cmds[5].data.image.material = 0u;
+	RgGuiDrawList list = {cmds, 6u, 6u};
+
+	u64 signatures[4];
+	for (u32 pass = 0u; pass < 2u; pass++)
+	{
+		rg_gui_renderer_begin_frame(&fixture.text);
+		TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, list.count));
+		signatures[pass] = rg_gui_gpu_frame_signature(&fixture.gpu);
+		TEST_CHECK(signatures[pass] != 0u);
+	}
+	TEST_CHECK(signatures[0] == signatures[1]);
+
+	/* Same addresses, different bytes: the content key must change the digest. */
+	memcpy(mutable_text, "AA", 3u);
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, list.count));
+	signatures[2] = rg_gui_gpu_frame_signature(&fixture.gpu);
+	TEST_CHECK(signatures[2] != signatures[0]);
+	memcpy(mutable_text, "A", 2u);
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, list.count));
+	TEST_CHECK(rg_gui_gpu_frame_signature(&fixture.gpu) == signatures[0]);
+
+	u64 previous = signatures[0];
+	const struct TestSignatureChange
+	{
+		u32 index;
+		u32 field;
+	} edits[] = {{0u, 0u}, {0u, 1u}, {1u, 0u}, {2u, 0u}, {2u, 1u}, {2u, 2u}, {5u, 0u}, {5u, 1u}, {5u, 2u}, {5u, 3u}};
+	for (u32 n = 0u; n < RG_ARRAY_COUNT(edits); n++)
+	{
+		RgGuiDrawCmd saved = cmds[edits[n].index];
+		RgGuiDrawCmd* cmd = &cmds[edits[n].index];
+		switch (cmd->type)
+		{
+			case RG_GUI_CMD_RECT:
+				if (edits[n].field == 0u) cmd->data.rect.rect.w += 1.0f;
+				else cmd->data.rect.color.x = 0.5f;
+				break;
+			case RG_GUI_CMD_CLIP_PUSH: cmd->data.clip.rect.h += 1.0f; break;
+			case RG_GUI_CMD_TEXT:
+				if (edits[n].field == 0u) cmd->data.text.pos.x += 1.0f;
+				else if (edits[n].field == 1u) cmd->data.text.color.y = 0.25f;
+				else cmd->data.text.scale = 2.0f;
+				break;
+			default:
+				if (edits[n].field == 0u) cmd->data.image.uv.w = 0.5f;
+				else if (edits[n].field == 1u) cmd->data.image.texture = (RgGuiTexture)(uintptr_t)2u;
+				else if (edits[n].field == 2u) cmd->data.image.material = 7u;
+				else cmd->data.image.rect.x += 1.0f;
+				break;
+		}
+		rg_gui_renderer_begin_frame(&fixture.text);
+		TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, list.count));
+		u64 changed = rg_gui_gpu_frame_signature(&fixture.gpu);
+		TEST_CHECK(changed != previous && changed != signatures[0]);
+		*cmd = saved;
+		rg_gui_renderer_begin_frame(&fixture.text);
+		TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, list.count));
+		TEST_CHECK(rg_gui_gpu_frame_signature(&fixture.gpu) == signatures[0]);
+	}
+
+	/* Order, count, and the overlay boundary are part of the digest. */
+	RgGuiDrawCmd swapped = cmds[0];
+	cmds[0] = cmds[5];
+	cmds[5] = swapped;
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, list.count));
+	TEST_CHECK(rg_gui_gpu_frame_signature(&fixture.gpu) != signatures[0]);
+	cmds[5] = cmds[0];
+	cmds[0] = swapped;
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, 3u));
+	TEST_CHECK(rg_gui_gpu_frame_signature(&fixture.gpu) != signatures[0]);
+	list.count = 5u;
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, list.count));
+	TEST_CHECK(rg_gui_gpu_frame_signature(&fixture.gpu) != signatures[0]);
+	list.count = 6u;
+
+	/* A failed preparation publishes no signature. */
+	fixture.gpu.vertex_capacity = 3u;
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(!rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, list.count));
+	TEST_CHECK(rg_gui_gpu_frame_signature(&fixture.gpu) == 0u);
+	TEST_CHECK(rg_gui_gpu_frame_signature(NULL) == 0u);
+	free(fixture.memory);
+	return 1;
+}
+
 static int test_upload_ring_size_full_cache(void)
 {
 	TestGpuFixture fixture;
@@ -1100,7 +1212,7 @@ int main(void)
 	    !test_indexed_triangle_packing_and_empty() || !test_indexed_capacity_rollback() ||
 	    !test_gpu_cache_invalidation() || !test_independent_frame_capacity() ||
 	    !test_fragmented_upload_ranges() || !test_upload_ring_size_boundaries() ||
-	    !test_upload_ring_size_full_cache()) return 1;
+	    !test_upload_ring_size_full_cache() || !test_frame_signature()) return 1;
 	puts("rg_gui_gpu draw-list preparation checks passed");
 	return 0;
 }

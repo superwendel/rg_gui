@@ -553,13 +553,31 @@ typedef struct DemoRenderMetrics
 	u32 draw_commands;
 	int submitted;
 	int presented;
+	/* The prepared frame matched the pixels already presented; no GPU work ran. */
+	int skipped;
 } DemoRenderMetrics;
 
-static int demo_render_draw_list_profiled(SDL_GPUDevice* device, SDL_Window* window,
-                                          RgGuiGpuRenderer* gpu, RgGuiRenderer* text_renderer,
-                                          RgGpuUploadRing* upload_ring,
-                                          const RgGuiDrawList* draw_list, u32 overlay_start,
-                                          int* out_presented, DemoRenderMetrics* metrics)
+/* Signature and swapchain size of the last presented frame. When a newly
+ * prepared frame reproduces both, drawing it again cannot change the window
+ * contents, so staging, encoding, drawing, and presenting are skipped. The
+ * atlas and image textures used by these demos never change after startup;
+ * an application that updates such textures must also reset `valid`. */
+typedef struct DemoFrameSkip
+{
+	u64 signature;
+	u32 width;
+	u32 height;
+	int valid;
+	int enabled;
+	u32 skipped_frames;
+} DemoFrameSkip;
+
+static int demo_render_draw_list_skippable(SDL_GPUDevice* device, SDL_Window* window,
+                                           RgGuiGpuRenderer* gpu, RgGuiRenderer* text_renderer,
+                                           RgGpuUploadRing* upload_ring,
+                                           const RgGuiDrawList* draw_list, u32 overlay_start,
+                                           DemoFrameSkip* skip,
+                                           int* out_presented, DemoRenderMetrics* metrics)
 {
 	u64 render_start = metrics ? SDL_GetTicksNS() : 0u;
 	u64 stage_start = render_start;
@@ -584,6 +602,22 @@ static int demo_render_draw_list_profiled(SDL_GPUDevice* device, SDL_Window* win
 	{
 		SDL_SetError("rg_gui GPU preparation exceeded the configured demo limits");
 		goto done;
+	}
+
+	u64 signature = rg_gui_gpu_frame_signature(gpu);
+	if (skip && skip->enabled && skip->valid && skip->signature == signature)
+	{
+		int pixel_width = 0;
+		int pixel_height = 0;
+		if (SDL_GetWindowSizeInPixels(window, &pixel_width, &pixel_height) &&
+		    pixel_width > 0 && pixel_height > 0 &&
+		    (u32)pixel_width == skip->width && (u32)pixel_height == skip->height)
+		{
+			skip->skipped_frames++;
+			if (metrics) metrics->skipped = 1;
+			result = 1;
+			goto done;
+		}
 	}
 
 	rg_gpu_upload_ring_begin(upload_ring, 1);
@@ -714,6 +748,13 @@ static int demo_render_draw_list_profiled(SDL_GPUDevice* device, SDL_Window* win
 	if (!submitted) goto done;
 	if (out_presented) *out_presented = swapchain != NULL;
 	if (metrics) metrics->presented = swapchain != NULL;
+	if (skip && swapchain)
+	{
+		skip->signature = signature;
+		skip->width = width;
+		skip->height = height;
+		skip->valid = 1;
+	}
 	result = 1;
 	goto done;
 
@@ -728,6 +769,28 @@ done:
 		metrics->total_ms = (double)(SDL_GetTicksNS() - render_start) / 1000000.0;
 	}
 	return result;
+}
+
+static int demo_render_draw_list_profiled(SDL_GPUDevice* device, SDL_Window* window,
+                                          RgGuiGpuRenderer* gpu, RgGuiRenderer* text_renderer,
+                                          RgGpuUploadRing* upload_ring,
+                                          const RgGuiDrawList* draw_list, u32 overlay_start,
+                                          int* out_presented, DemoRenderMetrics* metrics)
+{
+	return demo_render_draw_list_skippable(device, window, gpu, text_renderer, upload_ring,
+	                                       draw_list, overlay_start, NULL, out_presented, metrics);
+}
+
+RGINLINE int demo_render_frame_skippable(SDL_GPUDevice* device, SDL_Window* window,
+                                         RgGuiGpuRenderer* gpu, RgGuiRenderer* text_renderer,
+                                         RgGpuUploadRing* upload_ring, RgGuiContext* gui,
+                                         DemoFrameSkip* skip, int* out_presented,
+                                         DemoRenderMetrics* metrics)
+{
+	return demo_render_draw_list_skippable(device, window, gpu, text_renderer, upload_ring,
+	                                       rg_gui_draw_list(gui),
+	                                       rg_gui_draw_list_overlay_start(gui), skip,
+	                                       out_presented, metrics);
 }
 
 RGINLINE int demo_render_draw_list(SDL_GPUDevice* device, SDL_Window* window,
