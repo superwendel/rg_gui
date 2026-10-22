@@ -79,8 +79,9 @@ they do not grow their arenas during a frame.
 arena with sufficient capacity and alignment padding.
 
 Changing text can opt into a shared `RgGuiTextLookup` through
-`RgGuiInitDesc.text_lookup`. It costs about 65 KiB per font and accelerates ASCII
-measurement. The renderer can borrow the same table via
+`RgGuiInitDesc.text_lookup`. It costs about 97 KiB per font and accelerates
+glyph and kerning lookup for ASCII (direct arrays) and for every other glyph
+in fonts of up to 4,096 glyphs and kerning pairs (hash tables). The renderer can borrow the same table via
 `RgGuiRendererInitDesc.text_lookup`; use `rg_gui_renderer_memory_required_ex`
 to omit its duplicate storage. The demos share one table per font. See the
 [lookup ownership rules](docs/rg_gui.md#include-and-initialize).
@@ -228,7 +229,10 @@ and renderer activity. See [performance against Dear ImGui](benchmarks/PERFORMAN
 for workload comparisons, test settings, and tradeoffs.
 The [Linux X11 baseline](benchmarks/PROFILING.md#linux-x11-baseline--2026-10-02)
 records local validation, presentation/buffer comparisons, and remaining
-resize and native-window costs.
+resize and native-window costs. The
+[October 2026 performance audit](docs/performance-audit-2026-10.md) records
+where a frame's time goes, the lookup, wrapping, cache, and frame-signature
+changes it led to, and the remaining opportunities.
 
 ## Demos
 

@@ -7,6 +7,16 @@ between 0.x releases.
 
 ### Added
 
+- `rg_gui_gpu_frame_signature`: a digest of the prepared draw list so
+  applications can skip staging, drawing, and presenting frames that would
+  reproduce the pixels already on screen. The minimal demo demonstrates it.
+- General glyph and kerning hash tables in `RgGuiTextLookup`, so non-ASCII text
+  measures and lays out as fast as ASCII for fonts of up to 4,096 glyphs and
+  kerning pairs. The table grows from 66,568 to 99,352 bytes;
+  `RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS` and `RG_GUI_TEXT_LOOKUP_KERNING_SLOTS`
+  adjust or remove the tables.
+- A performance audit of the frame path with measurements and remaining
+  opportunities in `docs/performance-audit-2026-10.md`.
 - Linux GCC/Clang builds, SPIR-V dependency setup, sanitizer CI, and native
   X11/Vulkan validation through `build.sh`.
 - Linux CPU/frame profiling, compiler and runtime provenance, upload-copy
@@ -24,6 +34,11 @@ between 0.x releases.
 
 ### Changed
 
+- Pointer-keyed text measurement and length caches probe at most
+  `RG_GUI_TEXT_CACHE_MAX_PROBES` slots (8) and then replace the home slot, so a
+  saturated cache no longer scans every slot on each miss.
+- Text-area wrapping computes each UTF-8 boundary once, and boundary stepping
+  skips the backward scan for ASCII and lead bytes.
 - Batch compatible text, shapes, and images through an indexed GPU stream.
 - Share optional ASCII lookup tables between the frontend and text renderers,
   and offer optional SSE2 geometry packing alongside the portable path.
