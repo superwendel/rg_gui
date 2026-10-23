@@ -210,6 +210,7 @@ int main(int argc, char** argv)
 	gpu_desc.max_geometry_vertices = 16384u;
 	gpu_desc.max_items = 2048u;
 	gpu_desc.frame_buffer_count = 2u;
+	gpu_desc.frame_signature = 1u; /* enables skipping unchanged frames below */
 	gpu_desc.min_filter = SDL_GPU_FILTER_LINEAR;
 	gpu_desc.mag_filter = SDL_GPU_FILTER_LINEAR;
 	if (!rg_gui_gpu_create(&gpu, &gpu_desc))

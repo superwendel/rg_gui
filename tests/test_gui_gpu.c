@@ -923,6 +923,7 @@ static int test_frame_signature(void)
 {
 	TestGpuFixture fixture;
 	TEST_CHECK(test_fixture_init(&fixture, test_limits()));
+	/* Disabled by default: preparation publishes no digest until enabled. */
 	char mutable_text[8] = "A";
 	static const char static_text[] = "A";
 	RgGuiDrawCmd cmds[6];
@@ -939,6 +940,11 @@ static int test_frame_signature(void)
 	cmds[5].data.image.texture = (RgGuiTexture)(uintptr_t)1u;
 	cmds[5].data.image.material = 0u;
 	RgGuiDrawList list = {cmds, 6u, 6u};
+
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, list.count));
+	TEST_CHECK(rg_gui_gpu_frame_signature(&fixture.gpu) == 0u);
+	rg_gui_gpu_set_frame_signature(&fixture.gpu, 1);
 
 	u64 signatures[4];
 	for (u32 pass = 0u; pass < 2u; pass++)

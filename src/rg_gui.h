@@ -134,8 +134,11 @@
 
 // Longest linear probe in the pointer-keyed measurement and length caches. A
 // saturated table replaces an entry's home slot instead of scanning every slot.
+// At 75% occupancy the mean unsuccessful linear probe is about 8.5 slots, so a
+// budget of 32 finds a free slot almost always while the table has room and
+// bounds the cost once it is full. Smaller budgets evict live entries early.
 #ifndef RG_GUI_TEXT_CACHE_MAX_PROBES
-#define RG_GUI_TEXT_CACHE_MAX_PROBES 8u
+#define RG_GUI_TEXT_CACHE_MAX_PROBES 32u
 #endif
 
 // RgGuiTextLookup also indexes every glyph codepoint and kerning pair in fixed

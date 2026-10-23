@@ -95,8 +95,27 @@ from 155 us to 100 us.
 `rg_gui_text_measure_cached` and `rg_gui_text_len_cached` probed the entire
 table on a miss once it was full, then overwrote one slot. An application whose
 static-label set exceeds the configured capacity would pay a full-table scan
-per label per frame. Probing is now limited to `RG_GUI_TEXT_CACHE_MAX_PROBES`
-(8), after which the entry's home slot is replaced. Hits are unchanged.
+per label per frame. Probing is now limited to `RG_GUI_TEXT_CACHE_MAX_PROBES`,
+after which the entry's home slot is replaced.
+
+The budget matters. A first version used 8 probes, and a review (Codex,
+2026-10-23) showed it evicting live entries once a table passed about half
+occupancy: 768 static labels in a 1,024-entry cache measured 2.9x slower than
+the unbounded version. The mean unsuccessful linear probe at 75 percent load is
+about 8.5 slots, so 8 is simply too short. The default is now 32, measured on a
+768/900/1000/2048-label sweep against the 8-probe and unbounded variants
+(microseconds per pass, 1,024-entry cache):
+
+| Labels | Unbounded | 8 probes | 32 probes |
+| ---: | ---: | ---: | ---: |
+| 768 | 9.5 | 16.0 | 9.3 |
+| 900 | 15.1 | 30.3 | 19.7 |
+| 1,000 | 36.7 | 48.0 | 37.7 |
+| 2,048 (saturated) | 4,941 | 277 | 381 |
+
+Hits that sit within the budget are unchanged; entries beyond it are evicted,
+so a cache that is much more than three-quarters full still trades some
+re-measurement for the bounded miss cost. Size the cache for the label set.
 
 ### 4. Frame signature for skipping unchanged frames
 
@@ -110,10 +129,16 @@ order-sensitive 64-bit digest of every command's type, geometry, color, clip,
 texture, material, text position and scale, the text bytes or static-text
 identity, the command count, and the overlay boundary. Text bytes are already
 hashed once by the renderer for its content-keyed cache; that digest is folded
-in, so the extra cost is a few nanoseconds per command. A caller that sees the
-same signature and output size as the frame it last presented can skip staging,
-encoding, drawing, and presenting. The text cache stays consistent across
-skipped frames because page uploads are revision based.
+in. A caller that sees the same signature and output size as the frame it last
+presented can skip staging, encoding, drawing, and presenting. The text cache
+stays consistent across skipped frames because page uploads are revision based.
+
+The digest is opt-in (`RgGuiGpuDesc.frame_signature`). The first version
+computed it unconditionally, and the same review measured the cost on the
+geometry benchmark: 128 image commands went from 3.7 to 5.9 us of preparation,
+about 17 ns per command, paid by every caller whether or not it skipped frames.
+Colors now enter the digest as the packed 32-bit value the GPU reads, which is
+both cheaper and more precise about what changes pixels.
 
 The minimal demo uses it. Its progress bar now advances in 1/64 steps so idle
 frames repeat, and it waits for input (16 ms timeout) instead of spinning when a

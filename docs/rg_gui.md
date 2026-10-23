@@ -462,15 +462,20 @@ but items are not moved across unlike commands.
 
 An immediate-mode application rebuilds its draw list every frame, but it does
 not have to repaint when that list would produce the pixels already on screen.
-After a successful `rg_gui_gpu_prepare`, `rg_gui_gpu_frame_signature(&gpu)`
-returns a 64-bit digest of the prepared list: command types and order,
-rectangles, triangles, image rectangles/UVs/textures/materials, clip pushes,
-colors, text positions, text scale, text bytes (or static-text identity), the
-command count, and the overlay boundary. Preparation costs a few nanoseconds per
-command for this digest; text bytes are hashed once by the text renderer, which
-already hashes them for its cache.
+Set `gpu_desc.frame_signature = 1` (or call
+`rg_gui_gpu_set_frame_signature(&gpu, 1)`) and, after a successful
+`rg_gui_gpu_prepare`, `rg_gui_gpu_frame_signature(&gpu)` returns a 64-bit
+digest of the prepared list: command types and order, rectangles, triangles,
+image rectangles/UVs/textures/materials, clip pushes, packed colors, text
+positions, text scale, text bytes (or static-text identity), the command count,
+and the overlay boundary. The digest is off by default because it adds about
+10 to 15 nanoseconds per command to preparation (roughly 2 us for 128 images),
+which only pays off for callers that skip frames; text bytes are hashed once by
+the text renderer, which already hashes them for its cache.
 
 ```c
+gpu_desc.frame_signature = 1u;
+/* ... rg_gui_gpu_create ... */
 rg_gui_renderer_begin_frame(&text_renderer);
 if (!rg_gui_gpu_prepare(&gpu, &text_renderer, list, overlay_start)) { /* ... */ }
 u64 signature = rg_gui_gpu_frame_signature(&gpu);

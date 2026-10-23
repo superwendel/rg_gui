@@ -188,7 +188,8 @@ static int test_text_lookup(void)
     static const u32 sizes[] = {300u, RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS / 2u, RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS / 2u + 1u};
     for (size_t n = 0u; n < sizeof(sizes) / sizeof(sizes[0]); n++) {
         u32 count = sizes[n];
-        size_t capacity = 64u + (size_t)count * 96u;
+        if (count == 0u) continue; /* a disabled table derives an empty fixture */
+        size_t capacity = 256u + (size_t)count * 96u;
         char* text = (char*)malloc(capacity);
         RgTextGlyph* big_glyphs = (RgTextGlyph*)malloc(sizeof(*big_glyphs) * count);
         RgTextKerning* big_pairs = (RgTextKerning*)malloc(sizeof(*big_pairs) * count);

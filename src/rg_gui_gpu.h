@@ -834,6 +834,10 @@ typedef struct RgGuiGpuDesc
 	u32 max_frame_refs;
 	/* GPU-only packed buffers; zero selects one. Valid range is 1..3. */
 	u32 frame_buffer_count;
+	/* Nonzero computes rg_gui_gpu_frame_signature during preparation. Off by
+	 * default: it costs a few nanoseconds per command, only useful to callers
+	 * that skip unchanged frames. */
+	u32 frame_signature;
 } RgGuiGpuDesc;
 
 typedef RgGuiGpuRunDrawDesc RgGuiGpuDrawDesc;
@@ -934,6 +938,7 @@ typedef struct RgGuiGpuRenderer
 	u32 ref_capacity;
 	/* Digest of the last successfully prepared draw list; see rg_gui_gpu_frame_signature. */
 	u64 frame_signature;
+	u32 frame_signature_enabled;
 } RgGuiGpuRenderer;
 
 RGINLINE void rg_gui_gpu_destroy(RgGuiGpuRenderer* renderer);
@@ -1130,6 +1135,7 @@ RGINLINE int rg_gui_gpu_create(RgGuiGpuRenderer* renderer, const RgGuiGpuDesc* d
 	renderer->vertex_capacity = desc->max_geometry_vertices ? desc->max_geometry_vertices : RG_GUI_GPU_DEFAULT_MAX_GEOMETRY_VERTICES;
 	renderer->item_capacity = desc->max_items ? desc->max_items : RG_GUI_GPU_DEFAULT_MAX_ITEMS;
 	renderer->frame_buffer_count = desc->frame_buffer_count ? desc->frame_buffer_count : 1u;
+	renderer->frame_signature_enabled = desc->frame_signature ? 1u : 0u;
 	u64 refs = desc->max_frame_refs ? desc->max_frame_refs : (u64)desc->max_text_instances + renderer->vertex_capacity / 3u;
 	u64 frame_bytes = (u64)desc->max_runs * sizeof(RgGuiRendererRun) +
 	                  (u64)renderer->vertex_capacity * sizeof(RgGuiGpuVertex);
@@ -1375,7 +1381,9 @@ RGINLINE u64 rg_gui_gpu_signature_bytes(u64 hash, const void* data, size_t size)
 	return hash;
 }
 
-/** Digest of the last successful rg_gui_gpu_prepare: command types and order,
+/** Digest of the last successful rg_gui_gpu_prepare, when enabled through
+ * RgGuiGpuDesc.frame_signature or rg_gui_gpu_set_frame_signature (zero when
+ * disabled or after a failed prepare): command types and order,
  * geometry, colors, clips, textures, materials, text scale/content/identity,
  * command count, and the overlay boundary. Two frames with equal signatures
  * draw identical pixels for the same output size, offset, clear color, atlas,
@@ -1385,7 +1393,17 @@ RGINLINE u64 rg_gui_gpu_signature_bytes(u64 hash, const void* data, size_t size)
  * the API contract. Distinct lists collide with 64-bit probability only. */
 RGINLINE u64 rg_gui_gpu_frame_signature(const RgGuiGpuRenderer* renderer)
 {
-	return renderer ? renderer->frame_signature : 0u;
+	return renderer && renderer->frame_signature_enabled ? renderer->frame_signature : 0u;
+}
+
+/** Enable or disable signature computation; RgGuiGpuDesc.frame_signature sets the initial state. */
+RGINLINE void rg_gui_gpu_set_frame_signature(RgGuiGpuRenderer* renderer, int enabled)
+{
+	if (renderer)
+	{
+		renderer->frame_signature_enabled = enabled ? 1u : 0u;
+		renderer->frame_signature = 0u;
+	}
 }
 
 RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_renderer,
@@ -1407,6 +1425,7 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 	int clip_enabled = 0;
 	RgGuiRect clip = {0};
 	u32 run_cursor = 0u;
+	const int sign = renderer->frame_signature_enabled != 0u;
 	u64 signature = rg_gui_renderer_base_mix(0x9e3779b97f4a7c15ull, ((u64)list->count << 32u) | overlay_start);
 
 	for (u32 i = 0u; i < list->count; i++)
@@ -1420,10 +1439,10 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 		}
 
 		const RgGuiDrawCmd* cmd = &list->cmds[i];
-		signature = rg_gui_renderer_base_mix(signature, (u64)cmd->type);
+		if (sign) signature = rg_gui_renderer_base_mix(signature, (u64)cmd->type);
 		if (cmd->type == RG_GUI_CMD_CLIP_PUSH)
 		{
-			signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.clip.rect, sizeof(cmd->data.clip.rect));
+			if (sign) signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.clip.rect, sizeof(cmd->data.clip.rect));
 			if (clip_depth >= RG_GUI_RENDERER_BASE_CLIP_STACK_MAX)
 			{
 				ignored_pushes++;
@@ -1448,10 +1467,14 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 
 		if (cmd->type == RG_GUI_CMD_RECT)
 		{
-			signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.rect.rect, sizeof(cmd->data.rect.rect));
-			signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.rect.color, sizeof(cmd->data.rect.color));
 			u32 first = renderer->vertex_count;
 			u32 color = rg_gui_renderer_base_pack_color(cmd->data.rect.color);
+			if (sign)
+			{
+				/* The packed color is what the GPU reads, so it is what the digest covers. */
+				signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.rect.rect, sizeof(cmd->data.rect.rect));
+				signature = rg_gui_renderer_base_mix(signature, color);
+			}
 			RgGuiRect uv = {0};
 			if (!rg_gui_gpu_add_rect_vertices(renderer, cmd->data.rect.rect, uv, color) ||
 			    !rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_SOLID, 0u, 0u,
@@ -1462,15 +1485,18 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 		}
 		if (cmd->type == RG_GUI_CMD_TRIANGLE)
 		{
-			signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.triangle.a, sizeof(cmd->data.triangle.a));
-			signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.triangle.b, sizeof(cmd->data.triangle.b));
-			signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.triangle.c, sizeof(cmd->data.triangle.c));
-			signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.triangle.color, sizeof(cmd->data.triangle.color));
 			if (renderer->vertex_count > renderer->vertex_capacity ||
 			    renderer->vertex_capacity - renderer->vertex_count < 3u)
 				goto capacity_failure;
 			u32 first = renderer->vertex_count;
 			u32 color = rg_gui_renderer_base_pack_color(cmd->data.triangle.color);
+			if (sign)
+			{
+				signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.triangle.a, sizeof(cmd->data.triangle.a));
+				signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.triangle.b, sizeof(cmd->data.triangle.b));
+				signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.triangle.c, sizeof(cmd->data.triangle.c));
+				signature = rg_gui_renderer_base_mix(signature, color);
+			}
 			RgGuiGpuVertex* out = &renderer->vertices[first];
 			rg_gui_gpu_set_vertex(&out[0], cmd->data.triangle.a.x, cmd->data.triangle.a.y, color, 0.0f, 0.0f);
 			rg_gui_gpu_set_vertex(&out[1], cmd->data.triangle.b.x, cmd->data.triangle.b.y, color, 0.0f, 0.0f);
@@ -1485,13 +1511,16 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 		if (cmd->type == RG_GUI_CMD_IMAGE)
 		{
 			if (!cmd->data.image.texture) continue;
-			signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.image.rect, sizeof(cmd->data.image.rect));
-			signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.image.uv, sizeof(cmd->data.image.uv));
-			signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.image.color, sizeof(cmd->data.image.color));
-			signature = rg_gui_renderer_base_mix(signature, (u64)cmd->data.image.texture);
-			signature = rg_gui_renderer_base_mix(signature, (u64)cmd->data.image.material);
 			u32 first = renderer->vertex_count;
 			u32 color = rg_gui_renderer_base_pack_color(cmd->data.image.color);
+			if (sign)
+			{
+				signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.image.rect, sizeof(cmd->data.image.rect));
+				signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.image.uv, sizeof(cmd->data.image.uv));
+				signature = rg_gui_renderer_base_mix(signature, color);
+				signature = rg_gui_renderer_base_mix(signature, (u64)cmd->data.image.texture);
+				signature = rg_gui_renderer_base_mix(signature, (u64)cmd->data.image.material);
+			}
 			if (!rg_gui_gpu_add_rect_vertices(renderer, cmd->data.image.rect,
 			                                  cmd->data.image.uv, color) ||
 			    !rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_IMAGE,
@@ -1503,8 +1532,11 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 		}
 		if (cmd->type == RG_GUI_CMD_TEXT)
 		{
-			signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.text.pos, sizeof(cmd->data.text.pos));
-			signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.text.color, sizeof(cmd->data.text.color));
+			if (sign)
+			{
+				signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.text.pos, sizeof(cmd->data.text.pos));
+				signature = rg_gui_renderer_base_mix(signature, rg_gui_renderer_base_pack_color(cmd->data.text.color));
+			}
 			if (run_cursor >= renderer->text_prepared->run_count) continue;
 			const RgGuiRendererRun* first_run = &renderer->text_prepared->runs[run_cursor];
 			/* A skipped command has no segments. Match the recorded source index
@@ -1523,12 +1555,15 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 				goto capacity_failure;
 		}
 	}
-	/* Text scale and bytes (or identity) enter through the renderer's key digest. */
-	signature = rg_gui_renderer_base_mix(signature, text_renderer->core.frame_content_hash);
-	signature ^= signature >> 33u;
-	signature *= 0xff51afd7ed558ccdull;
-	signature ^= signature >> 33u;
-	renderer->frame_signature = signature ? signature : 1u;
+	if (sign)
+	{
+		/* Text scale and bytes (or identity) enter through the renderer's key digest. */
+		signature = rg_gui_renderer_base_mix(signature, text_renderer->core.frame_content_hash);
+		signature ^= signature >> 33u;
+		signature *= 0xff51afd7ed558ccdull;
+		signature ^= signature >> 33u;
+		renderer->frame_signature = signature ? signature : 1u;
+	}
 	return 1;
 
 capacity_failure:
