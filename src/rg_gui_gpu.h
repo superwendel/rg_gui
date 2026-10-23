@@ -1409,11 +1409,12 @@ RGINLINE void rg_gui_gpu_set_frame_signature(RgGuiGpuRenderer* renderer, int ena
 RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_renderer,
                                 const RgGuiDrawList* list, u32 overlay_start)
 {
+	/* Any failure, including rejected arguments, leaves no stale digest behind. */
+	if (renderer) renderer->frame_signature = 0u;
 	if (!renderer || !text_renderer || !list || (list->count && !list->cmds)) return 0;
 	renderer->vertex_count = 0u;
 	renderer->item_count = 0u;
 	renderer->text_prepared = NULL;
-	renderer->frame_signature = 0u;
 	if (!rg_gui_renderer_prepare(text_renderer, list, overlay_start)) return 0;
 	renderer->text_prepared = rg_gui_renderer_prepared(text_renderer);
 	if (!renderer->text_prepared) return 0;

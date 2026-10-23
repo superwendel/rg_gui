@@ -1030,6 +1030,13 @@ static int test_frame_signature(void)
 	TEST_CHECK(!rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, list.count));
 	TEST_CHECK(rg_gui_gpu_frame_signature(&fixture.gpu) == 0u);
 	TEST_CHECK(rg_gui_gpu_frame_signature(NULL) == 0u);
+	/* Rejected arguments also clear a digest left by an earlier success. */
+	fixture.gpu.vertex_capacity = RG_ARRAY_COUNT(fixture.vertices);
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, list.count));
+	TEST_CHECK(rg_gui_gpu_frame_signature(&fixture.gpu) == signatures[0]);
+	TEST_CHECK(!rg_gui_gpu_prepare(&fixture.gpu, NULL, &list, list.count));
+	TEST_CHECK(rg_gui_gpu_frame_signature(&fixture.gpu) == 0u);
 	free(fixture.memory);
 	return 1;
 }
