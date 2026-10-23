@@ -586,6 +586,10 @@ typedef struct DemoTileTarget
 	RgGuiTileCache cache;
 	int enabled;
 	int verify_enabled;
+	/* When no tile changed, neither draw nor present: the swapchain keeps the
+	 * last image. Verify mode presents every frame so it can compare. */
+	int skip_present;
+	u32 skipped_frames;
 	u32 verify_interval;
 	u64 frames;
 	u32 verified_frames;
@@ -989,11 +993,56 @@ RGINLINE int demo_render_draw_list_tiled(SDL_GPUDevice* device, SDL_Window* wind
 		stage_start = now;
 	}
 
+	/* Decide what needs repainting before acquiring a swapchain image, because
+	 * SDL forbids cancelling a command buffer after acquisition. The window's
+	 * pixel size normally equals the swapchain size; a mismatch (resize in
+	 * flight) is detected after acquisition and redone as a full redraw. */
+	int pixel_width = 0;
+	int pixel_height = 0;
+	if (!SDL_GetWindowSizeInPixels(window, &pixel_width, &pixel_height) ||
+	    pixel_width <= 0 || pixel_height <= 0)
+	{
+		SDL_CancelGPUCommandBuffer(command_buffer);
+		goto encode_failed;
+	}
+	u32 width = (u32)pixel_width;
+	u32 height = (u32)pixel_height;
+	if (!demo_tile_target_ensure(device, tiles, width, height))
+	{
+		SDL_CancelGPUCommandBuffer(command_buffer);
+		goto done;
+	}
+	u64 tile_start = SDL_GetTicksNS();
+	RgGuiTileRedraw mode = rg_gui_tile_cache_update(&tiles->cache, gpu, text_renderer, draw_list,
+	                                                overlay_start, width, height, 0.0f, 0.0f);
+	if (metrics)
+	{
+		metrics->tile_update_ms = (double)(SDL_GetTicksNS() - tile_start) / 1000000.0;
+		metrics->tile_mode = (u32)mode;
+		metrics->tiles_dirty = tiles->cache.stats.dirty_tiles;
+		metrics->tiles_total = tiles->cache.stats.total_tiles;
+		metrics->tile_rects = tiles->cache.stats.rects;
+	}
+	tiles->frames++;
+	tiles->total_tile_sum += tiles->cache.stats.total_tiles;
+	tiles->dirty_tile_sum += mode == RG_GUI_TILE_REDRAW_FULL ? tiles->cache.stats.total_tiles
+	                                                          : tiles->cache.stats.dirty_tiles;
+	if (mode == RG_GUI_TILE_REDRAW_NONE && tiles->skip_present && !tiles->verify_enabled)
+	{
+		/* The committed target already holds this frame and the swapchain shows
+		 * it. Drop the command buffer; uncommitted cache pages stay pending. */
+		SDL_CancelGPUCommandBuffer(command_buffer);
+		tiles->skipped_frames++;
+		if (metrics) metrics->skipped = 1;
+		result = 1;
+		goto done;
+	}
+
 	SDL_GPUTexture* swapchain = NULL;
-	u32 width = 0u;
-	u32 height = 0u;
+	u32 swapchain_width = 0u;
+	u32 swapchain_height = 0u;
 	int acquired = SDL_WaitAndAcquireGPUSwapchainTexture(command_buffer, window, &swapchain,
-	                                                     &width, &height);
+	                                                     &swapchain_width, &swapchain_height);
 	if (metrics)
 	{
 		u64 now = SDL_GetTicksNS();
@@ -1014,33 +1063,24 @@ RGINLINE int demo_render_draw_list_tiled(SDL_GPUDevice* device, SDL_Window* wind
 		result = submitted;
 		goto done;
 	}
-
-	if (!demo_tile_target_ensure(device, tiles, width, height))
+	if (swapchain_width != width || swapchain_height != height)
 	{
-		/* SDL forbids cancellation after acquisition; submit the uploads so the
-		 * packet protocol stays consistent, then report the failure. */
-		char error[512];
-		SDL_strlcpy(error, SDL_GetError(), sizeof(error));
-		if (SDL_SubmitGPUCommandBuffer(command_buffer)) rg_gui_gpu_upload_commit(gpu, &upload);
-		SDL_SetError("%s", error[0] ? error : "Could not create the dirty-tile targets");
-		goto done;
+		width = swapchain_width;
+		height = swapchain_height;
+		if (!demo_tile_target_ensure(device, tiles, width, height))
+		{
+			/* Cannot cancel after acquisition: submit the uploads so the packet
+			 * protocol stays consistent, then report the failure. */
+			char error[512];
+			SDL_strlcpy(error, SDL_GetError(), sizeof(error));
+			if (SDL_SubmitGPUCommandBuffer(command_buffer)) rg_gui_gpu_upload_commit(gpu, &upload);
+			SDL_SetError("%s", error[0] ? error : "Could not create the dirty-tile targets");
+			goto done;
+		}
+		mode = rg_gui_tile_cache_update(&tiles->cache, gpu, text_renderer, draw_list,
+		                                overlay_start, width, height, 0.0f, 0.0f);
+		if (metrics) metrics->tile_mode = (u32)mode;
 	}
-
-	u64 tile_start = SDL_GetTicksNS();
-	RgGuiTileRedraw mode = rg_gui_tile_cache_update(&tiles->cache, gpu, text_renderer, draw_list,
-	                                                overlay_start, width, height, 0.0f, 0.0f);
-	if (metrics)
-	{
-		metrics->tile_update_ms = (double)(SDL_GetTicksNS() - tile_start) / 1000000.0;
-		metrics->tile_mode = (u32)mode;
-		metrics->tiles_dirty = tiles->cache.stats.dirty_tiles;
-		metrics->tiles_total = tiles->cache.stats.total_tiles;
-		metrics->tile_rects = tiles->cache.stats.rects;
-	}
-	tiles->frames++;
-	tiles->total_tile_sum += tiles->cache.stats.total_tiles;
-	tiles->dirty_tile_sum += mode == RG_GUI_TILE_REDRAW_FULL ? tiles->cache.stats.total_tiles
-	                                                          : tiles->cache.stats.dirty_tiles;
 
 	RgGuiGpuDrawDesc draw_desc = {0};
 	draw_desc.output_width = width;

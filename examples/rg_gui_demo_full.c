@@ -599,12 +599,15 @@ typedef enum FullProfileScenario
 {
 	FULL_PROFILE_MANUAL, FULL_PROFILE_IDLE, FULL_PROFILE_TEXT_IDLE,
 	FULL_PROFILE_EDIT, FULL_PROFILE_SCROLL, FULL_PROFILE_RESIZE, FULL_PROFILE_IMAGES,
-	FULL_PROFILE_IMAGES_GROUPED
+	FULL_PROFILE_IMAGES_GROUPED,
+	/* Like idle, but after warmup the statistics and animation freeze so every
+	 * frame is identical: the case where a cached renderer can present nothing. */
+	FULL_PROFILE_STATIC
 } FullProfileScenario;
 
 static int full_profile_scenario(const char* name)
 {
-	static const char* names[] = {"manual", "idle", "text-idle", "edit", "scroll", "resize", "images", "images-grouped"};
+	static const char* names[] = {"manual", "idle", "text-idle", "edit", "scroll", "resize", "images", "images-grouped", "static"};
 	for (u32 i = 0u; i < RG_ARRAY_COUNT(names); i++)
 		if (strcmp(name, names[i]) == 0) return (int)i;
 	return -1;
@@ -725,6 +728,7 @@ int main(int argc, char** argv)
 	int capture_wait_ms = 0;
 	int tile_cache = 0;
 	int tile_verify = 0;
+	int tile_skip_present = 0;
 	int tile_verify_interval = 1;
 	DemoProfileOptions profile_options;
 	demo_profile_options_init(&profile_options);
@@ -755,6 +759,7 @@ int main(int argc, char** argv)
 		}
 		else if (strcmp(argv[i], "--tile-cache") == 0) tile_cache = 1;
 		else if (strcmp(argv[i], "--tile-cache-verify") == 0) tile_cache = tile_verify = 1;
+		else if (strcmp(argv[i], "--tile-cache-skip-present") == 0) tile_cache = tile_skip_present = 1;
 		else if (strcmp(argv[i], "--tile-verify-interval") == 0 && i + 1 < argc)
 		{
 			tile_verify_interval = atoi(argv[++i]);
@@ -894,6 +899,7 @@ int main(int argc, char** argv)
 	if (tile_cache && !demo_tile_target_init(&tiles, gpu_desc.target_format, tile_verify,
 	                                         (u32)tile_verify_interval))
 		goto cleanup;
+	tiles.skip_present = tile_skip_present;
 
 	rg_input_init(&input);
 	RgInputEvent input_event_storage[256];
@@ -961,7 +967,10 @@ int main(int argc, char** argv)
 		previous_ticks = ticks;
 		f32 delta_time = frame_time;
 		if (delta_time > 0.1f) delta_time = 0.1f;
-		full_update_stats(&state, frame_time, delta_time);
+		/* The static scenario freezes everything that changes per frame once
+		 * warmup ends, so the draw list repeats exactly. */
+		int frozen = profile_scenario == FULL_PROFILE_STATIC && sample.frame >= profile_options.warmup;
+		if (!frozen) full_update_stats(&state, frame_time, delta_time);
 
 		int width = 0;
 		int height = 0;
@@ -1006,7 +1015,12 @@ int main(int argc, char** argv)
 		sample.frame_work_ms = demo_profile_elapsed_ms(frame_start);
 		if (!demo_profile_capture_append(&profile_capture, &sample)) goto cleanup;
 		// Refresh numeric telemetry at 15-frame intervals to limit self-induced text churn.
-		if (sample.frame % 15u == 0u) state.previous_profile = sample;
+		if (sample.frame % 15u == 0u && !frozen) state.previous_profile = sample;
+		if (sample.main.skipped)
+		{
+			/* Nothing was submitted, so the swapchain cannot pace the loop. */
+			SDL_WaitEventTimeout(NULL, 16);
+		}
 
 		submitted_frames++;
 		presented_frames += presented;
@@ -1038,9 +1052,9 @@ int main(int argc, char** argv)
 	if (tile_cache)
 	{
 		const RgGuiTileCacheStats* ts = rg_gui_tile_cache_stats(&tiles.cache);
-		printf("Dirty tiles: %llu full, %llu partial, %llu skipped frames; %.1f%% of tiles repainted on average\n",
+		printf("Dirty tiles: %llu full, %llu partial, %llu unchanged frames (%u not presented); %.1f%% of tiles repainted on average\n",
 		       (unsigned long long)ts->total_full_redraws, (unsigned long long)ts->total_partial_redraws,
-		       (unsigned long long)ts->total_skipped_frames,
+		       (unsigned long long)ts->total_skipped_frames, tiles.skipped_frames,
 		       tiles.total_tile_sum ? 100.0 * (double)tiles.dirty_tile_sum / (double)tiles.total_tile_sum : 0.0);
 		if (tiles.verify_enabled)
 		{

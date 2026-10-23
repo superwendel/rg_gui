@@ -297,11 +297,57 @@ repaints the window on every present regardless of how little changed, which
 would make per-present work dominate whatever the render pass saves. So what
 is demonstrated is the showcase's frame-work reduction in Immediate mode, with
 the whole-system indicators moving the same way; whether any of it reaches the
-battery under a compositor is not demonstrated here. An application whose UI
-is static between inputs reaches `RG_GUI_TILE_REDRAW_NONE`, where no draw and
-no present are needed; the showcase cannot show that because of its animation.
-Measuring that case, and measuring on an uncomposited or Wayland session, is
-the remaining experiment.
+battery under a compositor is not demonstrated here.
+
+### The static case: not presenting is the lever
+
+The `static` scenario freezes the showcase after warmup so every frame is
+identical, and `--tile-cache-skip-present` makes a frame with no dirty tiles
+neither draw nor present: the swapchain keeps the last image and the loop
+waits for input with a 16 ms timeout. Verify mode confirmed the frozen frames
+identical by readback (400 compared, 0 mismatches). Four alternating rounds at
+VSync, 600 measured frames each, three variants in rotating order
+(`benchmarks/measure_tiles.py static vsync 600 4 ...`):
+
+| static scenario, VSync | direct | tile cache, present every frame | tile cache, skip unchanged presents |
+| --- | ---: | ---: | ---: |
+| frames presented (of 600) | 600 | 600 | 1 |
+| GPU time outside RC6 idle per frame | 4.25 ms [4.03-4.30] | 3.71 ms [3.64-3.75] | 1.65 ms [1.58-1.68] |
+| package energy per frame | 85.6 mJ [77-208] | 79.6 mJ [76-166] | 60.5 mJ [58.7-61.6] |
+| lower than direct | | 4/4 and 3/4 pairs | 4/4 and 4/4 pairs |
+
+What this does and does not show:
+
+- The GPU-activity result is solid. An independent rerun (Codex, 2026-10-23)
+  measured 4.61, 4.05, and 2.06 ms for the three variants, the skip variant
+  lower in 4 of 4 rounds, about 55 percent against this run's 61. Both are
+  whole-device counters, so what is established is that the device spends far
+  less time active when unchanged frames are not presented.
+- The energy result is not established. This run's direct column caught a
+  background spike, the independent rerun found the skip variant lower in only
+  2 of 4 rounds with essentially unchanged average power, and the skip variant
+  is paced by a 16 ms wait rather than the 16.7 ms swapchain, which biases its
+  energy per frame low by about 4 percent before any real saving. The script
+  now also reports average power, the fair unit across variants. A dependable
+  battery claim needs a quiet machine and several matched-duration rounds; the
+  earlier "29 percent, 1.5 W" figure should not be quoted.
+- The attribution is a hypothesis. Skipping a frame removes rg_gui's own
+  upload encoding, the full-window blit, and the submission as well as the
+  present and whatever the compositor does with it. The measurement shows that
+  this per-present path costs about 2 ms of GPU activity per frame on this X11
+  desktop whether one pixel or every pixel changed; how much of that is the
+  compositor was not isolated.
+
+The conclusion for integrators still follows from the GPU-activity result:
+the article's level one matters more than its level two here. Detect unchanged
+frames and present nothing. Both mechanisms in this library do that.
+`rg_gui_gpu_frame_signature` is the cheap whole-frame test for applications
+that draw straight into the swapchain; the tile cache adds partial repaints
+for applications with a persistent target, whose `RG_GUI_TILE_REDRAW_NONE`
+result should be treated as "do not present." A frame that changes a few tiles
+still has to be presented, and on this desktop the per-present path costs more
+GPU activity than the partial repaint saves. Wayland or an uncomposited session
+may change that balance; it was not measured.
 
 ## Remaining opportunities, in priority order
 

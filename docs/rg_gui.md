@@ -548,9 +548,15 @@ Three contracts make this exact rather than approximate:
   an image or atlas texture changes, and `rg_gui_tile_cache_invalidate` after a
   clear-color or target change.
 
-The full demo's `--tile-cache` flag uses it; `--tile-cache-verify` also renders
-a full repaint every frame and compares both by GPU readback, failing the run
-on any difference or incomplete comparison. Storage is caller-owned and fixed;
+Treat `RG_GUI_TILE_REDRAW_NONE` as "do not present": on the desktop measured,
+the per-present path (uploads, blit, submission, and presentation) costs more
+GPU activity than a partial repaint saves, and a frame that changes nothing
+needs neither (see the
+[audit's static measurement](performance-audit-2026-10.md#the-static-case-not-presenting-is-the-lever)).
+The full demo's `--tile-cache` flag uses the cache, `--tile-cache-skip-present`
+also skips drawing and presenting unchanged frames, and `--tile-cache-verify`
+renders a full repaint every frame and compares both by GPU readback, failing
+the run on any difference or incomplete comparison. Storage is caller-owned and fixed;
 tiles beyond `tile_capacity` or more dirty rectangles than `rect_capacity`
 fall back to a full redraw. Measured results are in the
 [performance audit](performance-audit-2026-10.md#level-two-dirty-tiles).
