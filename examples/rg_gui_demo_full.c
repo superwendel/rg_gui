@@ -535,6 +535,10 @@ static void full_draw_graph(RgGuiContext* gui, FullDemoState* state, u32 window_
 
 static void full_build_ui(RgGuiContext* gui, FullDemoState* state, int width, int height)
 {
+	/* Paint the backdrop so every pixel belongs to a command; dirty-rectangle
+	 * repaints rely on it, and the direct path draws the same list. */
+	rg_gui_push_rect(gui, rg_gui_make_rect(0.0f, 0.0f, (f32)width, (f32)height),
+	                 rg_gui_color(DEMO_CLEAR_R, DEMO_CLEAR_G, DEMO_CLEAR_B, 1.0f));
 	full_draw_menu(gui, state, width);
 	RgGuiRect bounds = rg_gui_make_rect(0.0f, 28.0f, (f32)width, (f32)height - 28.0f);
 	if (bounds.h < 0.0f) bounds.h = 0.0f;
@@ -719,6 +723,9 @@ int main(int argc, char** argv)
 	SDL_GPUPresentMode start_present_mode = SDL_GPU_PRESENTMODE_VSYNC;
 	int smoke_test = 0;
 	int capture_wait_ms = 0;
+	int tile_cache = 0;
+	int tile_verify = 0;
+	int tile_verify_interval = 1;
 	DemoProfileOptions profile_options;
 	demo_profile_options_init(&profile_options);
 	DemoProfileCapture profile_capture = {0};
@@ -746,6 +753,13 @@ int main(int argc, char** argv)
 			frame_limit = atoi(argv[++i]);
 			if (frame_limit < 1) frame_limit = 1;
 		}
+		else if (strcmp(argv[i], "--tile-cache") == 0) tile_cache = 1;
+		else if (strcmp(argv[i], "--tile-cache-verify") == 0) tile_cache = tile_verify = 1;
+		else if (strcmp(argv[i], "--tile-verify-interval") == 0 && i + 1 < argc)
+		{
+			tile_verify_interval = atoi(argv[++i]);
+			if (tile_verify_interval < 1 || tile_verify_interval > 100000) return 1;
+		}
 		else
 		{
 			fprintf(stderr, "Unknown or incomplete option: %s\n", argv[i]);
@@ -771,6 +785,7 @@ int main(int argc, char** argv)
 	SDL_GPUTexture* profile_atlas = NULL;
 	RgGuiGpuRenderer gpu = {0};
 	RgGpuUploadRing upload_ring = {0};
+	DemoTileTarget tiles = {0};
 	DemoFontAssets demo_font = {0};
 	DemoPlatformState platform_state = {0};
 	RgInputState input = {0};
@@ -876,6 +891,9 @@ int main(int argc, char** argv)
 	if (!rg_gui_gpu_create(&gpu, &gpu_desc)) goto cleanup;
 	if (!rg_gpu_upload_ring_init(&upload_ring, device,
 	                            rg_gui_gpu_upload_ring_size_required(&gpu))) goto cleanup;
+	if (tile_cache && !demo_tile_target_init(&tiles, gpu_desc.target_format, tile_verify,
+	                                         (u32)tile_verify_interval))
+		goto cleanup;
 
 	rg_input_init(&input);
 	RgInputEvent input_event_storage[256];
@@ -973,8 +991,15 @@ int main(int argc, char** argv)
 			goto cleanup;
 		sample.platform_ms = demo_profile_elapsed_ms(platform_start);
 		int presented = 0;
-		if (!demo_render_frame_profiled(device, window, &gpu, &text_renderer, &upload_ring, &gui,
-		                                &presented, &sample.main))
+		if (tile_cache)
+		{
+			if (!demo_render_draw_list_tiled(device, window, &gpu, &text_renderer, &upload_ring,
+			                                 rg_gui_draw_list(&gui), rg_gui_draw_list_overlay_start(&gui),
+			                                 &tiles, &presented, &sample.main))
+				goto cleanup;
+		}
+		else if (!demo_render_frame_profiled(device, window, &gpu, &text_renderer, &upload_ring, &gui,
+		                                     &presented, &sample.main))
 			goto cleanup;
 		const RgGuiDrawList* completed_draw_list = rg_gui_draw_list(&gui);
 		state.previous_draw_command_count = completed_draw_list ? completed_draw_list->count : 0u;
@@ -1010,12 +1035,32 @@ int main(int argc, char** argv)
 	}
 	printf("rg_gui full showcase completed %d submitted frame%s (%d presented)\n",
 	       submitted_frames, submitted_frames == 1 ? "" : "s", presented_frames);
+	if (tile_cache)
+	{
+		const RgGuiTileCacheStats* ts = rg_gui_tile_cache_stats(&tiles.cache);
+		printf("Dirty tiles: %llu full, %llu partial, %llu skipped frames; %.1f%% of tiles repainted on average\n",
+		       (unsigned long long)ts->total_full_redraws, (unsigned long long)ts->total_partial_redraws,
+		       (unsigned long long)ts->total_skipped_frames,
+		       tiles.total_tile_sum ? 100.0 * (double)tiles.dirty_tile_sum / (double)tiles.total_tile_sum : 0.0);
+		if (tiles.verify_enabled)
+		{
+			printf("Tile verification: %u frames compared by readback, %u mismatched, %u comparisons failed\n",
+			       tiles.verified_frames, tiles.mismatched_frames, tiles.verify_failures);
+			if (tiles.mismatched_frames || tiles.verify_failures || !tiles.verified_frames)
+			{
+				SDL_SetError("Dirty-tile verification failed: %u mismatched, %u incomplete, %u compared",
+				             tiles.mismatched_frames, tiles.verify_failures, tiles.verified_frames);
+				goto cleanup;
+			}
+		}
+	}
 	result = 0;
 
 cleanup:
 	if (result != 0) fprintf(stderr, "rg_gui full showcase failed: %s\n", SDL_GetError());
 	if (device) rg_gpu_wait_idle(device);
 	rg_gpu_upload_ring_destroy(&upload_ring);
+	demo_tile_target_destroy(device, &tiles);
 	rg_gui_gpu_destroy(&gpu);
 	free(text_memory);
 	free(gui_memory);

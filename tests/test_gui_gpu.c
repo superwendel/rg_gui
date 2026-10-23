@@ -2,6 +2,7 @@
 
 #define RG_SPRINTF_NO_ASM 1
 #include "../src/rg_gui_gpu.h"
+#include "../src/rg_gui_gpu_tiles.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1041,6 +1042,236 @@ static int test_frame_signature(void)
 	return 1;
 }
 
+/* Dirty-tile detection: identical frames are skipped, a moved rectangle dirties
+ * only its tiles, text content changes dirty the text's tiles, and size or
+ * revision changes force a full redraw. 128x128 output = 2x2 tiles of 64. */
+static int test_tile_cache(void)
+{
+	TestGpuFixture fixture;
+	TEST_CHECK(test_fixture_init(&fixture, test_limits()));
+	u64 hashes[16], previous[16];
+	SDL_Rect rects[8];
+	RgGuiTileCache cache;
+	TEST_CHECK(!rg_gui_tile_cache_init(&cache, NULL, previous, rects, 16u, 8u));
+	TEST_CHECK(rg_gui_tile_cache_init(&cache, hashes, previous, rects, 16u, 8u));
+	TEST_CHECK(rg_gui_tile_cache_tiles_required(128u, 128u) == 4u);
+	TEST_CHECK(rg_gui_tile_cache_tiles_required(129u, 1u) == 3u);
+
+	char mutable_text[8] = "A";
+	RgGuiDrawCmd cmds[4];
+	cmds[0] = test_rect_command(); /* 0,0 10x10: tile (0,0) */
+	cmds[1].type = RG_GUI_CMD_RECT;
+	cmds[1].data.rect.rect = rg_gui_make_rect(100.0f, 100.0f, 20.0f, 20.0f); /* tile (1,1) */
+	cmds[1].data.rect.color = rg_gui_color(1.0f, 0.0f, 0.0f, 1.0f);
+	cmds[2] = test_text_command(mutable_text, 1.0f, 0); /* pos 10,20: tile (0,0) */
+	cmds[3].type = RG_GUI_CMD_IMAGE;
+	cmds[3].data.image.rect = rg_gui_make_rect(70.0f, 10.0f, 8.0f, 8.0f); /* tile (1,0) */
+	cmds[3].data.image.uv = rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f);
+	cmds[3].data.image.color = rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f);
+	cmds[3].data.image.texture = (RgGuiTexture)(uintptr_t)1u;
+	cmds[3].data.image.material = 0u;
+	RgGuiDrawList list = {cmds, 4u, 4u};
+
+#define TILE_PREPARE() do { rg_gui_renderer_begin_frame(&fixture.text); \
+	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, list.count)); } while (0)
+
+	TILE_PREPARE();
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &list, list.count, 128u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
+	TEST_CHECK(cache.stats.total_tiles == 4u && cache.stats.commands == 4u);
+	/* Not committed: the frame never reached the target, so it stays full. */
+	TILE_PREPARE();
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &list, list.count, 128u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
+	rg_gui_tile_cache_commit(&cache);
+
+	TILE_PREPARE();
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &list, list.count, 128u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_NONE);
+	TEST_CHECK(cache.stats.dirty_tiles == 0u && cache.stats.rects == 0u);
+
+	/* Move the red rectangle from tile (1,1) to tile (0,1): both tiles change. */
+	cmds[1].data.rect.rect.x = 20.0f;
+	TILE_PREPARE();
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &list, list.count, 128u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_PARTIAL);
+	TEST_CHECK(cache.stats.dirty_tiles == 2u && cache.stats.rects == 1u);
+	TEST_CHECK(cache.rects[0].x == 0 && cache.rects[0].y == 64 && cache.rects[0].w == 128 && cache.rects[0].h == 64);
+	rg_gui_tile_cache_commit(&cache);
+
+	/* Change the text bytes behind the same address: only tile (0,0). */
+	memcpy(mutable_text, "AA", 3u);
+	TILE_PREPARE();
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &list, list.count, 128u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_PARTIAL);
+	TEST_CHECK(cache.stats.dirty_tiles == 1u && cache.stats.rects == 1u);
+	TEST_CHECK(cache.rects[0].x == 0 && cache.rects[0].y == 0 && cache.rects[0].w == 64 && cache.rects[0].h == 64);
+	rg_gui_tile_cache_commit(&cache);
+
+	/* A color change on the image dirties only tile (1,0); an identical frame after commit is clean. */
+	cmds[3].data.image.color.x = 0.5f;
+	TILE_PREPARE();
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &list, list.count, 128u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_PARTIAL);
+	TEST_CHECK(cache.stats.dirty_tiles == 1u && cache.rects[0].x == 64 && cache.rects[0].y == 0);
+	rg_gui_tile_cache_commit(&cache);
+	TILE_PREPARE();
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &list, list.count, 128u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_NONE);
+
+	/* A clip change over the text changes its pixels even with identical commands. */
+	RgGuiDrawCmd clipped[6];
+	clipped[0] = cmds[0];
+	clipped[1] = cmds[1];
+	clipped[2].type = RG_GUI_CMD_CLIP_PUSH;
+	clipped[2].data.clip.rect = rg_gui_make_rect(0.0f, 0.0f, 12.0f, 40.0f);
+	clipped[3] = cmds[2];
+	clipped[4].type = RG_GUI_CMD_CLIP_POP;
+	clipped[5] = cmds[3];
+	RgGuiDrawList clipped_list = {clipped, 6u, 6u};
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &clipped_list, clipped_list.count));
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &clipped_list, clipped_list.count, 128u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_PARTIAL);
+	TEST_CHECK(cache.stats.dirty_tiles == 1u && cache.rects[0].x == 0 && cache.rects[0].y == 0);
+	rg_gui_tile_cache_commit(&cache);
+
+	/* Output size, draw offset, and external revision changes force full redraws. */
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &clipped_list, clipped_list.count));
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &clipped_list, clipped_list.count, 200u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
+	rg_gui_tile_cache_commit(&cache);
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &clipped_list, clipped_list.count));
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &clipped_list, clipped_list.count, 200u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_NONE);
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &clipped_list, clipped_list.count, 200u, 128u, 1.0f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
+	rg_gui_tile_cache_commit(&cache);
+	cache.external_revision++;
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &clipped_list, clipped_list.count, 200u, 128u, 1.0f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
+	rg_gui_tile_cache_commit(&cache);
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &clipped_list, clipped_list.count, 200u, 128u, 1.0f, 0.0f) == RG_GUI_TILE_REDRAW_NONE);
+	rg_gui_tile_cache_invalidate(&cache);
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &clipped_list, clipped_list.count, 200u, 128u, 1.0f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
+
+	/* Too many tiles for the storage: full redraw, never a partial one, and a
+	 * commit afterwards must not revalidate the digests of an older frame. */
+	rg_gui_tile_cache_invalidate(&cache);
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &clipped_list, clipped_list.count, 200u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
+	rg_gui_tile_cache_commit(&cache);
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &clipped_list, clipped_list.count, 2048u, 2048u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
+	rg_gui_tile_cache_commit(&cache);
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &clipped_list, clipped_list.count, 200u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
+	rg_gui_tile_cache_commit(&cache);
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &clipped_list, clipped_list.count, 200u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_NONE);
+
+	/* Fractional clips: the renderer floors and ceils its scissor, so a command
+	 * whose exact float intersection with the clip is empty can still paint. */
+	RgGuiDrawCmd fractional[3];
+	fractional[0].type = RG_GUI_CMD_CLIP_PUSH;
+	fractional[0].data.clip.rect = rg_gui_make_rect(0.9f, 0.0f, 1.0f, 10.0f);
+	fractional[1] = test_rect_command();
+	fractional[1].data.rect.rect = rg_gui_make_rect(0.1f, 0.0f, 0.7f, 10.0f);
+	fractional[2].type = RG_GUI_CMD_CLIP_POP;
+	RgGuiDrawList fractional_list = {fractional, 3u, 3u};
+	rg_gui_tile_cache_invalidate(&cache);
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &fractional_list, fractional_list.count));
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &fractional_list, fractional_list.count, 128u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
+	TEST_CHECK(cache.stats.commands == 1u);
+	rg_gui_tile_cache_commit(&cache);
+	fractional[1].data.rect.color = rg_gui_color(0.0f, 1.0f, 0.0f, 1.0f);
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &fractional_list, fractional_list.count));
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &fractional_list, fractional_list.count, 128u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_PARTIAL);
+	TEST_CHECK(cache.stats.dirty_tiles == 1u && cache.rects[0].x == 0 && cache.rects[0].y == 0);
+	rg_gui_tile_cache_commit(&cache);
+
+	/* Pixel bounds must agree with the renderer's scissor for any rectangle and
+	 * draw offset, including the (x + w) + offset association. */
+	{
+		u32 state = 0x2545F491u;
+		RgGuiTileCache probe;
+		u64 ph[1024], pp[1024];
+		SDL_Rect pr[16];
+		TEST_CHECK(rg_gui_tile_cache_init(&probe, ph, pp, pr, 1024u, 16u));
+		probe.width = 4096u;
+		probe.height = 4096u;
+		for (u32 n = 0u; n < 20000u; n++)
+		{
+			f32 values[6];
+			for (u32 v = 0u; v < 6u; v++)
+			{
+				state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+				values[v] = (f32)(state % 400000u) / 97.0f - 200.0f;
+			}
+			RgGuiRect rect = rg_gui_make_rect(values[0], values[1], values[2] < 0.0f ? -values[2] : values[2],
+			                                  values[3] < 0.0f ? -values[3] : values[3]);
+			probe.offset_x = values[4];
+			probe.offset_y = values[5];
+			RgGuiGpuDrawDesc desc = {0};
+			desc.output_width = 4096u;
+			desc.output_height = 4096u;
+			desc.offset_x = probe.offset_x;
+			desc.offset_y = probe.offset_y;
+			desc.viewport = (SDL_Rect){0, 0, 4096, 4096};
+			SDL_Rect scissor = rg_gui_gpu_scissor(rect, 1, &desc);
+			RgGuiTilePixelRect pixels = rg_gui_tile_pixel_rect(&probe, rect);
+			if (scissor.w <= 0 || scissor.h <= 0)
+			{
+				TEST_CHECK(pixels.x1 <= pixels.x0 || pixels.y1 <= pixels.y0 ||
+				           pixels.x1 - pixels.x0 <= 0 || pixels.y1 - pixels.y0 <= 0 ||
+				           scissor.w == 0 || scissor.h == 0);
+				continue;
+			}
+			TEST_CHECK(pixels.x0 == scissor.x && pixels.y0 == scissor.y &&
+			           pixels.x1 == scissor.x + scissor.w && pixels.y1 == scissor.y + scissor.h);
+		}
+	}
+
+	/* The fractional case again, with a draw offset that changes float rounding. */
+	rg_gui_tile_cache_invalidate(&cache);
+	fractional[0].data.clip.rect = rg_gui_make_rect(63.9f, 0.0f, 1.0f, 10.0f);
+	fractional[1].data.rect.rect = rg_gui_make_rect(63.1f, 0.0f, 0.7f, 10.0f);
+	fractional[1].data.rect.color = rg_gui_color(1.0f, 0.0f, 0.0f, 1.0f);
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &fractional_list, fractional_list.count));
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &fractional_list, fractional_list.count, 128u, 128u, 0.3f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
+	rg_gui_tile_cache_commit(&cache);
+	fractional[1].data.rect.color = rg_gui_color(0.0f, 1.0f, 0.0f, 1.0f);
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &fractional_list, fractional_list.count));
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &fractional_list, fractional_list.count, 128u, 128u, 0.3f, 0.0f) == RG_GUI_TILE_REDRAW_PARTIAL);
+	TEST_CHECK(cache.stats.dirty_tiles >= 1u);
+	rg_gui_tile_cache_commit(&cache);
+
+	/* An uncommitted update at a new size or offset must not make the next update
+	 * at that size comparable to the older committed frame. */
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &fractional_list, fractional_list.count, 128u, 128u, 0.3f, 0.0f) == RG_GUI_TILE_REDRAW_NONE);
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &fractional_list, fractional_list.count, 192u, 128u, 0.3f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &fractional_list, fractional_list.count, 192u, 128u, 0.3f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &fractional_list, fractional_list.count, 128u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &fractional_list, fractional_list.count, 128u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
+	/* The committed frame is still at 128x128 with offset 0.3: that frame compares clean. */
+	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &fractional_list, fractional_list.count, 128u, 128u, 0.3f, 0.0f) == RG_GUI_TILE_REDRAW_NONE);
+	rg_gui_tile_cache_commit(&cache);
+
+	/* Text whose 32-bit content tag collides: the glyph geometry still differs. The
+	 * fixture font has two glyphs, so these equal-length strings share a tag found
+	 * by search; the digest must see the quads, not only the tag. */
+	{
+		char first[24] = "???AA???AAAAAAA???A?";
+		char second[24] = "AAAAA?A?A?????AA???A";
+		RgGuiDrawCmd text_cmd[1];
+		text_cmd[0] = test_text_command(first, 1.0f, 0);
+		RgGuiDrawList text_list = {text_cmd, 1u, 1u};
+		rg_gui_tile_cache_invalidate(&cache);
+		rg_gui_renderer_begin_frame(&fixture.text);
+		TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &text_list, 1u));
+		TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &text_list, 1u, 256u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
+		rg_gui_tile_cache_commit(&cache);
+		memcpy(first, second, sizeof(second));
+		rg_gui_renderer_begin_frame(&fixture.text);
+		TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &text_list, 1u));
+		TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &text_list, 1u, 256u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_PARTIAL);
+		TEST_CHECK(cache.stats.dirty_tiles >= 1u);
+	}
+#undef TILE_PREPARE
+	free(fixture.memory);
+	return 1;
+}
+
 static int test_upload_ring_size_full_cache(void)
 {
 	TestGpuFixture fixture;
@@ -1225,7 +1456,7 @@ int main(void)
 	    !test_indexed_triangle_packing_and_empty() || !test_indexed_capacity_rollback() ||
 	    !test_gpu_cache_invalidation() || !test_independent_frame_capacity() ||
 	    !test_fragmented_upload_ranges() || !test_upload_ring_size_boundaries() ||
-	    !test_upload_ring_size_full_cache() || !test_frame_signature()) return 1;
+	    !test_upload_ring_size_full_cache() || !test_frame_signature() || !test_tile_cache()) return 1;
 	puts("rg_gui_gpu draw-list preparation checks passed");
 	return 0;
 }

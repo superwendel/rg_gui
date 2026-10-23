@@ -136,7 +136,8 @@ RGINLINE void demo_profile_write_render_header(FILE* out, const char* prefix)
 	    "items", "run_upload_bytes", "cache_upload_bytes", "geometry_upload_bytes",
 	    "full_cache_upload", "cache_hits", "cache_misses", "cache_evictions",
 	    "cache_bypasses", "dropped_runs", "dropped_glyphs", "renderer_diagnostics",
-	    "copy_calls", "cache_upload_ranges"};
+	    "copy_calls", "cache_upload_ranges", "tile_mode", "tiles_dirty", "tiles_total",
+	    "tile_rects", "tile_update_ms", "tile_verified", "tile_mismatch"};
 	for (u32 i = 0u; i < RG_ARRAY_COUNT(names); i++) fprintf(out, ",%s_%s", prefix, names[i]);
 }
 
@@ -155,6 +156,8 @@ RGINLINE void demo_profile_write_render(FILE* out, const DemoRenderMetrics* m)
 	        t->frame_cache_evictions, t->frame_cache_bypasses, t->frame_dropped_runs,
 	        t->frame_dropped_glyphs, (u32)t->diagnostic_flags);
 	fprintf(out, ",%u,%u", g->copy_calls, g->cache_upload_ranges);
+	fprintf(out, ",%u,%u,%u,%u,%.6f,%u,%u", m->tile_mode, m->tiles_dirty, m->tiles_total,
+	        m->tile_rects, m->tile_update_ms, m->tile_verified, m->tile_mismatch);
 }
 
 RGINLINE int demo_profile_capture_write(const DemoProfileCapture* capture)

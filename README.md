@@ -64,6 +64,8 @@ Move nodes and connect their ports to build a graph.
   32-glyph pages by default.
 - `src/rg_gui_gpu.h` - SDL3 GPU rendering for rectangles, triangles, images,
   application-defined image materials, text, clipping, and draw-list order.
+- `src/rg_gui_gpu_tiles.h` - optional dirty-tile detection for repainting only
+  the changed regions of a persistent target.
 - `shaders/` - HLSL sources for the graphics and compute paths. Generated
   backend binaries are intentionally ignored.
 

@@ -12,6 +12,7 @@
 #define RG_GUI_GPU_USE_SSE2 1
 #endif
 #include "../src/rg_gui_gpu.h"
+#include "../src/rg_gui_gpu_tiles.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -555,7 +556,138 @@ typedef struct DemoRenderMetrics
 	int presented;
 	/* The prepared frame matched the pixels already presented; no GPU work ran. */
 	int skipped;
+	/* Dirty-tile path: RgGuiTileRedraw mode, tile counts, rectangles, and the
+	 * CPU cost of the tile pass. verified/mismatch describe the readback check. */
+	u32 tile_mode;
+	u32 tiles_dirty;
+	u32 tiles_total;
+	u32 tile_rects;
+	double tile_update_ms;
+	u32 tile_verified;
+	u32 tile_mismatch;
 } DemoRenderMetrics;
+
+/* Persistent color target plus the dirty-tile cache that decides how much of it
+ * to repaint each frame. The target is blitted to the swapchain, so a frame with
+ * no dirty tiles draws nothing. Verify mode also repaints a second target in full
+ * every frame and compares both by readback every verify_interval frames. */
+typedef struct DemoTileTarget
+{
+	SDL_GPUTexture* color;
+	SDL_GPUTexture* verify;
+	SDL_GPUTransferBuffer* download;
+	SDL_GPUTextureFormat format;
+	u32 width;
+	u32 height;
+	u32 download_bytes;
+	u64* hashes;
+	u64* previous;
+	SDL_Rect* rects;
+	RgGuiTileCache cache;
+	int enabled;
+	int verify_enabled;
+	u32 verify_interval;
+	u64 frames;
+	u32 verified_frames;
+	u32 mismatched_frames;
+	u32 verify_failures; /* a scheduled comparison could not be completed */
+	u64 dirty_tile_sum;
+	u64 total_tile_sum;
+} DemoTileTarget;
+
+/* Backdrop behind every demo frame. A dirty rectangle is repainted from the
+ * draw list alone, so the list must paint every pixel: the full demo pushes a
+ * rectangle of this color first, and the direct path clears to it. */
+#define DEMO_CLEAR_R 0.035f
+#define DEMO_CLEAR_G 0.043f
+#define DEMO_CLEAR_B 0.059f
+
+#define DEMO_TILE_MAX_TILES 16384u   /* 8192 x 8192 at 64-pixel tiles */
+#define DEMO_TILE_MAX_RECTS 4096u
+
+RGINLINE int demo_tile_target_init(DemoTileTarget* target, SDL_GPUTextureFormat format,
+                                 int verify, u32 verify_interval)
+{
+	memset(target, 0, sizeof(*target));
+	target->format = format;
+	target->enabled = 1;
+	target->verify_enabled = verify != 0;
+	target->verify_interval = verify_interval ? verify_interval : 1u;
+	target->hashes = (u64*)SDL_calloc(DEMO_TILE_MAX_TILES, sizeof(u64));
+	target->previous = (u64*)SDL_calloc(DEMO_TILE_MAX_TILES, sizeof(u64));
+	target->rects = (SDL_Rect*)SDL_calloc(DEMO_TILE_MAX_RECTS, sizeof(SDL_Rect));
+	if (!target->hashes || !target->previous || !target->rects ||
+	    !rg_gui_tile_cache_init(&target->cache, target->hashes, target->previous, target->rects,
+	                            DEMO_TILE_MAX_TILES, DEMO_TILE_MAX_RECTS))
+	{
+		SDL_SetError("Could not allocate the dirty-tile cache");
+		return 0;
+	}
+	return 1;
+}
+
+RGINLINE void demo_tile_target_release_textures(SDL_GPUDevice* device, DemoTileTarget* target)
+{
+	if (target->color) SDL_ReleaseGPUTexture(device, target->color);
+	if (target->verify) SDL_ReleaseGPUTexture(device, target->verify);
+	if (target->download) SDL_ReleaseGPUTransferBuffer(device, target->download);
+	target->color = NULL;
+	target->verify = NULL;
+	target->download = NULL;
+	target->download_bytes = 0u;
+	target->width = 0u;
+	target->height = 0u;
+}
+
+RGINLINE void demo_tile_target_destroy(SDL_GPUDevice* device, DemoTileTarget* target)
+{
+	if (!target) return;
+	if (device) demo_tile_target_release_textures(device, target);
+	SDL_free(target->hashes);
+	SDL_free(target->previous);
+	SDL_free(target->rects);
+	memset(target, 0, sizeof(*target));
+}
+
+RGINLINE SDL_GPUTexture* demo_tile_create_color_target(SDL_GPUDevice* device,
+                                                     SDL_GPUTextureFormat format, u32 width, u32 height)
+{
+	SDL_GPUTextureCreateInfo info = {0};
+	info.type = SDL_GPU_TEXTURETYPE_2D;
+	info.format = format;
+	info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+	info.width = width;
+	info.height = height;
+	info.layer_count_or_depth = 1u;
+	info.num_levels = 1u;
+	return SDL_CreateGPUTexture(device, &info);
+}
+
+/* (Re)create targets for the swapchain size. A size change invalidates the cache. */
+RGINLINE int demo_tile_target_ensure(SDL_GPUDevice* device, DemoTileTarget* target, u32 width, u32 height)
+{
+	if (target->color && target->width == width && target->height == height) return 1;
+	demo_tile_target_release_textures(device, target);
+	rg_gui_tile_cache_invalidate(&target->cache);
+	target->color = demo_tile_create_color_target(device, target->format, width, height);
+	if (!target->color) return 0;
+	if (target->verify_enabled)
+	{
+		target->verify = demo_tile_create_color_target(device, target->format, width, height);
+		if (!target->verify) return 0;
+		u64 bytes = (u64)width * height * 4u * 2u;
+		if (bytes > UINT32_MAX) return 0;
+		SDL_GPUTransferBufferCreateInfo transfer = {0};
+		transfer.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+		transfer.size = (u32)bytes;
+		target->download = SDL_CreateGPUTransferBuffer(device, &transfer);
+		if (!target->download) return 0;
+		target->download_bytes = (u32)bytes;
+	}
+	target->width = width;
+	target->height = height;
+	return 1;
+}
 
 /* Signature and swapchain size of the last presented frame. When a newly
  * prepared frame reproduces both, drawing it again cannot change the window
@@ -689,7 +821,7 @@ static int demo_render_draw_list_skippable(SDL_GPUDevice* device, SDL_Window* wi
 	{
 		SDL_GPUColorTargetInfo target = {0};
 		target.texture = swapchain;
-		target.clear_color = (SDL_FColor){0.035f, 0.043f, 0.059f, 1.0f};
+		target.clear_color = (SDL_FColor){DEMO_CLEAR_R, DEMO_CLEAR_G, DEMO_CLEAR_B, 1.0f};
 		target.load_op = SDL_GPU_LOADOP_CLEAR;
 		target.store_op = SDL_GPU_STOREOP_STORE;
 		SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(command_buffer, &target, 1u, NULL);
@@ -779,6 +911,318 @@ static int demo_render_draw_list_profiled(SDL_GPUDevice* device, SDL_Window* win
 {
 	return demo_render_draw_list_skippable(device, window, gpu, text_renderer, upload_ring,
 	                                       draw_list, overlay_start, NULL, out_presented, metrics);
+}
+
+/* Render through a persistent target, repainting only dirty tiles. Byte-identical
+ * output to the direct path is the contract; verify mode checks it by readback. */
+RGINLINE int demo_render_draw_list_tiled(SDL_GPUDevice* device, SDL_Window* window,
+                                       RgGuiGpuRenderer* gpu, RgGuiRenderer* text_renderer,
+                                       RgGpuUploadRing* upload_ring,
+                                       const RgGuiDrawList* draw_list, u32 overlay_start,
+                                       DemoTileTarget* tiles,
+                                       int* out_presented, DemoRenderMetrics* metrics)
+{
+	u64 render_start = metrics ? SDL_GetTicksNS() : 0u;
+	u64 stage_start = render_start;
+	int result = 0;
+	RgGuiGpuUpload upload = {0};
+	if (metrics)
+	{
+		memset(metrics, 0, sizeof(*metrics));
+		metrics->draw_commands = draw_list ? draw_list->count : 0u;
+	}
+	if (out_presented) *out_presented = 0;
+	SDL_ClearError();
+	rg_gui_renderer_begin_frame(text_renderer);
+	int prepared = rg_gui_gpu_prepare(gpu, text_renderer, draw_list, overlay_start);
+	if (metrics)
+	{
+		u64 now = SDL_GetTicksNS();
+		metrics->prepare_ms = (double)(now - stage_start) / 1000000.0;
+		stage_start = now;
+	}
+	if (!prepared)
+	{
+		SDL_SetError("rg_gui GPU preparation exceeded the configured demo limits");
+		goto done;
+	}
+
+	rg_gpu_upload_ring_begin(upload_ring, 1);
+	int staged = rg_gui_gpu_stage_upload(gpu, text_renderer, upload_ring, &upload);
+	rg_gpu_upload_ring_end(upload_ring);
+	if (metrics)
+	{
+		u64 now = SDL_GetTicksNS();
+		metrics->stage_upload_ms = (double)(now - stage_start) / 1000000.0;
+		stage_start = now;
+	}
+	if (!staged)
+	{
+		SDL_SetError("rg_gui GPU upload staging exceeded the configured demo limits");
+		goto done;
+	}
+
+	SDL_GPUCommandBuffer* command_buffer = SDL_AcquireGPUCommandBuffer(device);
+	if (!command_buffer) goto encode_failed;
+	if (upload.has_text || upload.has_geometry)
+	{
+		SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(command_buffer);
+		if (!copy)
+		{
+			SDL_CancelGPUCommandBuffer(command_buffer);
+			goto encode_failed;
+		}
+		rg_gui_gpu_encode_upload(gpu, copy, upload_ring, &upload);
+		SDL_EndGPUCopyPass(copy);
+	}
+	if (!rg_gui_gpu_dispatch_upload(gpu, command_buffer, &upload) ||
+	    !rg_gui_gpu_upload_ready(gpu, &upload))
+	{
+		SDL_CancelGPUCommandBuffer(command_buffer);
+		SDL_SetError("rg_gui upload packet was rejected before submission");
+		goto encode_failed;
+	}
+	if (metrics)
+	{
+		u64 now = SDL_GetTicksNS();
+		metrics->encode_ms = (double)(now - stage_start) / 1000000.0;
+		stage_start = now;
+	}
+
+	SDL_GPUTexture* swapchain = NULL;
+	u32 width = 0u;
+	u32 height = 0u;
+	int acquired = SDL_WaitAndAcquireGPUSwapchainTexture(command_buffer, window, &swapchain,
+	                                                     &width, &height);
+	if (metrics)
+	{
+		u64 now = SDL_GetTicksNS();
+		metrics->swapchain_wait_ms = (double)(now - stage_start) / 1000000.0;
+		stage_start = now;
+	}
+	if (!acquired)
+	{
+		SDL_CancelGPUCommandBuffer(command_buffer);
+		goto done;
+	}
+	if (!swapchain)
+	{
+		/* Nothing to present (hidden or minimized): submit the uploads only. */
+		int submitted = SDL_SubmitGPUCommandBuffer(command_buffer) ? 1 : 0;
+		if (submitted) rg_gui_gpu_upload_commit(gpu, &upload);
+		if (metrics) metrics->submitted = submitted;
+		result = submitted;
+		goto done;
+	}
+
+	if (!demo_tile_target_ensure(device, tiles, width, height))
+	{
+		/* SDL forbids cancellation after acquisition; submit the uploads so the
+		 * packet protocol stays consistent, then report the failure. */
+		char error[512];
+		SDL_strlcpy(error, SDL_GetError(), sizeof(error));
+		if (SDL_SubmitGPUCommandBuffer(command_buffer)) rg_gui_gpu_upload_commit(gpu, &upload);
+		SDL_SetError("%s", error[0] ? error : "Could not create the dirty-tile targets");
+		goto done;
+	}
+
+	u64 tile_start = SDL_GetTicksNS();
+	RgGuiTileRedraw mode = rg_gui_tile_cache_update(&tiles->cache, gpu, text_renderer, draw_list,
+	                                                overlay_start, width, height, 0.0f, 0.0f);
+	if (metrics)
+	{
+		metrics->tile_update_ms = (double)(SDL_GetTicksNS() - tile_start) / 1000000.0;
+		metrics->tile_mode = (u32)mode;
+		metrics->tiles_dirty = tiles->cache.stats.dirty_tiles;
+		metrics->tiles_total = tiles->cache.stats.total_tiles;
+		metrics->tile_rects = tiles->cache.stats.rects;
+	}
+	tiles->frames++;
+	tiles->total_tile_sum += tiles->cache.stats.total_tiles;
+	tiles->dirty_tile_sum += mode == RG_GUI_TILE_REDRAW_FULL ? tiles->cache.stats.total_tiles
+	                                                          : tiles->cache.stats.dirty_tiles;
+
+	RgGuiGpuDrawDesc draw_desc = {0};
+	draw_desc.output_width = width;
+	draw_desc.output_height = height;
+	RgGuiGpuStats draw_stats = {0};
+	const SDL_FColor clear_color = {DEMO_CLEAR_R, DEMO_CLEAR_G, DEMO_CLEAR_B, 1.0f};
+
+	if (mode != RG_GUI_TILE_REDRAW_NONE)
+	{
+		SDL_GPUColorTargetInfo target = {0};
+		target.texture = tiles->color;
+		target.clear_color = clear_color;
+		target.load_op = mode == RG_GUI_TILE_REDRAW_FULL ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+		target.store_op = SDL_GPU_STOREOP_STORE;
+		SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(command_buffer, &target, 1u, NULL);
+		if (!pass)
+		{
+			char error[512];
+			SDL_strlcpy(error, SDL_GetError(), sizeof(error));
+			if (SDL_SubmitGPUCommandBuffer(command_buffer)) rg_gui_gpu_upload_commit(gpu, &upload);
+			SDL_SetError("%s", error[0] ? error : "Could not begin the dirty-tile render pass");
+			goto done;
+		}
+		if (mode == RG_GUI_TILE_REDRAW_FULL)
+		{
+			draw_desc.viewport = (SDL_Rect){0, 0, (int)width, (int)height};
+			draw_stats = rg_gui_gpu_draw(gpu, command_buffer, pass, &draw_desc, &upload);
+		}
+		else
+		{
+			/* A dirty rectangle must be repainted from its background up, so the
+			 * whole list is drawn once per rectangle; batches outside it are
+			 * skipped by the viewport scissor. */
+			for (u32 r = 0u; r < tiles->cache.stats.rects; r++)
+			{
+				draw_desc.viewport = tiles->cache.rects[r];
+				SDL_SetGPUScissor(pass, &draw_desc.viewport);
+				RgGuiGpuStats part = rg_gui_gpu_draw(gpu, command_buffer, pass, &draw_desc, &upload);
+				draw_stats.draw_calls += part.draw_calls;
+				draw_stats.vertices += part.vertices;
+				draw_stats.indices += part.indices;
+				draw_stats.indexed_refs += part.indexed_refs;
+				draw_stats.items += part.items;
+				draw_stats.geometry_vertices = part.geometry_vertices;
+				draw_stats.text_instances = part.text_instances;
+			}
+		}
+		SDL_EndGPURenderPass(pass);
+	}
+	if (tiles->verify_enabled)
+	{
+		SDL_GPUColorTargetInfo target = {0};
+		target.texture = tiles->verify;
+		target.clear_color = clear_color;
+		target.load_op = SDL_GPU_LOADOP_CLEAR;
+		target.store_op = SDL_GPU_STOREOP_STORE;
+		SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(command_buffer, &target, 1u, NULL);
+		if (pass)
+		{
+			draw_desc.viewport = (SDL_Rect){0, 0, (int)width, (int)height};
+			rg_gui_gpu_draw(gpu, command_buffer, pass, &draw_desc, &upload);
+			SDL_EndGPURenderPass(pass);
+		}
+		else
+		{
+			tiles->verify_failures++;
+		}
+	}
+
+	SDL_GPUBlitInfo blit = {0};
+	blit.source.texture = tiles->color;
+	blit.source.w = width;
+	blit.source.h = height;
+	blit.destination.texture = swapchain;
+	blit.destination.w = width;
+	blit.destination.h = height;
+	blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+	blit.filter = SDL_GPU_FILTER_NEAREST;
+	SDL_BlitGPUTexture(command_buffer, &blit);
+
+	int verify_now = tiles->verify_enabled && tiles->download &&
+	                 (tiles->frames % tiles->verify_interval) == 0u;
+	if (verify_now)
+	{
+		SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(command_buffer);
+		if (!copy)
+		{
+			/* Never compare stale download contents. */
+			tiles->verify_failures++;
+			verify_now = 0;
+		}
+		else
+		{
+			SDL_GPUTextureRegion region = {0};
+			region.w = width;
+			region.h = height;
+			region.d = 1u;
+			SDL_GPUTextureTransferInfo destination = {0};
+			destination.transfer_buffer = tiles->download;
+			destination.pixels_per_row = width;
+			destination.rows_per_layer = height;
+			region.texture = tiles->color;
+			destination.offset = 0u;
+			SDL_DownloadFromGPUTexture(copy, &region, &destination);
+			region.texture = tiles->verify;
+			destination.offset = width * height * 4u;
+			SDL_DownloadFromGPUTexture(copy, &region, &destination);
+			SDL_EndGPUCopyPass(copy);
+		}
+	}
+	if (metrics)
+	{
+		u64 now = SDL_GetTicksNS();
+		metrics->draw_encode_ms = (double)(now - stage_start) / 1000000.0;
+		stage_start = now;
+	}
+
+	int submitted;
+	if (verify_now)
+	{
+		SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(command_buffer);
+		submitted = fence != NULL;
+		if (fence)
+		{
+			int waited = SDL_WaitForGPUFences(device, true, &fence, 1u) ? 1 : 0;
+			SDL_ReleaseGPUFence(device, fence);
+			const u8* pixels = waited ? (const u8*)SDL_MapGPUTransferBuffer(device, tiles->download, false) : NULL;
+			if (pixels)
+			{
+				size_t bytes = (size_t)width * height * 4u;
+				int mismatch = memcmp(pixels, pixels + bytes, bytes) != 0;
+				SDL_UnmapGPUTransferBuffer(device, tiles->download);
+				tiles->verified_frames++;
+				tiles->mismatched_frames += mismatch != 0;
+				if (metrics)
+				{
+					metrics->tile_verified = 1u;
+					metrics->tile_mismatch = (u32)mismatch;
+				}
+			}
+			else
+			{
+				tiles->verify_failures++;
+			}
+		}
+		else
+		{
+			tiles->verify_failures++;
+		}
+	}
+	else
+	{
+		submitted = SDL_SubmitGPUCommandBuffer(command_buffer) ? 1 : 0;
+	}
+	if (submitted)
+	{
+		rg_gui_gpu_upload_commit(gpu, &upload);
+		rg_gui_tile_cache_commit(&tiles->cache);
+	}
+	if (metrics)
+	{
+		metrics->submit_ms = (double)(SDL_GetTicksNS() - stage_start) / 1000000.0;
+		metrics->submitted = submitted;
+		metrics->draw_stats = draw_stats;
+	}
+	if (!submitted) goto done;
+	if (out_presented) *out_presented = 1;
+	if (metrics) metrics->presented = 1;
+	result = 1;
+	goto done;
+
+encode_failed:
+	if (metrics) metrics->encode_ms = (double)(SDL_GetTicksNS() - stage_start) / 1000000.0;
+done:
+	rg_gui_gpu_upload_abort(gpu, &upload);
+	if (metrics)
+	{
+		const RgGuiRendererStats* text_stats = rg_gui_renderer_stats(text_renderer);
+		if (text_stats) metrics->text_stats = *text_stats;
+		metrics->total_ms = (double)(SDL_GetTicksNS() - render_start) / 1000000.0;
+	}
+	return result;
 }
 
 RGINLINE int demo_render_frame_skippable(SDL_GPUDevice* device, SDL_Window* window,

@@ -245,6 +245,64 @@ risk the article warns about (scroll, resize, texture changes) is handled by
 treating any change in output size or external texture revision as a full
 invalidation, as the level-one skip already requires.
 
+## Level two: dirty tiles
+
+The level-two design sketched above was built on 2026-10-23 as the opt-in
+header `rg_gui_gpu_tiles.h` and a `--tile-cache` path in the full showcase.
+Each drawing command is binned into 64-pixel tiles with the renderer's own
+floor/ceil scissor rounding; each tile's command list is digested in order
+(payload, packed color, clip in effect, glyph quads for text); tiles whose
+digest differs from the committed frame become row-span rectangles; the list is
+drawn once per rectangle into a persistent color target with `LOADOP_LOAD`,
+and the target is blitted to the swapchain. The showcase now paints an opaque
+backdrop first so the list owns every pixel.
+
+Correctness was gated by readback: verify mode renders a full repaint every
+frame and compares both targets byte for byte. Across idle, edit, scroll, and
+resize, 1,600 compared frames matched, including 14 full-redraw fallbacks on
+resize. An external review (Codex, 2026-10-23) found three defects in the
+first version, all reproduced and fixed with regression tests: exact float
+clip intersections missed pixels the integer scissor still painted; a 32-bit
+text tag could collide between two strings, so the glyph quads are digested
+instead; and a commit after a storage-overflow fallback could revalidate stale
+digests.
+
+Measured on the showcase, which animates a progress bar and churns statistics
+text every frame, so no frame is ever fully skipped:
+
+| Idle scenario, 1,200 measured frames | direct | tile cache |
+| --- | ---: | ---: |
+| tiles repainted per frame (of 260) | 260 | 14 (median) |
+| frame work, Immediate mode | 1.69 to 1.84 ms | 0.97 to 0.99 ms |
+| GPU busy per frame, Immediate mode (RC6 residency) | 1.78 ms | 0.99 ms |
+| package energy per frame, Immediate mode (RAPL) | 24.4 mJ | 12.7 mJ |
+| tile pass CPU cost | | 0.04 to 0.06 ms |
+
+Both energy-side columns need qualification. "GPU busy" is wall time minus
+the i915 RC6 residency counter: time the GPU spent outside its deepest idle
+state, which includes every GPU client on the system and the cost of entering
+and leaving that state, not this process's render pass alone. Package RAPL is
+the whole package, CPU and GPU and whatever else was running. Neither isolates
+rg_gui's pass; what they show is that in Immediate mode, where the demo is the
+dominant GPU client, both moved together with the frame-work reduction and did
+so in all three alternating pairs (GPU busy 1.67 to 1.85 ms against 0.95 to
+1.02 ms). `benchmarks/measure_tiles.py` reproduces the measurement.
+
+At VSync the counters tell a different story: the GPU is outside idle about
+5.5 ms per 16.7 ms frame in both modes, and package energy on this shared
+laptop varied 2x between identical runs. Edit showed the cache lower in 4 of 4
+pairs (6.20 to 5.50 ms); idle showed no difference within noise. A plausible
+explanation, not established by these measurements, is that the X11 compositor
+repaints the window on every present regardless of how little changed, which
+would make per-present work dominate whatever the render pass saves. So what
+is demonstrated is the showcase's frame-work reduction in Immediate mode, with
+the whole-system indicators moving the same way; whether any of it reaches the
+battery under a compositor is not demonstrated here. An application whose UI
+is static between inputs reaches `RG_GUI_TILE_REDRAW_NONE`, where no draw and
+no present are needed; the showcase cannot show that because of its animation.
+Measuring that case, and measuring on an uncomposited or Wayland session, is
+the remaining experiment.
+
 ## Remaining opportunities, in priority order
 
 1. **Four vertices per rectangle instead of six.** Rectangles and images are

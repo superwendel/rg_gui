@@ -7,6 +7,12 @@ between 0.x releases.
 
 ### Added
 
+- `rg_gui_gpu_tiles.h`: an opt-in dirty-tile pass that bins prepared commands
+  into 64-pixel tiles, digests each tile's command list, and reports the
+  rectangles to repaint in a persistent target. The full demo's `--tile-cache`
+  path uses it and `--tile-cache-verify` checks it against full repaints by
+  readback. Prepared text runs now carry their content hash in the previously
+  reserved host field.
 - `rg_gui_gpu_frame_signature`: an opt-in digest of the prepared draw list
   (`RgGuiGpuDesc.frame_signature`) so applications can skip staging, drawing,
   and presenting frames that would reproduce the pixels already on screen. The

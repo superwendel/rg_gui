@@ -504,6 +504,57 @@ dirty until the next staged packet uploads them. Equal digests for different
 lists are possible only with 64-bit collision probability. The minimal demo
 skips unchanged frames and reports the count on exit; `--no-skip` disables it.
 
+### Repainting only changed tiles
+
+`rg_gui_gpu_tiles.h` is an opt-in header for applications that keep their
+frame in a persistent color target and blit it to the swapchain. After
+`rg_gui_gpu_prepare`, `rg_gui_tile_cache_update` bins every drawing command
+into 64-pixel tiles (`RG_GUI_TILE_SIZE`), digests each tile's command list in
+order (payload, packed color, clip in effect, and for text the glyph quads),
+and compares the digests with the frame last committed. It returns
+`RG_GUI_TILE_REDRAW_NONE` (draw nothing, present the target as is),
+`RG_GUI_TILE_REDRAW_PARTIAL` (redraw the rectangles in `cache->rects`), or
+`RG_GUI_TILE_REDRAW_FULL` (first frame, output size or draw offset change,
+`external_revision` change, or storage overflow). Call
+`rg_gui_tile_cache_commit` once the frame has reached the target.
+
+```c
+u64 hashes[1024], previous[1024];
+SDL_Rect rects[256];
+RgGuiTileCache tiles;
+rg_gui_tile_cache_init(&tiles, hashes, previous, rects, 1024u, 256u);
+
+/* per frame, after rg_gui_gpu_prepare and upload encoding */
+RgGuiTileRedraw mode = rg_gui_tile_cache_update(&tiles, &gpu, &text_renderer, list,
+                                                overlay_start, width, height, 0.0f, 0.0f);
+if (mode == RG_GUI_TILE_REDRAW_FULL) { /* LOADOP_CLEAR, draw with the full viewport */ }
+else if (mode == RG_GUI_TILE_REDRAW_PARTIAL)
+{
+	/* LOADOP_LOAD, then for each rect: draw_desc.viewport = tiles.rects[i];
+	 * rg_gui_gpu_draw skips batches outside the viewport scissor. */
+}
+/* blit the target to the swapchain, submit, then: */
+rg_gui_tile_cache_commit(&tiles);
+```
+
+Three contracts make this exact rather than approximate:
+
+- The draw list must paint every pixel it owns, starting with an opaque
+  backdrop, because a dirty rectangle is repainted from the list alone.
+- Binning uses the same floor/ceil pixel rounding as the renderer's scissor,
+  so a command whose exact float intersection with its clip is empty but which
+  still rasterizes a pixel is binned.
+- Texture contents are outside the digest: bump `tiles.external_revision` when
+  an image or atlas texture changes, and `rg_gui_tile_cache_invalidate` after a
+  clear-color or target change.
+
+The full demo's `--tile-cache` flag uses it; `--tile-cache-verify` also renders
+a full repaint every frame and compares both by GPU readback, failing the run
+on any difference or incomplete comparison. Storage is caller-owned and fixed;
+tiles beyond `tile_capacity` or more dirty rectangles than `rect_capacity`
+fall back to a full redraw. Measured results are in the
+[performance audit](performance-audit-2026-10.md#level-two-dirty-tiles).
+
 ## Capacity and diagnostics
 
 Frontend, cache, and frame geometry capacities are fixed at initialization.

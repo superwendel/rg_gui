@@ -104,7 +104,8 @@ typedef struct RgGuiRendererBaseRunInstance
 	u32 color;
 	u32 first_output_instance;
 	/* Host metadata: padding[0] is the source draw-command index; padding[1]
-	   is reserved. Both remain outside the shader's 24-byte payload. */
+	   is the low 32 bits of the cached run's key hash (text bytes or static
+	   identity, with scale). Both remain outside the shader's 24-byte payload. */
 	u32 padding[2];
 } RgGuiRendererBaseRunInstance;
 
@@ -114,6 +115,12 @@ typedef char RgGuiRendererBaseRunInstanceMustBe32Bytes[(sizeof(RgGuiRendererBase
 RGINLINE u32 rg_gui_renderer_run_command_index(const RgGuiRendererBaseRunInstance* run)
 {
 	return run->padding[0];
+}
+
+/** Low 32 bits of the cached run's key hash: changes when its text, identity, or scale does. */
+RGINLINE u32 rg_gui_renderer_run_content_hash(const RgGuiRendererBaseRunInstance* run)
+{
+	return run->padding[1];
 }
 
 typedef struct RgGuiRendererBaseRunPrepared
@@ -1105,7 +1112,7 @@ static int rg_gui_renderer_base_prepare_run_stream(RgGuiRendererBaseContext* ctx
 		output->color = rg_gui_renderer_base_pack_color(cmd->data.text.color);
 		output->first_output_instance = output_glyph_count;
 		output->padding[0] = i;
-		output->padding[1] = 0u;
+		output->padding[1] = (u32)run->hash;
 		output_glyph_count += run->quad_count;
 		batch->instance_count++;
 	}
@@ -2049,6 +2056,7 @@ RGINLINE int rg_gui_renderer_prepare(RgGuiRenderer* ctx,
 		force_new_batch = 0;
 		u32 page = ctx->run_first_pages[run_index];
 		u32 packed_color = rg_gui_renderer_base_pack_color(cmd->data.text.color);
+		u32 content_hash = (u32)core->runs[run_index].hash;
 		if (segment_count == 1u)
 		{
 			RgGuiRendererRun* output = &frame_runs[core->frame_instance_count++];
@@ -2059,7 +2067,7 @@ RGINLINE int rg_gui_renderer_prepare(RgGuiRenderer* ctx,
 			output->color = packed_color;
 			output->first_output_instance = output_glyph_count;
 			output->padding[0] = i;
-			output->padding[1] = 0u;
+			output->padding[1] = content_hash;
 			output_glyph_count += quad_count;
 			batch->instance_count++;
 			ctx->allocator_stats.frame_page_segments++;
@@ -2077,7 +2085,7 @@ RGINLINE int rg_gui_renderer_prepare(RgGuiRenderer* ctx,
 			output->color = packed_color;
 			output->first_output_instance = output_glyph_count;
 			output->padding[0] = i;
-			output->padding[1] = 0u;
+			output->padding[1] = content_hash;
 			output_glyph_count += count;
 			remaining -= count;
 			page = ctx->page_next[page];

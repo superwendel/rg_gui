@@ -221,6 +221,23 @@ physical lifecycle and final cleanup counts are validated when present. Final
 cleanup stays outside frame distributions and has its own reported duration;
 one retained swapchain is a deliberate memory tradeoff, not eliminated work.
 
+## Dirty-tile energy and GPU indicators
+
+`measure_tiles.py` runs the full demo's direct and `--tile-cache` paths in
+alternating pairs and reads whole-system indicators around each run: readable
+Intel RAPL energy counters (root-only by default) and the i915 RC6 residency
+counter, reported as "GPU busy" time per measured frame. Startup and warmup are
+removed by subtracting a warmup-only run. Both indicators include every process
+on the machine; compare pairs taken under the same load, and prefer Immediate
+presentation when the question is the demo's own GPU work. See the
+[performance audit](../docs/performance-audit-2026-10.md#level-two-dirty-tiles)
+for measured results and their limits.
+
+```sh
+python3 benchmarks/measure_tiles.py idle immediate 1200 3
+python3 benchmarks/measure_tiles.py edit vsync 600 4
+```
+
 ## Loaded-font Unicode CPU workloads
 
 `bench_unicode.c` generates and loads sorted synthetic 4,096- and 16,384-glyph
