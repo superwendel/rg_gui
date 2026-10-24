@@ -43,6 +43,11 @@ between 0.x releases.
 
 ### Changed
 
+- Rectangles and images are four vertices instead of six, and triangles are a
+  separate `RG_GUI_GPU_ITEM_TRIANGLES` item, so staging no longer compares
+  vertices to find quads. In the idle showcase, staging is 41% cheaper,
+  preparation 9% cheaper, and the geometry upload 32% smaller, with the same
+  draw calls and identical pixels.
 - Pointer-keyed text measurement and length caches probe at most
   `RG_GUI_TEXT_CACHE_MAX_PROBES` slots (32) and then replace the home slot, so a
   saturated cache no longer scans every slot on each miss.
@@ -78,3 +83,9 @@ between 0.x releases.
   [frame and GPU flow](docs/rg_gui.md#frame-and-gpu-flow).
 - Replace `rg_input_update` with `rg_input_begin_frame` before SDL event polling
   and `rg_input_sample` afterward. See [ordered input](docs/rg_gui.md#ordered-input).
+- Recompile shaders after updating: `rg_gui_indexed.vert` now reads four
+  vertices per quad, and an older compiled shader draws quads incorrectly.
+- Code that reads `RgGuiGpuItem` must accept `RG_GUI_GPU_ITEM_TRIANGLES`.
+  Solid and image items hold four vertices per primitive.
+- Custom image-material pipelines receive each image as four vertices through
+  the shared quad index buffer; see [image materials](docs/rg_gui.md#image-materials).

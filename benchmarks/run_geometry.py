@@ -31,7 +31,7 @@ def checked_rows(stdout):
         times = [row[key] for key in ("min_ns", "median_ns", "max_ns")]
         if any(not isinstance(x, (int, float)) or not math.isfinite(x) or x <= 0 for x in times):
             raise RuntimeError(f"Invalid timings for {row['case']}")
-        if times != sorted(times) or row["vertices"] != count * 6 or row["items"] != (count if mode == "prepare" else 0):
+        if times != sorted(times) or row["vertices"] != count * 4 or row["items"] != (count if mode == "prepare" else 0):
             raise RuntimeError(f"Invalid workload or timing range for {row['case']}")
         if not isinstance(row["geometry"], str) or len(row["geometry"]) != 16:
             raise RuntimeError(f"Invalid geometry checksum for {row['case']}")

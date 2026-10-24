@@ -268,7 +268,11 @@ The callback runs once per prepared item with a nonzero material. Return
 its stock indexed rendering and the item's texture at fragment sampler slot zero.
 Return `RG_GUI_GPU_IMAGE_BIND_CUSTOM` after binding a graphics pipeline
 compatible with `RgGuiGpuVertex` and all of its fragment resources; rg_gui
-still supplies vertex uniform slot zero and the geometry vertex buffer. Return
+still supplies vertex uniform slot zero, the geometry vertex buffer, and the
+shared quad index buffer. Each image is four vertices (top-left, top-right,
+bottom-right, bottom-left) drawn as an indexed triangle list, so the pipeline
+must use a triangle-list primitive and must not derive corners from the vertex
+index. Return
 `RG_GUI_GPU_IMAGE_BIND_FAILED` to skip the item. CUSTOM and FAILED invalidate
 rg_gui's cached pipeline and texture state, so following stock solid, image, or
 text items rebind correctly even if the callback partially changed GPU state.
@@ -442,7 +446,8 @@ The shared index buffer uses 16-bit elements for up to 16,384 references and
 32-bit elements for larger capacities.
 This is a reservation count, not driver or total process memory. Draw statistics
 include actual `vertices`, `indices`, `copy_calls`, and `indexed_refs`;
-`geometry_vertices` continues to describe the original triangle-list geometry.
+`geometry_vertices` counts the vertices rg_gui wrote: four per rectangle or
+image and three per triangle.
 
 After creating the GPU renderer, use
 `rg_gui_gpu_upload_ring_size_required(&gpu)` to size a caller-owned upload ring

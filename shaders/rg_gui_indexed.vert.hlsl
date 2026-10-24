@@ -41,9 +41,9 @@ Output main(uint vertex : SV_VertexID)
 	}
 	else
 	{
-		// A matched pair maps 0,1,2,3 to original raw vertices 0,1,2,5.
-		// A lone triangle maps corner3 to 2, so its second triangle degenerates.
-		uint raw_corner = corner_id == 3 && (ref.y & 1) != 0 ? 5 : min(corner_id, 2);
+		// A quad holds four raw vertices in corner order. A lone triangle maps
+		// corner 3 to 2, so its second triangle degenerates.
+		uint raw_corner = (ref.y & 1) != 0 ? corner_id : min(corner_id, 2);
 		uint raw_vertex = ref.x + raw_corner;
 		uint raw = geometry_offset + raw_vertex * 20;
 		pixel = asfloat(frame.Load2(raw)) + draw_offset;

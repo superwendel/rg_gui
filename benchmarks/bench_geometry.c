@@ -18,16 +18,14 @@ static RG_NOINLINE int reference_pack(RgGuiGpuRenderer* renderer,
                                           RgGuiRect rect, RgGuiRect uv, u32 color)
 {
 	if (renderer->vertex_count > renderer->vertex_capacity ||
-	    renderer->vertex_capacity - renderer->vertex_count < 6u)
+	    renderer->vertex_capacity - renderer->vertex_count < 4u)
 		return 0;
 	RgGuiGpuVertex* out = &renderer->vertices[renderer->vertex_count];
 	rg_gui_gpu_set_vertex(&out[0], rect.x, rect.y, color, uv.x, uv.y);
 	rg_gui_gpu_set_vertex(&out[1], rect.x + rect.w, rect.y, color, uv.x + uv.w, uv.y);
 	rg_gui_gpu_set_vertex(&out[2], rect.x + rect.w, rect.y + rect.h, color, uv.x + uv.w, uv.y + uv.h);
-	rg_gui_gpu_set_vertex(&out[3], rect.x, rect.y, color, uv.x, uv.y);
-	rg_gui_gpu_set_vertex(&out[4], rect.x + rect.w, rect.y + rect.h, color, uv.x + uv.w, uv.y + uv.h);
-	rg_gui_gpu_set_vertex(&out[5], rect.x, rect.y + rect.h, color, uv.x, uv.y + uv.h);
-	renderer->vertex_count += 6u;
+	rg_gui_gpu_set_vertex(&out[3], rect.x, rect.y + rect.h, color, uv.x, uv.y + uv.h);
+	renderer->vertex_count += 4u;
 	return 1;
 }
 
@@ -124,14 +122,14 @@ int main(int argc,char** argv) {
     for(int full=0;full<2;full++) for(u32 k=0;k<3;k++) {
         if(checking) {
             frame(b,counts[k],full);
-            RgGuiGpuVertex expected[6];
-            RgGuiGpuRenderer ref={0};ref.vertices=expected;ref.vertex_capacity=6;
+            RgGuiGpuVertex expected[4];
+            RgGuiGpuRenderer ref={0};ref.vertices=expected;ref.vertex_capacity=4;
             for(u32 i=0;i<counts[k];i++) {
                 const RgGuiDrawCmd* cmd=&b->commands[i];ref.vertex_count=0;
                 u32 color=full?rg_gui_renderer_base_pack_color(cmd->data.image.color):0xe6b34d33u;
-                if(!reference_pack(&ref,cmd->data.image.rect,cmd->data.image.uv,color)||memcmp(expected,b->gpu.vertices+i*6,sizeof(expected))) fail("frame geometry");
+                if(!reference_pack(&ref,cmd->data.image.rect,cmd->data.image.uv,color)||memcmp(expected,b->gpu.vertices+i*4,sizeof(expected))) fail("frame geometry");
             }
-            if(b->gpu.vertex_count!=counts[k]*6||(full&&b->gpu.item_count!=counts[k]))fail("frame counts");
+            if(b->gpu.vertex_count!=counts[k]*4||(full&&b->gpu.item_count!=counts[k]))fail("frame counts");
             continue;
         }
         u32 count=counts[k];for(u32 i=0;i<100;i++)frame(b,count,full);

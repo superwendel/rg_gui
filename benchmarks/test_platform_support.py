@@ -66,11 +66,11 @@ class PlatformSupportTests(unittest.TestCase):
         for name in run_geometry.CASES:
             mode, count = name.split("_")
             rows.append(dict(case=name, min_ns=1, median_ns=2, max_ns=3, geometry="0" * 16,
-                             vertices=int(count) * 6, items=int(count) if mode == "prepare" else 0))
+                             vertices=int(count) * 4, items=int(count) if mode == "prepare" else 0))
         serialize = lambda values: "\n".join(json.dumps(row) for row in values)
         results, signature = run_geometry.checked_rows(serialize(rows))
         self.assertEqual(len(results), 6)
-        self.assertEqual(signature["prepare_1024"]["vertices"], 6144)
+        self.assertEqual(signature["prepare_1024"]["vertices"], 4096)
         with self.assertRaises(RuntimeError):
             run_geometry.checked_rows(serialize(rows + rows[:1]))
         rows[0]["vertices"] = 5

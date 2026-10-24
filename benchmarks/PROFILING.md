@@ -449,7 +449,8 @@ throughput option, but these results do not measure input-to-display latency,
 visual smoothness, power use, or how many submitted frames reach the display.
 
 Grouping the identical-content image textures reduces draws from **531 to 21**
-with the same **6,108 vertices**. Immediate-mode median draw-encoding cost drops
+with the same **6,108 vertices** (measured before rectangles moved to four
+vertices; the same scene now uploads 4,128). Immediate-mode median draw-encoding cost drops
 from 0.562 to 0.108 ms and median frame work from 4.124 to 2.877 ms. Draw encoding
 also improves in VSync/Mailbox, but total frame time does not improve uniformly
 across modes. Reuse textures/atlases and preserve adjacent compatible commands

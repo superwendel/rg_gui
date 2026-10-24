@@ -108,19 +108,17 @@ static int test_rect_vertex_packing(void)
 		RgGuiRect rect = rects[r], uv = rects[(r + 1u) % RG_ARRAY_COUNT(rects)];
 		u32 color = colors[c];
 		int fits = bounds[b].count <= bounds[b].capacity &&
-		           bounds[b].capacity - bounds[b].count >= 6u;
+		           bounds[b].capacity - bounds[b].count >= 4u;
 		if (fits)
 		{
 			RgGuiGpuVertex* out = expected + offset + bounds[b].count;
 			out[0] = (RgGuiGpuVertex){rect.x, rect.y, color, uv.x, uv.y};
 			out[1] = (RgGuiGpuVertex){rect.x + rect.w, rect.y, color, uv.x + uv.w, uv.y};
 			out[2] = (RgGuiGpuVertex){rect.x + rect.w, rect.y + rect.h, color, uv.x + uv.w, uv.y + uv.h};
-			out[3] = out[0];
-			out[4] = out[2];
-			out[5] = (RgGuiGpuVertex){rect.x, rect.y + rect.h, color, uv.x, uv.y + uv.h};
+			out[3] = (RgGuiGpuVertex){rect.x, rect.y + rect.h, color, uv.x, uv.y + uv.h};
 		}
 		TEST_CHECK(rg_gui_gpu_add_rect_vertices(&gpu, rect, uv, color) == fits);
-		TEST_CHECK(gpu.vertex_count == bounds[b].count + (fits ? 6u : 0u));
+		TEST_CHECK(gpu.vertex_count == bounds[b].count + (fits ? 4u : 0u));
 		TEST_CHECK(memcmp(expected, actual, sizeof(actual)) == 0);
 	}
 	return 1;
@@ -227,16 +225,16 @@ static int test_text_command_association(void)
 		if (frame == 2u) rg_gui_renderer_clear_cache(&fixture.text);
 		rg_gui_renderer_begin_frame(&fixture.text);
 		TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, 12u));
-		TEST_CHECK(fixture.gpu.item_count == 7u && fixture.gpu.vertex_count == 18u);
+		TEST_CHECK(fixture.gpu.item_count == 7u && fixture.gpu.vertex_count == 12u);
 		TEST_CHECK(fixture.gpu.text_prepared->glyph_count == 15u);
 		TEST_CHECK(fixture.gpu.text_prepared->run_count == 10u);
-		TEST_CHECK(test_item(&fixture.items[0], RG_GUI_GPU_ITEM_SOLID, 0u, 6u, 0));
+		TEST_CHECK(test_item(&fixture.items[0], RG_GUI_GPU_ITEM_SOLID, 0u, 4u, 0));
 		TEST_CHECK(test_item(&fixture.items[1], RG_GUI_GPU_ITEM_TEXT, 0u, 4u, 0));
 		TEST_CHECK(test_item(&fixture.items[2], RG_GUI_GPU_ITEM_TEXT, 4u, 2u, 1));
-		TEST_CHECK(test_item(&fixture.items[3], RG_GUI_GPU_ITEM_SOLID, 6u, 6u, 1));
+		TEST_CHECK(test_item(&fixture.items[3], RG_GUI_GPU_ITEM_SOLID, 4u, 4u, 1));
 		TEST_CHECK(test_item(&fixture.items[4], RG_GUI_GPU_ITEM_TEXT, 6u, 6u, 1));
 		TEST_CHECK(test_item(&fixture.items[5], RG_GUI_GPU_ITEM_TEXT, 12u, 3u, 0));
-		TEST_CHECK(test_item(&fixture.items[6], RG_GUI_GPU_ITEM_SOLID, 12u, 6u, 0));
+		TEST_CHECK(test_item(&fixture.items[6], RG_GUI_GPU_ITEM_SOLID, 8u, 4u, 0));
 		TEST_CHECK(frame != 1u || (fixture.text.dirty_page_count == 0u &&
 		                          fixture.text.core.stats.frame_cache_hits > 0u));
 	}
@@ -304,7 +302,7 @@ static int test_dropped_text_command_association(void)
 				u32 offset = scenario == 1u ? 1u : 0u;
 				TEST_CHECK(fixture.gpu.item_count == 2u + offset);
 				if (offset) TEST_CHECK(test_item(&fixture.items[0], RG_GUI_GPU_ITEM_TEXT, 0u, 1u, 0));
-				TEST_CHECK(test_item(&fixture.items[offset], RG_GUI_GPU_ITEM_SOLID, 0u, 6u, 0));
+				TEST_CHECK(test_item(&fixture.items[offset], RG_GUI_GPU_ITEM_SOLID, 0u, 4u, 0));
 				TEST_CHECK(test_item(&fixture.items[offset + 1u], RG_GUI_GPU_ITEM_TEXT, offset, 1u, 0));
 			}
 		}
@@ -322,7 +320,7 @@ static int test_gpu_capacity_recovery(void)
 	for (u32 scenario = 0u; scenario < 3u; scenario++)
 	{
 		fixture.gpu.item_capacity = scenario == 0u ? 1u : RG_ARRAY_COUNT(fixture.items);
-		fixture.gpu.vertex_capacity = scenario == 1u ? 5u : RG_ARRAY_COUNT(fixture.vertices);
+		fixture.gpu.vertex_capacity = scenario == 1u ? 3u : RG_ARRAY_COUNT(fixture.vertices);
 		rg_gui_renderer_begin_frame(&fixture.text);
 		int prepared = rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, list.count);
 		if (scenario < 2u)
@@ -332,9 +330,9 @@ static int test_gpu_capacity_recovery(void)
 		}
 		else
 		{
-			TEST_CHECK(prepared && fixture.gpu.item_count == 2u && fixture.gpu.vertex_count == 6u);
+			TEST_CHECK(prepared && fixture.gpu.item_count == 2u && fixture.gpu.vertex_count == 4u);
 			TEST_CHECK(test_item(&fixture.items[0], RG_GUI_GPU_ITEM_TEXT, 0u, 3u, 0));
-			TEST_CHECK(test_item(&fixture.items[1], RG_GUI_GPU_ITEM_SOLID, 0u, 6u, 0));
+			TEST_CHECK(test_item(&fixture.items[1], RG_GUI_GPU_ITEM_SOLID, 0u, 4u, 0));
 		}
 	}
 	free(fixture.memory);
@@ -511,12 +509,12 @@ static int test_full_upload_packet_lifetime(void)
 	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, list.count));
 	RgGuiGpuUpload first = {0}, second = {0}, third = {0}, rejected = {0};
 	TEST_CHECK(rg_gui_gpu_stage_upload(&fixture.gpu, &fixture.text, &ring, &first));
-	TEST_CHECK(first.has_geometry && first.has_text && first.item_count == 2u && first.vertex_count == 6u);
+	TEST_CHECK(first.has_geometry && first.has_text && first.item_count == 2u && first.vertex_count == 4u);
 	TEST_CHECK(first.text.glyph_count == 5u && first.text.run_count == 3u);
 	TEST_CHECK(!first.text.batch_count && !first.text.glyph_batches);
 	TEST_CHECK(first.batch_count == 1u && first.ref_count == 6u &&
 	           first.batches[0].first_ref == 0u && first.batches[0].ref_count == 6u &&
-	           first.batches[0].glyph_count == 5u && first.batches[0].geometry_vertices == 6u);
+	           first.batches[0].glyph_count == 5u && first.batches[0].geometry_vertices == 4u);
 	TEST_CHECK(first.batches[0].clip_enabled && first.batches[0].clip.x == 1.0f &&
 	           first.batches[0].clip.y == 2.0f && first.batches[0].clip.w == 30.0f &&
 	           first.batches[0].clip.h == 40.0f);
@@ -525,14 +523,14 @@ static int test_full_upload_packet_lifetime(void)
 		memcpy(&reference, memory + first.frame.offset + first.refs_offset + (glyph + 1u) * 8u, sizeof(reference));
 		TEST_CHECK((u32)reference == glyph && (u32)(reference >> 32u) == glyph / 2u);
 	}
-	TEST_CHECK(test_item(&first.items[0], RG_GUI_GPU_ITEM_SOLID, 0, 6, 1));
+	TEST_CHECK(test_item(&first.items[0], RG_GUI_GPU_ITEM_SOLID, 0, 4, 1));
 	TEST_CHECK(test_item(&first.items[1], RG_GUI_GPU_ITEM_TEXT, 0, 5, 1));
 	RgGuiGpuItem saved_items[2]; memcpy(saved_items, first.items, sizeof(saved_items));
 	RgGuiGpuIndexedBatch saved_batch = first.batches[0];
 	u8 saved_frame[512];
 	TEST_CHECK(first.frame.size <= sizeof(saved_frame));
 	memcpy(saved_frame, memory + first.frame.offset, first.frame.size);
-	u8 saved_vertices[6u * sizeof(RgGuiGpuVertex)];
+	u8 saved_vertices[4u * sizeof(RgGuiGpuVertex)];
 	memcpy(saved_vertices, memory + first.geometry.offset, sizeof(saved_vertices));
 	commands[0] = test_text_command("A", 2, 0); list.count = 1u;
 	rg_gui_renderer_begin_frame(&fixture.text);
@@ -615,29 +613,35 @@ static int test_indexed_triangle_packing_and_empty(void)
 	RgGuiDrawList list = {commands, 5u, 5u};
 	rg_gui_renderer_begin_frame(&fixture.text);
 	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, list.count));
-	TEST_CHECK(fixture.gpu.vertex_count == 18u && fixture.gpu.item_count == 1u);
+	// The rectangle is one four-vertex quad item; the four triangles form one
+	// triangle-list item that is never merged into quads, even when two of
+	// them happen to share an edge and color.
+	TEST_CHECK(fixture.gpu.vertex_count == 16u && fixture.gpu.item_count == 2u);
+	TEST_CHECK(test_item(&fixture.items[0], RG_GUI_GPU_ITEM_SOLID, 0u, 4u, 0));
+	TEST_CHECK(test_item(&fixture.items[1], RG_GUI_GPU_ITEM_TRIANGLES, 4u, 12u, 0));
 	u8 memory[4096]; memset(memory, 0xA5, sizeof(memory));
 	RgGpuUploadRing ring = {0}; ring.mapped = memory; ring.size = sizeof(memory);
 	RgGuiGpuUpload first = {0}, second = {0};
 	TEST_CHECK(rg_gui_gpu_stage_upload(&fixture.gpu, &fixture.text, &ring, &first));
-	TEST_CHECK(first.ref_count == 4u && first.batch_count == 1u && !first.has_text);
+	TEST_CHECK(first.ref_count == 5u && first.batch_count == 1u && !first.has_text);
 	const u64 solid = (u64)1u << 62u;
 	const u64 quad = (u64)1u << 32u;
 	TEST_CHECK(test_packed_reference(memory, &first, 0u) == (solid | quad));
-	TEST_CHECK(test_packed_reference(memory, &first, 1u) == (solid | quad | 6u));
-	TEST_CHECK(test_packed_reference(memory, &first, 2u) == (solid | 12u));
-	TEST_CHECK(test_packed_reference(memory, &first, 3u) == (solid | 15u));
-	TEST_CHECK(first.batches[0].geometry_vertices == 18u && first.batches[0].source_items == 1u);
+	TEST_CHECK(test_packed_reference(memory, &first, 1u) == (solid | 4u));
+	TEST_CHECK(test_packed_reference(memory, &first, 2u) == (solid | 7u));
+	TEST_CHECK(test_packed_reference(memory, &first, 3u) == (solid | 10u));
+	TEST_CHECK(test_packed_reference(memory, &first, 4u) == (solid | 13u));
+	TEST_CHECK(first.batches[0].geometry_vertices == 16u && first.batches[0].source_items == 2u);
 	u8 saved_frame[512];
 	TEST_CHECK(first.frame.size <= sizeof(saved_frame));
 	memcpy(saved_frame, memory + first.frame.offset, first.frame.size);
-	// XY equality alone is insufficient: changing a shared corner's UV prevents
-	// reduction, just as the color mismatch prevented reduction above.
+	// Packing reads item types, never vertex contents: editing a vertex does not
+	// change the reference stream, and restaging leaves the first packet intact.
 	fixture.vertices[9].u = 0.25f;
 	TEST_CHECK(rg_gui_gpu_stage_upload(&fixture.gpu, &fixture.text, &ring, &second));
 	TEST_CHECK(second.ref_count == 5u &&
-	           test_packed_reference(memory, &second, 1u) == (solid | 6u) &&
-	           test_packed_reference(memory, &second, 2u) == (solid | 9u));
+	           test_packed_reference(memory, &second, 1u) == (solid | 4u) &&
+	           test_packed_reference(memory, &second, 4u) == (solid | 13u));
 	TEST_CHECK(!memcmp(saved_frame, memory + first.frame.offset, first.frame.size));
 	rg_gui_gpu_upload_abort(&fixture.gpu, &first);
 	rg_gui_gpu_upload_abort(&fixture.gpu, &second);
@@ -703,9 +707,9 @@ static int test_indexed_capacity_rollback(void)
 		fixture.gpu.text.run_capacity = scenario == 3u ? 1u : 64u;
 		fixture.gpu.text.instance_capacity = scenario == 4u ? 3u : 64u;
 		fixture.gpu.text.cached_quad_capacity = scenario == 5u ? 1u : 64u;
-		fixture.gpu.vertex_capacity = scenario == 6u ? 5u : RG_ARRAY_COUNT(fixture.vertices);
+		fixture.gpu.vertex_capacity = scenario == 6u ? 3u : RG_ARRAY_COUNT(fixture.vertices);
 		fixture.gpu.item_capacity = scenario == 7u ? 1u : RG_ARRAY_COUNT(fixture.items);
-		fixture.items[1].count = scenario == 8u ? 5u : 6u;
+		fixture.items[1].count = scenario == 8u ? 5u : 4u;
 		TEST_CHECK(!rg_gui_gpu_stage_upload(&fixture.gpu, &fixture.text, &ring, &rejected));
 		TEST_CHECK(!rejected.packet_token && !rejected.text.packet_token && ring.offset == original_offset &&
 		           fixture.gpu.next_frame_buffer == original_rotation &&
@@ -719,7 +723,7 @@ static int test_indexed_capacity_rollback(void)
 			TEST_CHECK(fixture.gpu.text.upload_packets[i].active == (u32)(i == first.text.packet_slot));
 		}
 	}
-	fixture.items[1].count = 6u;
+	fixture.items[1].count = 4u;
 	// A later packet is blocked until the first completes. Cancelling the first
 	// invalidates the later packet's cache epoch, requiring both to be restaged.
 	TEST_CHECK(rg_gui_gpu_stage_upload(&fixture.gpu, &fixture.text, &ring, &rejected));
@@ -1425,15 +1429,15 @@ int main(void)
 	rg_gui_renderer_begin_frame(&text_renderer);
 	const RgGuiDrawList* list = rg_gui_draw_list(&gui);
 	if (!rg_gui_gpu_prepare(&gpu, &text_renderer, list, list->count) ||
-	    gpu.vertex_count != 39u || gpu.item_count != 7u ||
+	    gpu.vertex_count != 27u || gpu.item_count != 7u ||
 	    gpu.items[0].type != RG_GUI_GPU_ITEM_SOLID ||
-	    gpu.items[1].type != RG_GUI_GPU_ITEM_SOLID ||
+	    gpu.items[1].type != RG_GUI_GPU_ITEM_TRIANGLES ||
 	    !gpu.items[1].clip_enabled ||
 	    gpu.items[2].type != RG_GUI_GPU_ITEM_IMAGE ||
 	    gpu.items[2].material != 0u ||
 	    gpu.items[3].type != RG_GUI_GPU_ITEM_IMAGE ||
-	    gpu.items[3].material != 11u || gpu.items[3].count != 12u ||
-	    gpu.items[4].material != 22u || gpu.items[4].count != 6u ||
+	    gpu.items[3].material != 11u || gpu.items[3].count != 8u ||
+	    gpu.items[4].material != 22u || gpu.items[4].count != 4u ||
 	    gpu.items[5].material != 11u || gpu.items[5].texture != 2u ||
 	    gpu.items[6].type != RG_GUI_GPU_ITEM_TEXT ||
 	    gpu.items[6].count != 2u)

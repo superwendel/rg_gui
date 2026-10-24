@@ -179,6 +179,30 @@ process-median ranges, and warm-memory initialization savings are one-time
 costs. Use the same harness, compiler, flags, dependencies, power settings,
 and hardware for each side of a comparison.
 
+## GPU upload staging
+
+`bench_stage.c` times `rg_gui_gpu_stage_upload`, the copy of a prepared frame
+into the mapped upload ring, alone and with `rg_gui_gpu_prepare` before it.
+It runs without a GPU device. To compare two header sets, build the same
+source against each and alternate pinned runs:
+
+```bash
+before=../rg_gui-before/src   # headers of the revision to compare against
+flags="-std=gnu11 -O2 -DNDEBUG -DRG_GUI_GPU_USE_SSE2=1 -isystem ../rg_core/src -isystem ../rg_text/src $(pkg-config --cflags sdl3)"
+libs="$(pkg-config --libs sdl3) -lm"
+mkdir -p out/stage
+cc $flags -I "$before" benchmarks/bench_stage.c $libs -o out/stage/before
+cc $flags -I src benchmarks/bench_stage.c $libs -o out/stage/after
+for trial in 1 2 3 4 5 6 7; do
+    order="before after"; [ $((trial % 2)) -eq 0 ] && order="after before"
+    for side in $order; do taskset -c 0 out/stage/$side > out/stage/${side}_$trial.jsonl; done
+done
+```
+
+Compare the median of each case's `median_ns` across trials. The `refs`,
+`batches`, and `frame_bytes` fields describe the workload and must not change
+between trials of one side.
+
 ## Optional SSE2 geometry packing
 
 `bench_geometry.c` compares the portable rectangle/image packer with

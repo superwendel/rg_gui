@@ -149,6 +149,43 @@ behavior for comparison.
 The full showcase does not skip, because its frame-time plot and statistics
 change every frame by design.
 
+### 5. Four vertices per rectangle
+
+Rectangles and images were written as two triangles, six vertices, and staging
+then compared vertices 0 and 3, and 2 and 4, with two library `memcmp` calls
+per primitive to recover the quad for the indexed shader. They are now written
+as four vertices in corner order. Solid and image items are quads by
+definition, and triangles have their own `RG_GUI_GPU_ITEM_TRIANGLES` item, so
+packing never reads vertex contents. The indexed vertex shader maps quad corner
+3 to raw vertex 3 instead of 5. Custom image materials draw the same four
+vertices through the shared quad index buffer.
+
+A host-only staging benchmark stages one prepared frame into a mapped ring.
+Seven alternating pinned trials, median of process medians:
+
+| Workload | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| Stage 1,024 solid rectangles | 17.99 us | 3.10 us | -83% |
+| Stage 1,024 images, alternating textures | 32.67 us | 24.74 us | -24% |
+| Prepare and stage 1,024 solid rectangles | 31.59 us | 18.76 us | -41% |
+| Prepare and stage 1,024 images | 50.47 us | 41.17 us | -18% |
+
+The showcase's own timers agree. Immediate presentation, three alternating
+pairs of 1,200 measured frames, median of run medians:
+
+| Scenario | Stage | Prepare | Geometry upload |
+| --- | ---: | ---: | ---: |
+| idle, before | 30.1 us | 45.6 us | 60.7 KB |
+| idle, after | 17.6 us | 41.6 us | 41.5 KB |
+| images, before | 86.6 us | 87.2 us | 122.3 KB |
+| images, after | 56.1 us | 72.7 us | 82.6 KB |
+
+Draw calls (18 and 531) and glyph counts are unchanged. The GPU device test
+renders byte-identical pixels with the old and new code, across the 672 painted
+pixels of its 64x64 target. Total frame work did not change measurably: at 1.6
+to 2.5 ms per frame SDL and the driver dominate, and the 16 to 45 us saved is
+inside the run-to-run spread.
+
 ## Measured effect of the changes
 
 Extended CPU suite, `benchmarks/run.py compare`, five alternating process
@@ -351,26 +388,14 @@ may change that balance; it was not measured.
 
 ## Remaining opportunities, in priority order
 
-1. **Four vertices per rectangle instead of six.** Rectangles and images are
-   emitted as two triangles (120 bytes) and the frame packer then detects the
-   shared corners with two `memcmp`s to emit one quad reference. Emitting four
-   vertices with an explicit quad item type removes the detection pass and a
-   third of the geometry upload (60 KB to 40 KB per showcase frame). It needs
-   a one-line change in `rg_gui_indexed.vert.hlsl` (quad corner 3 maps to raw
-   vertex 3) and a per-item vertex stride. Expected gain: roughly 10 us of
-   CPU per showcase frame and less upload bandwidth.
-2. **A smaller `RgGuiDrawCmd`.** The command is 80 bytes because `rg_vec4`
+1. **A smaller `RgGuiDrawCmd`.** The command is 80 bytes because `rg_vec4`
    colors force 16-byte alignment and padding. Packing colors to 32-bit RGBA
    (the renderer converts them anyway) and tightening the union would bring a
    command to 32-48 bytes. The list is written once and read three times per
    frame (overlay merge, renderer prepare, GPU prepare), so this is cache
    footprint, not instructions. It changes a public struct and belongs in a
    1.0 break.
-3. **Carry text length in the command.** The renderer calls `strlen` on every
-   non-static text command each frame; the frontend already knows the length
-   when it copies the text. There is unused padding in the text union member
-   for a 32-bit length. Expected gain: a few microseconds per frame.
-4. **Larger fonts.** Done on the rg_text side on 2026-10-22: its loader now
+2. **Larger fonts.** Done on the rg_text side on 2026-10-22: its loader now
    builds an ASCII glyph table, a cached fallback index, and per-glyph kerning
    ranges, and aligned layout resolves each glyph once. rg_text's own paired
    benchmark improved 35 to 88 percent across every workload with identical
@@ -379,15 +404,25 @@ may change that balance; it was not measured.
    in rg_text is still a binary search (3 to 4x slower than the table on the
    4,096-glyph benchmark font). Raising the slot counts is the remaining knob
    for very large fonts.
-5. **Text-area relayout on edit.** Each keystroke re-wraps the whole document.
+3. **Text-area relayout on edit.** Each keystroke re-wraps the whole document.
    At the current 1,024-visual-line cap that is 100-200 us for 8 KiB of ASCII,
    acceptable, but a paragraph-local relayout would make it independent of
    document size if the cap is ever raised.
-6. **`rg_gui_text_area_find_visual_line` is a linear scan** over up to 1,024
+4. **`rg_gui_text_area_find_visual_line` is a linear scan** over up to 1,024
    lines, called a few times per frame. A binary search over line starts is a
    small, safe win.
 
 ## Verified and left alone
+
+- Text length in the draw command, tried on 2026-10-23 and not adopted.
+  Recording the byte length at push time removes the renderer's `strlen` for
+  each changing text command, an expected saving of about 2 us per 128 changing
+  labels. The extended suite could not separate that from run-to-run noise. The
+  added branch also slowed image-only preparation by 6 to 10% in four paired
+  runs, although image commands never reach it, so the cost comes from code
+  shape in the shared command loops. Two other formulations did not remove the
+  slowdown reliably. It is worth retrying only as part of a draw-command layout
+  change.
 
 - Reclaim/eviction sweeps: 0.05 to 0.09 ms when they happen, roughly every 450
   frames in the showcase.

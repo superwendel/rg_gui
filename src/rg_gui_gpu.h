@@ -763,12 +763,17 @@ typedef struct RgGuiGpuVertex
 
 typedef char RgGuiGpuVertexMustBe20Bytes[(sizeof(RgGuiGpuVertex) == 20u) ? 1 : -1];
 
+/* SOLID and IMAGE items hold quads of four vertices (two triangles each);
+ * TRIANGLES items hold a plain triangle list. */
 typedef enum RgGuiGpuItemType
 {
 	RG_GUI_GPU_ITEM_SOLID = 0,
 	RG_GUI_GPU_ITEM_IMAGE = 1,
-	RG_GUI_GPU_ITEM_TEXT = 2
+	RG_GUI_GPU_ITEM_TEXT = 2,
+	RG_GUI_GPU_ITEM_TRIANGLES = 3
 } RgGuiGpuItemType;
+
+#define RG_GUI_GPU_QUAD_VERTICES 4u
 
 typedef struct RgGuiGpuItem
 {
@@ -1315,11 +1320,13 @@ RGINLINE void rg_gui_gpu_set_vertex(RgGuiGpuVertex* vertex, f32 x, f32 y,
 	vertex->v = v;
 }
 
+/* Emit one quad as four vertices in the order the indexed vertex shader expects:
+ * top-left, top-right, bottom-right, bottom-left. */
 RGINLINE int rg_gui_gpu_add_rect_vertices(RgGuiGpuRenderer* renderer,
                                           RgGuiRect rect, RgGuiRect uv, u32 color)
 {
 	if (renderer->vertex_count > renderer->vertex_capacity ||
-	    renderer->vertex_capacity - renderer->vertex_count < 6u)
+	    renderer->vertex_capacity - renderer->vertex_count < RG_GUI_GPU_QUAD_VERTICES)
 		return 0;
 	RgGuiGpuVertex* out = &renderer->vertices[renderer->vertex_count];
 #if RG_GUI_GPU_SSE2_ENABLED
@@ -1342,21 +1349,15 @@ RGINLINE int rg_gui_gpu_add_rect_vertices(RgGuiGpuRenderer* renderer,
 	out[1].v = uv.y;
 	_mm_storeu_ps((f32*)&out[2], v11);
 	out[2].v = uv.y + uv.h;
-	_mm_storeu_ps((f32*)&out[3], v00);
-	out[3].v = uv.y;
-	_mm_storeu_ps((f32*)&out[4], v11);
-	out[4].v = uv.y + uv.h;
-	_mm_storeu_ps((f32*)&out[5], v01);
-	out[5].v = uv.y + uv.h;
+	_mm_storeu_ps((f32*)&out[3], v01);
+	out[3].v = uv.y + uv.h;
 #else
 	rg_gui_gpu_set_vertex(&out[0], rect.x, rect.y, color, uv.x, uv.y);
 	rg_gui_gpu_set_vertex(&out[1], rect.x + rect.w, rect.y, color, uv.x + uv.w, uv.y);
 	rg_gui_gpu_set_vertex(&out[2], rect.x + rect.w, rect.y + rect.h, color, uv.x + uv.w, uv.y + uv.h);
-	rg_gui_gpu_set_vertex(&out[3], rect.x, rect.y, color, uv.x, uv.y);
-	rg_gui_gpu_set_vertex(&out[4], rect.x + rect.w, rect.y + rect.h, color, uv.x + uv.w, uv.y + uv.h);
-	rg_gui_gpu_set_vertex(&out[5], rect.x, rect.y + rect.h, color, uv.x, uv.y + uv.h);
+	rg_gui_gpu_set_vertex(&out[3], rect.x, rect.y + rect.h, color, uv.x, uv.y + uv.h);
 #endif
-	renderer->vertex_count += 6u;
+	renderer->vertex_count += RG_GUI_GPU_QUAD_VERTICES;
 	return 1;
 }
 
@@ -1479,7 +1480,7 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 			RgGuiRect uv = {0};
 			if (!rg_gui_gpu_add_rect_vertices(renderer, cmd->data.rect.rect, uv, color) ||
 			    !rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_SOLID, 0u, 0u,
-			                         first, 6u,
+			                         first, RG_GUI_GPU_QUAD_VERTICES,
 			                         clip_enabled, clip))
 				goto capacity_failure;
 			continue;
@@ -1503,7 +1504,7 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 			rg_gui_gpu_set_vertex(&out[1], cmd->data.triangle.b.x, cmd->data.triangle.b.y, color, 0.0f, 0.0f);
 			rg_gui_gpu_set_vertex(&out[2], cmd->data.triangle.c.x, cmd->data.triangle.c.y, color, 0.0f, 0.0f);
 			renderer->vertex_count += 3u;
-			if (!rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_SOLID, 0u, 0u,
+			if (!rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_TRIANGLES, 0u, 0u,
 			                         first, 3u,
 			                         clip_enabled, clip))
 				goto capacity_failure;
@@ -1526,7 +1527,7 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 			                                  cmd->data.image.uv, color) ||
 			    !rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_IMAGE,
 			                         cmd->data.image.texture, cmd->data.image.material,
-			                         first, 6u,
+			                         first, RG_GUI_GPU_QUAD_VERTICES,
 			                         clip_enabled, clip))
 				goto capacity_failure;
 			continue;
@@ -1631,28 +1632,25 @@ RGINLINE int rg_gui_gpu_pack_frame(const RgGuiGpuRenderer* renderer,
 		}
 		else
 		{
-			if ((source->type != RG_GUI_GPU_ITEM_SOLID && source->type != RG_GUI_GPU_ITEM_IMAGE) ||
-			    source->count % 3u || source->first > renderer->vertex_count ||
+			/* SOLID and IMAGE items are quads of four vertices; TRIANGLES items
+			 * are plain triangle lists. One reference per primitive. */
+			const int quad = source->type != RG_GUI_GPU_ITEM_TRIANGLES;
+			const u32 stride = quad ? RG_GUI_GPU_QUAD_VERTICES : 3u;
+			if ((source->type != RG_GUI_GPU_ITEM_SOLID && source->type != RG_GUI_GPU_ITEM_IMAGE &&
+			     source->type != RG_GUI_GPU_ITEM_TRIANGLES) ||
+			    source->count % stride || source->first > renderer->vertex_count ||
 			    source->count > renderer->vertex_count - source->first) goto failure;
 			const u64 kind = source->type == RG_GUI_GPU_ITEM_IMAGE ? (u64)2u << 62u : (u64)1u << 62u;
 			u32 offset = source->first, remaining = source->count;
 			while (remaining)
 			{
-				const RgGuiGpuVertex* v = renderer->vertices + offset;
-				/* Byte equality includes XY, packed color and UV. This is an
-				 * exact index remapping, valid for arbitrary triangle lists;
-				 * all rectangles/images emitted by rg_gui satisfy it. */
-				const int quad = remaining >= 6u &&
-				                 !memcmp(&v[0], &v[3], sizeof(*v)) &&
-				                 !memcmp(&v[2], &v[4], sizeof(*v));
 				if (upload->ref_count >= ref_limit) goto failure;
-				/* Geometry word1 bit0 is a quad flag, separate from kind in
+				/* Geometry word1 bit0 is the quad flag, separate from kind in
 				 * bits30..31. Text still uses word1 as its original run index. */
 				u64 reference = kind | ((u64)(quad != 0) << 32u) | offset;
 				memcpy(refs + upload->ref_count++ * 8u, &reference, sizeof(reference));
-				const u32 consumed = quad ? 6u : 3u;
-				offset += consumed;
-				remaining -= consumed;
+				offset += stride;
+				remaining -= stride;
 			}
 		}
 		const u32 count = upload->ref_count - first;
@@ -2072,13 +2070,21 @@ RGINLINE RgGuiGpuStats rg_gui_gpu_draw(const RgGuiGpuRenderer* renderer,
 		}
 		if (custom)
 		{
-			/* Preserve the established 20-byte vertex / 16-byte uniform ABI. */
+			/* Preserve the established 20-byte vertex / 16-byte uniform ABI. A
+			 * material batch holds only image quads, so the persistent quad index
+			 * buffer (0,1,2,0,2,3 per four vertices) expands them for the custom
+			 * pipeline without a vertex-input change. */
 			SDL_PushGPUVertexUniformData(command_buffer, 0u, geometry_uniforms, sizeof(geometry_uniforms));
 			SDL_GPUBufferBinding vertices = {frame,
 			                                 upload->geometry_offset + batch->first_vertex * (u32)sizeof(RgGuiGpuVertex)};
 			SDL_BindGPUVertexBuffers(pass, 0u, &vertices, 1u);
-			SDL_DrawGPUPrimitives(pass, batch->geometry_vertices, 1u, 0u, 0u);
+			SDL_GPUBufferBinding indices = {renderer->index_buffer, 0u};
+			SDL_BindGPUIndexBuffer(pass, &indices,
+			                       rg_gui_gpu_index_element_size(renderer->ref_capacity) == sizeof(u16) ? SDL_GPU_INDEXELEMENTSIZE_16BIT : SDL_GPU_INDEXELEMENTSIZE_32BIT);
+			const u32 index_count = batch->geometry_vertices / RG_GUI_GPU_QUAD_VERTICES * 6u;
+			SDL_DrawGPUIndexedPrimitives(pass, index_count, 1u, 0u, 0, 0u);
 			stats.vertices += batch->geometry_vertices;
+			stats.indices += index_count;
 			indexed_bound = 0;
 			bound_texture = 0u;
 		}

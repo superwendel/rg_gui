@@ -395,8 +395,8 @@ int main(void)
 	RgGuiGpuStats stats = rg_gui_gpu_draw(&renderer, command_buffer, pass,
 	                                      &draw_desc, &upload);
 	SDL_EndGPURenderPass(pass);
-	int stats_valid = stats.geometry_vertices == 69u && stats.text_instances == 1u &&
-	                  stats.items == 10u && stats.draw_calls > 0u && stats.dispatches == 0u &&
+	int stats_valid = stats.geometry_vertices == 47u && stats.text_instances == 1u &&
+	                  stats.items == 11u && stats.draw_calls > 0u && stats.dispatches == 0u &&
 	                  stats.image_bind_calls == 3u &&
 	                  stats.custom_image_draw_calls == 1u &&
 	                  stats.image_bind_failures == 1u &&
@@ -417,7 +417,12 @@ int main(void)
 	if (!renderer.text.cache_initialized) goto cleanup;
 	if (!stats_valid)
 	{
-		SDL_SetError("rg_gui GPU device stats did not match the encoded frame");
+		SDL_SetError("rg_gui GPU device stats did not match the encoded frame "
+		             "(geometry_vertices=%u text_instances=%u items=%u draw_calls=%u dispatches=%u "
+		             "image_bind_calls=%u custom_image_draw_calls=%u image_bind_failures=%u)",
+		             stats.geometry_vertices, stats.text_instances, stats.items, stats.draw_calls,
+		             stats.dispatches, stats.image_bind_calls, stats.custom_image_draw_calls,
+		             stats.image_bind_failures);
 		goto cleanup;
 	}
 	/* Submit two more frames without a GPU wait, wrapping the two frame buffers. */
@@ -473,7 +478,10 @@ int main(void)
 	    {52, 4, 64, 128, 192}, {60, 4, 255, 255, 255},
 	    {56, 12, 64, 128, 192}, {4, 18, 0, 0, 0}, {4, 24, 255, 0, 0},
 	    {12, 24, 0, 0, 0}, {20, 24, 0, 255, 0}, {36, 24, 128, 0, 127},
-	    {49, 21, 255, 255, 0}, {54, 26, 0, 0, 0}};
+	    {49, 21, 255, 255, 0}, {54, 26, 0, 0, 0},
+	    /* Lower-left triangle of the custom-material quad: the custom pipeline
+	       must receive both triangles of each four-vertex quad. */
+	    {25, 6, 64, 128, 192}};
 	int pixels_valid = 1;
 	for (u32 i = 0u; i < RG_ARRAY_COUNT(probes); i++) {
 		const u8* pixel = pixels + (probes[i].y * 64u + probes[i].x) * 4u;
@@ -486,7 +494,7 @@ int main(void)
 	}
 	SDL_UnmapGPUTransferBuffer(device, readback);
 	if (!pixels_valid) { SDL_SetError("Indexed material/clip/alpha/overlay pixel regression"); goto cleanup; }
-	puts("Indexed material, clip, alpha, triangle, and overlay: 16 GPU pixel probes passed");
+	puts("Indexed material, clip, alpha, triangle, and overlay: 17 GPU pixel probes passed");
 	if (!test_gpu_full_cache_ring(device, target_texture, readback, &renderer, &text_renderer, &ring)) goto cleanup;
 	if (!test_gpu_mutable_value_text(device, 2u) || !test_gpu_mutable_value_text(device, 3u)) goto cleanup;
 
