@@ -39,8 +39,10 @@ typedef enum FullHelpMenuItem
 	FULL_HELP_KEYBOARD
 } FullHelpMenuItem;
 
-/* Extra docked property panels for the dock-pressure profile (--dock-panels). */
+/* Extra docked property panels for the dock-pressure profile (--dock-panels),
+ * shared as tabs among at most FULL_DOCK_COLUMNS new columns. */
 #define FULL_DOCK_PANEL_MAX 60u
+#define FULL_DOCK_COLUMNS 3u
 
 typedef struct FullDockPanel
 {
@@ -581,7 +583,8 @@ static void full_dock_panels_init(FullDemoState* state, u32 count)
 	}
 }
 
-/* Give every leaf of the dock tree an equal share of its parent's space. */
+/* Split every node in proportion to its leaf count. With only vertical splits,
+ * as here, every column gets the same width. */
 static u32 full_dock_balance(RgGuiContext* gui, u32 node_index)
 {
 	if (node_index == 0u || node_index > gui->dock_node_capacity) return 0u;
@@ -593,18 +596,25 @@ static u32 full_dock_balance(RgGuiContext* gui, u32 node_index)
 	return a + b;
 }
 
-/* Every third panel opens a new leaf, alternating left and top so the tree
- * spirals inward; the next two join that leaf as tabs. */
+/* Dock the extra panels into up to FULL_DOCK_COLUMNS new full-height columns
+ * at the left. rg_gui_dockspace_dock splits the first leaf, which is always a
+ * full-height column here, so each LEFT dock opens a new full-height column
+ * and the CENTER docks after it join that column as tabs. Column c holds
+ * panels [c * n / columns, (c + 1) * n / columns), so one panel per new
+ * column is visible. Every column then gets the same width. */
 static void full_dock_panels(RgGuiContext* gui, FullDemoState* state)
 {
-	for (u32 i = 0u; i < state->dock_panel_count; i++)
+	u32 count = state->dock_panel_count;
+	if (count == 0u) return;
+	u32 columns = count < FULL_DOCK_COLUMNS ? count : FULL_DOCK_COLUMNS;
+	for (u32 i = 0u; i < count; i++)
 	{
-		RgGuiDockSlot slot = i % 3u ? RG_GUI_DOCK_SLOT_CENTER :
-		                     (i / 3u) % 2u ? RG_GUI_DOCK_SLOT_TOP : RG_GUI_DOCK_SLOT_LEFT;
+		int opens_column = i == 0u || i * columns / count != (i - 1u) * columns / count;
 		rg_gui_dockspace_dock(gui, &state->dockspace, &state->dock_panels[i].window,
-		                      state->dock_panels[i].title, full_dock_panel_id(i), slot);
+		                      state->dock_panels[i].title, full_dock_panel_id(i),
+		                      opens_column ? RG_GUI_DOCK_SLOT_LEFT : RG_GUI_DOCK_SLOT_CENTER);
 	}
-	if (state->dock_panel_count) full_dock_balance(gui, state->dockspace.root);
+	full_dock_balance(gui, state->dockspace.root);
 }
 
 /* A small property inspector: one changing readout, sliders, a toggle, a
