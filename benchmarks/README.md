@@ -182,7 +182,9 @@ and hardware for each side of a comparison.
 ## GPU upload staging
 
 `bench_stage.c` times `rg_gui_gpu_stage_upload`, the copy of a prepared frame
-into the mapped upload ring, alone and with `rg_gui_gpu_prepare` before it.
+into the mapped upload ring, alone and with `rg_gui_gpu_prepare` before it,
+for solid rectangles, images that alternate between two textures, and the same
+images inside one clip.
 It runs without a GPU device. To compare two header sets, build the same
 source against each and alternate pinned runs:
 
@@ -201,8 +203,9 @@ done
 
 Before timing each case, the benchmark decodes its staged frame the way
 `rg_gui_indexed.vert` does and compares every quad corner's position, color,
-and UV, and each image's batch texture, with the source command; a mismatch
-exits with an error. Compare the median of each case's `median_ns` across
+and UV, each image's batch texture, and, with current headers, each
+reference's clip-table entry, with the source command; a mismatch exits with an
+error. Compare the median of each case's `median_ns` across
 trials. The `refs`, `batches`, and `frame_bytes` fields describe the workload
 and must not change between trials of one side.
 

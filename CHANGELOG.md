@@ -46,6 +46,12 @@ between 0.x releases.
 
 ### Changed
 
+- The indexed shader clips each primitive itself, so a clip change no longer
+  ends a draw call: the idle showcase draws in one call instead of 23 and a
+  60-panel dock layout in one instead of 42. With VSync that saves 29 and
+  54 us of CPU per frame across draw encoding, preparation, and staging, with
+  identical pixels and unchanged GPU time. Text run records in the frame
+  upload shrink from 32 to 16 bytes.
 - Rectangles and images are four vertices instead of six, and triangles are a
   separate `RG_GUI_GPU_ITEM_TRIANGLES` item, so staging no longer compares
   vertices to find quads. In the idle showcase, staging is 41% cheaper,
@@ -90,7 +96,17 @@ between 0.x releases.
 - Replace `rg_input_update` with `rg_input_begin_frame` before SDL event polling
   and `rg_input_sample` afterward. See [ordered input](docs/rg_gui.md#ordered-input).
 - Recompile shaders after updating: `rg_gui_indexed.vert` now reads four
-  vertices per quad, and an older compiled shader draws quads incorrectly.
+  vertices per quad and clips with clip distances, and an older compiled
+  shader draws incorrectly.
+- The indexed renderer needs SDL_GPU clip distances: keep
+  `SDL_PROP_GPU_DEVICE_CREATE_FEATURE_CLIP_DISTANCE_BOOLEAN` enabled (SDL's
+  default) when creating the device. `max_items` must be below 2^29.
+- `RgGuiGpuItem.clip_enabled` is now `clip_index`, zero when unclipped and
+  otherwise the item's entry in the frame clip table (`RgGuiGpuUpload`
+  `clip_count` and `clips_offset`). Stock `RgGuiGpuIndexedBatch` entries have
+  `clip_enabled` zero; material batches keep their scissor clip. A renderer
+  set up by hand rather than with `rg_gui_gpu_create` must provide `clips` and
+  `clip_capacity` (item capacity plus one).
 - Code that reads `RgGuiGpuItem` must accept `RG_GUI_GPU_ITEM_TRIANGLES`.
   Solid and image items hold four vertices per primitive.
 - Custom image-material pipelines receive each image as four vertices through

@@ -1112,8 +1112,8 @@ RGINLINE int demo_render_draw_list_tiled(SDL_GPUDevice* device, SDL_Window* wind
 		else
 		{
 			/* A dirty rectangle must be repainted from its background up, so the
-			 * whole list is drawn once per rectangle; batches outside it are
-			 * skipped by the viewport scissor. */
+			 * whole list is drawn once per rectangle, with the rectangle as the
+			 * viewport scissor. */
 			for (u32 r = 0u; r < tiles->cache.stats.rects; r++)
 			{
 				draw_desc.viewport = tiles->cache.rects[r];

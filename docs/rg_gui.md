@@ -206,11 +206,16 @@ device. The fixed shader layout is:
 Backend selection and shader entry points are handled by `rg_gpu.h`.
 
 The high-level renderer uses `rg_gui_indexed.vert` and `rg_gui_indexed.frag` to
-combine adjacent text, shapes, and stock images with compatible clips and
-textures. It reads cached glyph quads directly and uses a persistent index
-buffer, with no per-frame compute expansion. The standalone text-only API
-retains its compute path. Custom image materials keep the 20-byte
-`RgGuiGpuVertex` layout and existing vertex uniforms.
+draw text, shapes, and stock images in as few calls as possible. The vertex
+shader clips each primitive to its own clip rectangle with clip distances,
+rounding the edges as a scissor would, so a draw call ends only where the
+texture changes or an image material needs its own pipeline. It reads cached
+glyph quads directly and uses a persistent index buffer, with no per-frame
+compute expansion. Clip distances are an SDL_GPU device feature that SDL
+enables by default; keep `SDL_PROP_GPU_DEVICE_CREATE_FEATURE_CLIP_DISTANCE_BOOLEAN`
+enabled when creating the device. The standalone text-only API retains its
+compute path. Custom image materials keep the 20-byte `RgGuiGpuVertex` layout
+and existing vertex uniforms, and are clipped by a scissor.
 
 `max_frame_refs` bounds indexed glyph/shape references; zero derives a safe
 limit from the glyph and geometry capacities. `frame_buffer_count` selects
@@ -395,7 +400,8 @@ submission: acknowledging an out-of-order command afterward cannot repair a draw
 that already read the wrong cached geometry.
 
 Upload packets snapshot sorted destination ranges, copied page/run/geometry
-contents, indexed references, and ordered draw batches. Text-only packets also
+contents, indexed references, the clip table, and ordered draw batches.
+Text-only packets also
 own clip batches resolved to glyph offsets. Encoding and drawing do not
 reread the latest prepared frame. Every
 allocated page, including its unused tail, is initialized before whole adjacent
@@ -536,7 +542,7 @@ if (mode == RG_GUI_TILE_REDRAW_FULL) { /* LOADOP_CLEAR, draw with the full viewp
 else if (mode == RG_GUI_TILE_REDRAW_PARTIAL)
 {
 	/* LOADOP_LOAD, then for each rect: draw_desc.viewport = tiles.rects[i];
-	 * rg_gui_gpu_draw skips batches outside the viewport scissor. */
+	 * the viewport becomes the scissor, so only the rectangle is repainted. */
 }
 /* blit the target to the swapchain, submit, then: */
 rg_gui_tile_cache_commit(&tiles);
@@ -546,7 +552,7 @@ Three contracts make this exact rather than approximate:
 
 - The draw list must paint every pixel it owns, starting with an opaque
   backdrop, because a dirty rectangle is repainted from the list alone.
-- Binning uses the same floor/ceil pixel rounding as the renderer's scissor,
+- Binning uses the same floor/ceil pixel rounding as the renderer's clipping,
   so a command whose exact float intersection with its clip is empty but which
   still rasterizes a pixel is binned.
 - Texture contents are outside the digest: bump `tiles.external_revision` when

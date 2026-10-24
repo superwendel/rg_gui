@@ -191,6 +191,70 @@ pixels of its 64x64 target. Total frame work did not change measurably: at 1.6
 to 2.5 ms per frame SDL and the driver dominate, and the 16 to 45 us saved is
 inside the run-to-run spread.
 
+### 6. Clipping in the shader
+
+The indexed renderer set a scissor per batch, so every clip change ended a
+draw call: 23 per idle showcase frame, 42 with 60 docked panels. The vertex
+shader now clips each primitive itself. Preparation gives each distinct clip
+an entry in a frame clip table, once per clip change rather than per command;
+each rectangle, image, or triangle reference carries its entry in 29 spare
+bits, and each text run's record carries it for the run's glyphs. The shader
+writes four clip distances from the entry, rounding the edges exactly as the
+scissor did: floor the near edges and ceil the far ones after the draw
+offset. The rasterizer drops the pixels outside. A draw call now ends only
+where the texture changes or an image material needs its own pipeline;
+material batches keep a scissor. Text run records in the frame upload shrank
+from 32 to 16 bytes, and each clip entry adds 16 bytes.
+
+SDL_GPU enables clip distances by default
+(`SDL_PROP_GPU_DEVICE_CREATE_FEATURE_CLIP_DISTANCE_BOOLEAN`), and the shader
+also compiles to DXIL and Metal.
+
+| Scenario | idle | text-idle, edit, scroll | docks, 3 panels | docks, 60 panels | images | images-grouped |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Draw calls before | 23 | 18 | 32 | 42 | 536 | 26 |
+| Draw calls after | 1 | 1 | 1 | 1 | 513 | 3 |
+
+CPU time per frame, median of per-run medians, alternating builds. With VSync,
+the normal mode, four rounds of 600 frames; every difference below was lower
+in all four rounds, except image staging, which was equal:
+
+| VSync | Draw encoding | Prepare | Stage |
+| --- | ---: | ---: | ---: |
+| idle | 102.3 to 82.3 us | 56.7 to 51.0 us | 25.6 to 22.4 us |
+| docks, 60 panels | 122.6 to 81.9 us | 70.5 to 65.0 us | 37.2 to 29.6 us |
+| images | 684.6 to 616.0 us | 141.1 to 133.8 us | 98.7 to 99.5 us |
+
+With Immediate presentation, six rounds of 1,200 frames, draw encoding fell
+from 88.5 to 67.9 us idle and from 104.1 to 66.1 us with 60 panels (6/6
+rounds each), and preparation and staging fell 2 to 8 us. The image scenario
+was the exception: 23 fewer draw calls saved 11 us of encoding, but
+preparation and staging measured 7 and 10 us slower in every round, and frame
+work was 10 us lower at the median, in 3 of 6 rounds. The cause was not
+isolated. Timers inside the packer put about 2.5 us in the vertex copy, which
+copies the same bytes as before, and 2 us in the item loop. Moving the vertices to the start of the
+frame or aligning them to 64 bytes did not change it, and Clang builds showed
+the same pattern. It does not appear with VSync or in the device-free staging
+benchmark, which measures the new code at about 1.2 ns per image item. Under
+Immediate presentation the 10th-percentile frame interval also rose about 50
+us, idle and with 60 panels, while the mean frame interval, and so the frame
+rate, stayed the same: about 550 frames per second, limited by presentation.
+
+GPU time was measured without a profiler by drawing each frame 30 extra times
+offscreen, which makes the GPU the bottleneck at 27 to 51 ms per frame. Over
+four rounds the two builds stayed within 0.1 percent of each other in idle,
+docks, and images (28.246 against 28.221 ms idle), so the clip distances cost
+no measurable GPU time.
+
+Pixels are unchanged. A scratch build fixed the timestep and zeroed the
+statistics panel's live numbers so that runs repeat exactly; 100 frames
+across ten scenarios read back byte-identical between the old and new
+builds. A new device test draws rectangles, an image, a triangle, and text
+under fractional, nested, shared, empty, and off-screen clips at four draw
+offsets and in a reduced viewport, and checks all 20,480 pixels against
+`rg_gui_gpu_scissor`. It fails when the shader drops the draw offset from the
+clip or ignores a glyph's clip.
+
 ## Measured effect of the changes
 
 Extended CPU suite, `benchmarks/run.py compare`, five alternating process
@@ -439,10 +503,11 @@ begin call costs about 0.06 us. Together the dock calls are about 17 us of a
 A gprof profile was not used for this. In this binary it attributed 60 calls
 per frame to the once-per-frame menu function, so its labels are unreliable.
 
-Every draw call after the first in a frame begins at a clip change, at 0, 3,
-and 60 extra panels; none begins at a texture or material change. Draw
-encoding costs about 0.5 us of CPU per draw call. GPU execution time was not
-measured, because no GPU profiler is installed on this machine.
+Every draw call after the first in a frame began at a clip change, at 0, 3,
+and 60 extra panels; none began at a texture or material change. Draw
+encoding cost about 0.5 to 0.9 us of CPU per draw call. Change 6 moved
+clipping into the shader, and every column of the table now draws in one
+call.
 
 Until 2026-10-23 the showcase's own layout left the right half of its dock
 space empty. `rg_gui_dockspace_dock` always splits the first leaf, so docking
@@ -484,20 +549,12 @@ hidden tab.
      what custom renderers can express, so 56 is the recommended target.
    Every custom renderer that reads `cmd->data.*.color` changes, as do the
    reference renderer, the tile cache, and the tests.
-2. **Clip changes split batches.** The idle showcase issues 23 draw calls and
-   the 60-panel case 42. No batch starts at a texture change, so without clip
-   breaks each frame would be one draw call. Each costs about 0.5 us of CPU in
-   draw encoding; its GPU cost was not measured. Clipping per reference in the
-   shader, with the clip rectangle in the reference stream, would let batches
-   span clip changes. That is a renderer redesign with its own GPU cost per
-   fragment or vertex, so measure it with a GPU profiler before committing
-   to it.
-3. **Tab bars measure every tab each frame.** A visible docked window measures
+2. **Tab bars measure every tab each frame.** A visible docked window measures
    the title of every tab in its node, about 0.09 us per tab, and each hidden
    tab's window call adds about 0.06 us. Caching tab widths until a title
    changes could remove most of the tab-bar part, about 5 us per frame at 60
    tabbed panels.
-4. **Larger fonts.** Done on the rg_text side on 2026-10-22: its loader now
+3. **Larger fonts.** Done on the rg_text side on 2026-10-22: its loader now
    builds an ASCII glyph table, a cached fallback index, and per-glyph kerning
    ranges, and aligned layout resolves each glyph once. rg_text's own paired
    benchmark improved 35 to 88 percent across every workload with identical
@@ -506,11 +563,11 @@ hidden tab.
    in rg_text is still a binary search (3 to 4x slower than the table on the
    4,096-glyph benchmark font). Raising the slot counts is the remaining knob
    for very large fonts.
-5. **Text-area relayout on edit.** Each keystroke re-wraps the whole document.
+4. **Text-area relayout on edit.** Each keystroke re-wraps the whole document.
    At the current 1,024-visual-line cap that is 100-200 us for 8 KiB of ASCII,
    acceptable, but a paragraph-local relayout would make it independent of
    document size if the cap is ever raised.
-6. **`rg_gui_text_area_find_visual_line` is a linear scan** over up to 1,024
+5. **`rg_gui_text_area_find_visual_line` is a linear scan** over up to 1,024
    lines, called a few times per frame. A binary search over line starts is a
    small, safe win.
 

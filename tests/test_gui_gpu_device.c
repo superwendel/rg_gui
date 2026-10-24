@@ -70,33 +70,50 @@ static int test_gpu_full_cache_ring(SDL_GPUDevice* device, SDL_GPUTexture* targe
 	int passed = 0;
 	SDL_GPUCommandBuffer* command = NULL;
 	RgGuiGpuUpload upload = {0};
-	RgGuiDrawCmd commands[48] = {0};
-	for (u32 i = 0u; i < 16u; i++)
+	/* Eight 8-pixel columns, each with its own text clip and triangle clip: all
+	 * 16 items and all 17 clip-table entries, so the frame fills its bound, and
+	 * the shader-side clips still let it draw in one call. */
+	RgGuiDrawCmd commands[80] = {0};
+	u32 command_count = 0u;
+	for (u32 column = 0u; column < 8u; column++)
 	{
-		commands[i].type = RG_GUI_CMD_TEXT;
-		commands[i].data.text.text = i & 1u ? "????" : "AAAA";
-		commands[i].data.text.pos = rg_vec2((f32)i * 4.0f, 48.0f);
-		commands[i].data.text.scale = 1.0f;
-		commands[i].data.text.color = rg_gui_color(1, 1, 1, 1);
+		RgGuiDrawCmd* clip = &commands[command_count++];
+		clip->type = RG_GUI_CMD_CLIP_PUSH;
+		clip->data.clip.rect = rg_gui_make_rect((f32)column * 8.0f, 40.0f, 8.0f, 20.0f);
+		for (u32 i = column * 2u; i < column * 2u + 2u; i++)
+		{
+			RgGuiDrawCmd* text_cmd = &commands[command_count++];
+			text_cmd->type = RG_GUI_CMD_TEXT;
+			text_cmd->data.text.text = i & 1u ? "????" : "AAAA";
+			text_cmd->data.text.pos = rg_vec2((f32)i * 4.0f, 48.0f);
+			text_cmd->data.text.scale = 1.0f;
+			text_cmd->data.text.color = rg_gui_color(1, 1, 1, 1);
+		}
+		commands[command_count++].type = RG_GUI_CMD_CLIP_POP;
+		clip = &commands[command_count++];
+		clip->type = RG_GUI_CMD_CLIP_PUSH;
+		clip->data.clip.rect = rg_gui_make_rect((f32)column * 8.0f, 30.0f, 8.0f, 6.0f);
+		for (u32 i = column * 4u; i < column * 4u + 4u; i++)
+		{
+			RgGuiDrawCmd* triangle = &commands[command_count++];
+			f32 x = (f32)i * 2.0f;
+			triangle->type = RG_GUI_CMD_TRIANGLE;
+			triangle->data.triangle.a = rg_vec2(x, 32.0f);
+			triangle->data.triangle.b = rg_vec2(x + 2.0f, 32.0f);
+			triangle->data.triangle.c = rg_vec2(x, 34.0f);
+		}
+		commands[command_count++].type = RG_GUI_CMD_CLIP_POP;
 	}
-	for (u32 i = 0u; i < 32u; i++)
-	{
-		RgGuiDrawCmd* triangle = &commands[16u + i];
-		f32 x = (f32)i * 2.0f;
-		triangle->type = RG_GUI_CMD_TRIANGLE;
-		triangle->data.triangle.a = rg_vec2(x, 32.0f);
-		triangle->data.triangle.b = rg_vec2(x + 2.0f, 32.0f);
-		triangle->data.triangle.c = rg_vec2(x, 34.0f);
-	}
-	RgGuiDrawList list = {commands, RG_ARRAY_COUNT(commands), RG_ARRAY_COUNT(commands)};
+	RgGuiDrawList list = {commands, command_count, command_count};
 	rg_gui_renderer_clear_cache(text);
 	for (u32 phase = 0u; phase < 2u; phase++)
 	{
 		/* Two distinct four-glyph strings fill both 32-quad cache pages. Their
 		 * repeated occurrences also reach all 16 runs and 64 frame glyphs. */
 		rg_gui_gpu_invalidate_cache(gpu);
-		for (u32 i = 16u; i < RG_ARRAY_COUNT(commands); i++)
-			commands[i].data.triangle.color = rg_gui_color(1, phase ? 0.0f : 1.0f, 0, 1);
+		for (u32 i = 0u; i < command_count; i++)
+			if (commands[i].type == RG_GUI_CMD_TRIANGLE)
+				commands[i].data.triangle.color = rg_gui_color(1, phase ? 0.0f : 1.0f, 0, 1);
 		rg_gui_renderer_begin_frame(text);
 		if (!rg_gui_gpu_prepare(gpu, text, &list, list.count)) goto cleanup;
 		rg_gpu_upload_ring_begin(ring, 1);
@@ -106,6 +123,7 @@ static int test_gpu_full_cache_ring(SDL_GPUDevice* device, SDL_GPUTexture* targe
 		if (!staged || !upload.text.full_cache_upload || upload.text.run_count != 16u ||
 		    upload.text.glyph_count != 64u || upload.vertex_count != 96u || upload.ref_count != 96u ||
 		    upload.text.cached_quads.size != 64u * sizeof(RgGuiRendererCachedQuad) ||
+		    upload.item_count != 16u || upload.clip_count != 17u ||
 		    upload.frame.size != gpu->frame_capacity || used != ring->size)
 		{
 			SDL_SetError("Full-cache packet did not exactly fill its configured upload bound");
@@ -171,6 +189,235 @@ cleanup:
 	if (command) SDL_CancelGPUCommandBuffer(command);
 	rg_gui_gpu_upload_abort(gpu, &upload);
 	return passed;
+}
+
+/* Render a list into the 64x64 target and read it back. */
+static int test_gpu_render(SDL_GPUDevice* device, SDL_GPUTexture* target, SDL_GPUTransferBuffer* readback,
+                           RgGuiGpuRenderer* gpu, RgGuiRenderer* text, RgGpuUploadRing* ring,
+                           const RgGuiDrawList* list, const RgGuiGpuDrawDesc* draw, u8* pixels,
+                           u32* clip_count, RgGuiGpuStats* stats)
+{
+	int passed = 0;
+	SDL_GPUCommandBuffer* command = NULL;
+	RgGuiGpuUpload upload = {0};
+	rg_gui_renderer_begin_frame(text);
+	if (!rg_gui_gpu_prepare(gpu, text, list, list->count)) return 0;
+	rg_gpu_upload_ring_begin(ring, 1);
+	int staged = rg_gui_gpu_stage_upload(gpu, text, ring, &upload);
+	rg_gpu_upload_ring_end(ring);
+	if (!staged) return 0;
+	*clip_count = upload.clip_count;
+	command = SDL_AcquireGPUCommandBuffer(device);
+	if (!command) goto cleanup;
+	SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(command);
+	if (!copy) goto cleanup;
+	rg_gui_gpu_encode_upload(gpu, copy, ring, &upload);
+	SDL_EndGPUCopyPass(copy);
+	SDL_GPUColorTargetInfo color = {0};
+	color.texture = target;
+	color.clear_color = (SDL_FColor){0, 0, 0, 1};
+	color.load_op = SDL_GPU_LOADOP_CLEAR;
+	color.store_op = SDL_GPU_STOREOP_STORE;
+	SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(command, &color, 1u, NULL);
+	if (!pass) goto cleanup;
+	*stats = rg_gui_gpu_draw(gpu, command, pass, draw, &upload);
+	SDL_EndGPURenderPass(pass);
+	copy = SDL_BeginGPUCopyPass(command);
+	if (!copy) goto cleanup;
+	SDL_GPUTextureRegion source = {0};
+	source.texture = target; source.w = source.h = 64u; source.d = 1u;
+	SDL_GPUTextureTransferInfo destination = {0};
+	destination.transfer_buffer = readback;
+	destination.pixels_per_row = destination.rows_per_layer = 64u;
+	SDL_DownloadFromGPUTexture(copy, &source, &destination);
+	SDL_EndGPUCopyPass(copy);
+	if (!rg_gui_gpu_upload_ready(gpu, &upload)) goto cleanup;
+	int submitted = SDL_SubmitGPUCommandBuffer(command);
+	command = NULL;
+	if (!submitted) goto cleanup;
+	rg_gui_gpu_upload_commit(gpu, &upload);
+	if (!SDL_WaitForGPUIdle(device)) goto cleanup;
+	const u8* mapped = (const u8*)SDL_MapGPUTransferBuffer(device, readback, false);
+	if (!mapped) goto cleanup;
+	memcpy(pixels, mapped, 64u * 64u * 4u);
+	SDL_UnmapGPUTransferBuffer(device, readback);
+	passed = 1;
+cleanup:
+	if (command) SDL_CancelGPUCommandBuffer(command);
+	rg_gui_gpu_upload_abort(gpu, &upload);
+	return passed;
+}
+
+/* The shader's clip distances must reproduce the scissor the renderer used to
+ * set per batch, rg_gui_gpu_scissor, pixel for pixel: fractional, nested,
+ * shared, empty, and off-screen clips over rectangles, an image, a triangle,
+ * and text, at fractional draw offsets and in a reduced viewport. Each
+ * primitive is drawn once unclipped to learn its coverage; the clipped frame
+ * must equal that coverage inside the primitive's scissor and be empty outside. */
+static int test_gpu_clip_distances(SDL_GPUDevice* device, SDL_GPUTexture* target,
+                                   SDL_GPUTransferBuffer* readback, RgGuiGpuRenderer* gpu,
+                                   RgGuiRenderer* text, RgGpuUploadRing* ring)
+{
+	typedef struct ClipCase
+	{
+		u32 type;
+		RgGuiRect rect; /* rectangle, image, or text region (text: pos is rect.x, rect.y + 4) */
+		rg_vec4 color;
+		u32 clips;      /* 0, 1, or 2 nested clips */
+		RgGuiRect clip[2];
+	} ClipCase;
+	const rg_vec4 red = rg_gui_color(1, 0, 0, 1), green = rg_gui_color(0, 1, 0, 1);
+	const rg_vec4 blue = rg_gui_color(0, 0, 1, 1), white = rg_gui_color(1, 1, 1, 1);
+	const rg_vec4 yellow = rg_gui_color(1, 1, 0, 1), cyan = rg_gui_color(0, 1, 1, 1);
+	const rg_vec4 magenta = rg_gui_color(1, 0, 1, 1);
+	const RgGuiRect shared = {22.5f, 40.5f, 20.0f, 12.25f};
+	const ClipCase cases[] = {
+	    {RG_GUI_CMD_RECT, {2, 2, 14, 12}, red, 1u, {{3.5f, 3.25f, 9.75f, 7.5f}}},
+	    {RG_GUI_CMD_IMAGE, {20, 2, 14, 12}, green, 1u, {{21.25f, 2.75f, 10.0f, 8.5f}}},
+	    {RG_GUI_CMD_TRIANGLE, {38, 1, 24, 16}, blue, 1u, {{39.5f, 2.5f, 12.25f, 6.75f}}},
+	    {RG_GUI_CMD_TEXT, {0, 19, 28, 16}, white, 1u, {{4.5f, 23.5f, 15.25f, 2.75f}}},
+	    {RG_GUI_CMD_RECT, {32, 22, 28, 16}, yellow, 2u, {{30, 22, 30, 20}, {35.5f, 25.25f, 40, 7.5f}}},
+	    {RG_GUI_CMD_RECT, {21, 42, 8, 12}, cyan, 1u, {shared}},
+	    {RG_GUI_CMD_RECT, {2, 42, 12, 8}, magenta, 0u, {{0, 0, 0, 0}}},
+	    {RG_GUI_CMD_RECT, {33, 42, 12, 14}, white, 1u, {shared}},
+	    {RG_GUI_CMD_RECT, {48, 42, 6, 8}, white, 1u, {{50, 44, 0, 10}}},
+	    {RG_GUI_CMD_RECT, {56, 50, 14, 20}, yellow, 1u, {{56.5f, 50.5f, 20, 20}}},
+	    {RG_GUI_CMD_RECT, {0, 54, 10, 12}, cyan, 1u, {{-3.25f, 54.5f, 10.5f, 20}}}};
+	enum { CASES = sizeof(cases) / sizeof(cases[0]) };
+	RgGuiDrawCmd clipped[CASES * 5u], plain[CASES];
+	u32 clipped_count = 0u;
+	RgGuiRect effective[CASES];
+	for (u32 i = 0u; i < CASES; i++)
+	{
+		const ClipCase* c = &cases[i];
+		RgGuiDrawCmd cmd = {0};
+		cmd.type = c->type;
+		if (c->type == RG_GUI_CMD_RECT) { cmd.data.rect.rect = c->rect; cmd.data.rect.color = c->color; }
+		else if (c->type == RG_GUI_CMD_IMAGE)
+		{
+			cmd.data.image.rect = c->rect;
+			cmd.data.image.uv = rg_gui_make_rect(0, 0, 1, 1);
+			cmd.data.image.color = c->color;
+			cmd.data.image.texture = (RgGuiTexture)(uintptr_t)gpu->text.atlas_texture;
+		}
+		else if (c->type == RG_GUI_CMD_TRIANGLE)
+		{
+			cmd.data.triangle.a = rg_vec2(c->rect.x, c->rect.y);
+			cmd.data.triangle.b = rg_vec2(c->rect.x + c->rect.w, c->rect.y);
+			cmd.data.triangle.c = rg_vec2(c->rect.x, c->rect.y + c->rect.h);
+			cmd.data.triangle.color = c->color;
+		}
+		else
+		{
+			cmd.data.text.text = "AAAAAAAA";
+			cmd.data.text.pos = rg_vec2(c->rect.x + 2.0f, c->rect.y + 4.0f);
+			cmd.data.text.scale = 3.0f;
+			cmd.data.text.color = c->color;
+		}
+		plain[i] = cmd;
+		for (u32 k = 0u; k < c->clips; k++)
+		{
+			clipped[clipped_count].type = RG_GUI_CMD_CLIP_PUSH;
+			clipped[clipped_count++].data.clip.rect = c->clip[k];
+		}
+		effective[i] = c->clip[0];
+		if (c->clips == 2u) effective[i] = rg_gui_renderer_base_clip_intersect(c->clip[0], c->clip[1]);
+		clipped[clipped_count++] = cmd;
+		for (u32 k = 0u; k < c->clips; k++) clipped[clipped_count++].type = RG_GUI_CMD_CLIP_POP;
+	}
+	const RgGuiDrawList plain_list = {plain, CASES, CASES};
+	const RgGuiDrawList clipped_list = {clipped, clipped_count, clipped_count};
+	const struct { f32 x, y; SDL_Rect viewport; } draws[] = {
+	    {0.0f, 0.0f, {0, 0, 64, 64}}, {0.5f, 0.25f, {0, 0, 64, 64}},
+	    {-0.75f, 1.5f, {0, 0, 64, 64}}, {0.3f, -0.6f, {0, 0, 64, 64}},
+	    {0.5f, 0.5f, {8, 6, 40, 41}}};
+	static u8 coverage[64u * 64u * 4u], result[64u * 64u * 4u];
+	u32 checked = 0u;
+	for (u32 d = 0u; d < sizeof(draws) / sizeof(draws[0]); d++)
+	{
+		RgGuiGpuDrawDesc draw = {0};
+		draw.output_width = draw.output_height = 64u;
+		draw.offset_x = draws[d].x;
+		draw.offset_y = draws[d].y;
+		draw.viewport = (SDL_Rect){0, 0, 64, 64};
+		RgGuiGpuStats stats = {0};
+		u32 clip_count = 0u;
+		if (!test_gpu_render(device, target, readback, gpu, text, ring, &plain_list, &draw,
+		                     coverage, &clip_count, &stats) || clip_count != 1u)
+		{
+			SDL_SetError("Clip-distance coverage pass failed");
+			return 0;
+		}
+		draw.viewport = draws[d].viewport;
+		if (!test_gpu_render(device, target, readback, gpu, text, ring, &clipped_list, &draw,
+		                     result, &clip_count, &stats))
+		{
+			SDL_SetError("Clip-distance clipped pass failed");
+			return 0;
+		}
+		/* Nine distinct clips plus the unclipped entry; the shared clip is one entry
+		 * even with an unclipped primitive between its users. One draw call. */
+		if (clip_count != 10u || stats.draw_calls != 1u)
+		{
+			SDL_SetError("Clipped pass used %u clip entries and %u draw calls, expected 10 and 1",
+			             clip_count, stats.draw_calls);
+			return 0;
+		}
+		u32 visible[CASES] = {0};
+		for (u32 y = 0u; y < 64u; y++)
+		for (u32 x = 0u; x < 64u; x++)
+		{
+			const u8* covered = coverage + (y * 64u + x) * 4u;
+			const u8* got = result + (y * 64u + x) * 4u;
+			const f32 cx = (f32)x + 0.5f, cy = (f32)y + 0.5f;
+			int owner = -1;
+			for (u32 i = 0u; i < CASES; i++)
+			{
+				const RgGuiRect r = cases[i].rect;
+				if (cx >= r.x - 1.0f + draw.offset_x && cx < r.x + r.w + 1.0f + draw.offset_x &&
+				    cy >= r.y - 1.0f + draw.offset_y && cy < r.y + r.h + 1.0f + draw.offset_y)
+					owner = (int)i;
+			}
+			const int background = covered[0] == 0u && covered[1] == 0u && covered[2] == 0u;
+			int inside = 0;
+			if (owner >= 0)
+			{
+				SDL_Rect scissor = rg_gui_gpu_scissor(effective[owner], cases[owner].clips != 0u, &draw);
+				inside = (int)x >= scissor.x && (int)x < scissor.x + scissor.w &&
+				         (int)y >= scissor.y && (int)y < scissor.y + scissor.h;
+			}
+			else if (!background)
+			{
+				SDL_SetError("Primitive coverage escaped its region at %u,%u", x, y);
+				return 0;
+			}
+			const u8 expected[4] = {inside ? covered[0] : 0u, inside ? covered[1] : 0u,
+			                        inside ? covered[2] : 0u, 255u};
+			if (memcmp(got, expected, 4u))
+			{
+				SDL_SetError("Clip-distance pixel %u,%u (draw %u): got %u,%u,%u,%u, expected %u,%u,%u,%u",
+				             x, y, d, got[0], got[1], got[2], got[3],
+				             expected[0], expected[1], expected[2], expected[3]);
+				return 0;
+			}
+			if (owner >= 0 && inside && !background) visible[owner]++;
+			checked++;
+		}
+		/* Every primitive must show pixels, or the comparison above proves
+		 * nothing about it. The zero-width clip (case 8) shows none at integral
+		 * offsets; at a fractional one the scissor's floor and ceil give it a
+		 * one-pixel column, which the comparison above checked. The reduced
+		 * viewport hides some cases entirely, so it is exempt. */
+		for (u32 i = 0u; draws[d].viewport.w == 64 && i < CASES; i++)
+			if (i == 8u ? (d == 0u && visible[i] != 0u) : visible[i] == 0u)
+			{
+				SDL_SetError("Clip case %u showed %u pixels in draw %u", i, visible[i], d);
+				return 0;
+			}
+	}
+	printf("Shader clip distances: %u pixels matched the scissor rule across 4 draw offsets and a reduced viewport\n",
+	       checked);
+	return 1;
 }
 
 int main(void)
@@ -496,6 +743,7 @@ int main(void)
 	if (!pixels_valid) { SDL_SetError("Indexed material/clip/alpha/overlay pixel regression"); goto cleanup; }
 	puts("Indexed material, clip, alpha, triangle, and overlay: 17 GPU pixel probes passed");
 	if (!test_gpu_full_cache_ring(device, target_texture, readback, &renderer, &text_renderer, &ring)) goto cleanup;
+	if (!test_gpu_clip_distances(device, target_texture, readback, &renderer, &text_renderer, &ring)) goto cleanup;
 	if (!test_gpu_mutable_value_text(device, 2u) || !test_gpu_mutable_value_text(device, 3u)) goto cleanup;
 
 	puts("rg_gui_gpu end-to-end SDL_GPU checks passed");

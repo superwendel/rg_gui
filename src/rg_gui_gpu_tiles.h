@@ -120,7 +120,7 @@ RGINLINE u64 rg_gui_tile_mix_rect(u64 hash, RgGuiRect rect)
 	return rg_gui_gpu_signature_bytes(hash, &rect, sizeof(rect));
 }
 
-/* Pixel columns/rows a command can touch: the renderer's scissor floors the
+/* Pixel columns/rows a command can touch: the renderer's clipping floors the
  * minimum and ceils the maximum, so bin with the same rounding and never with
  * exact float intersections, which can be empty while the GPU still paints. */
 typedef struct RgGuiTilePixelRect
@@ -132,7 +132,7 @@ typedef struct RgGuiTilePixelRect
 } RgGuiTilePixelRect;
 
 /* Pixel bounds from edges that already include the draw offset, rounded like
- * the renderer's scissor: floor the minimum, ceil the maximum. NaN and
+ * the renderer's clipping: floor the minimum, ceil the maximum. NaN and
  * out-of-range values clamp to the output. */
 RGINLINE RgGuiTilePixelRect rg_gui_tile_pixel_edges(const RgGuiTileCache* cache,
                                                     f32 x0, f32 y0, f32 x1, f32 y1)

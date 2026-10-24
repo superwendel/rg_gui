@@ -86,6 +86,11 @@ static void init(Bench* b) {
     b->gpu.vertices=calloc(b->gpu.vertex_capacity,sizeof(*b->gpu.vertices));
     b->gpu.items=calloc(b->gpu.item_capacity,sizeof(*b->gpu.items));
     if(!b->gpu.vertices||!b->gpu.items) fail("geometry allocation");
+#if defined(RG_GUI_GPU_FRAME_CLIP_LIMIT)
+    b->gpu.clip_capacity=b->gpu.item_capacity+1u;
+    b->gpu.clips=calloc(b->gpu.clip_capacity,sizeof(*b->gpu.clips));
+    if(!b->gpu.clips) fail("clip allocation");
+#endif
     for(u32 i=0;i<1024;i++) {
         RgGuiDrawCmd* cmd=&b->commands[i];
         cmd->type=RG_GUI_CMD_IMAGE;
@@ -140,5 +145,8 @@ int main(int argc,char** argv) {
         printf("{\"case\":\"%s_%u\",\"median_ns\":%.3f,\"min_ns\":%.3f,\"max_ns\":%.3f,\"geometry\":\"%016llx\",\"vertices\":%u,\"items\":%u}\n",full?"prepare":"pack",count,times[3],times[0],times[6],(unsigned long long)hash(b->gpu.vertices,sizeof(*b->gpu.vertices)*b->gpu.vertex_count),b->gpu.vertex_count,full?b->gpu.item_count:0u);
     }
     if(checking)puts("kernel and full prepare geometry validated for 1/128/1024 images");
+#if defined(RG_GUI_GPU_FRAME_CLIP_LIMIT)
+    free(b->gpu.clips);
+#endif
     free(b->gpu.vertices);free(b->gpu.items);free(b->text_memory);free(b);return 0;
 }

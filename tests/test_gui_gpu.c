@@ -76,6 +76,7 @@ typedef struct TestGpuFixture
 	RgGuiGpuRenderer gpu;
 	RgGuiGpuVertex vertices[64];
 	RgGuiGpuItem items[16];
+	RgGuiGpuFrameClip clips[17];
 } TestGpuFixture;
 
 static int test_rect_vertex_packing(void)
@@ -154,13 +155,15 @@ static int test_fixture_init(TestGpuFixture* fixture, RgGuiRendererLimits limits
 	fixture->gpu.vertex_capacity = RG_ARRAY_COUNT(fixture->vertices);
 	fixture->gpu.items = fixture->items;
 	fixture->gpu.item_capacity = RG_ARRAY_COUNT(fixture->items);
+	fixture->gpu.clips = fixture->clips;
+	fixture->gpu.clip_capacity = RG_ARRAY_COUNT(fixture->clips);
 	fixture->gpu.text.run_capacity = 64u;
 	fixture->gpu.text.instance_capacity = 64u;
 	fixture->gpu.text.cached_quad_capacity = 64u;
 	fixture->gpu.ref_capacity = 64u + fixture->gpu.vertex_capacity / 3u;
-	fixture->gpu.frame_capacity = (u32)RG_ALIGN_UP(
-	    64u * sizeof(RgGuiRendererRun) + fixture->gpu.vertex_capacity * sizeof(RgGuiGpuVertex), 8u) +
-	    fixture->gpu.ref_capacity * 8u;
+	fixture->gpu.frame_capacity = (u32)rg_gui_gpu_frame_bytes(64u, fixture->gpu.vertex_capacity,
+	                                                          fixture->gpu.ref_capacity,
+	                                                          fixture->gpu.clip_capacity);
 	fixture->gpu.frame_buffer_count = 1u;
 	return 1;
 }
@@ -190,7 +193,7 @@ static int test_item(const RgGuiGpuItem* item, u32 type, u32 first, u32 count,
                      int clipped)
 {
 	return item->type == type && item->first == first && item->count == count &&
-	       item->clip_enabled == (u32)clipped &&
+	       (item->clip_index != 0u) == (clipped != 0) &&
 	       (!clipped || (item->clip.x == 1.0f && item->clip.y == 2.0f &&
 	                     item->clip.w == 30.0f && item->clip.h == 40.0f));
 }
@@ -515,14 +518,37 @@ static int test_full_upload_packet_lifetime(void)
 	TEST_CHECK(first.batch_count == 1u && first.ref_count == 6u &&
 	           first.batches[0].first_ref == 0u && first.batches[0].ref_count == 6u &&
 	           first.batches[0].glyph_count == 5u && first.batches[0].geometry_vertices == 4u);
-	TEST_CHECK(first.batches[0].clip_enabled && first.batches[0].clip.x == 1.0f &&
-	           first.batches[0].clip.y == 2.0f && first.batches[0].clip.w == 30.0f &&
-	           first.batches[0].clip.h == 40.0f);
+	/* A stock batch clips in the shader: no scissor clip, one clip-table entry
+	 * after the unclipped entry 0, named by the rectangle's reference and by
+	 * every text run. */
+	RgGuiGpuFrameClip first_clips[2];
+	TEST_CHECK(!first.batches[0].clip_enabled && first.clip_count == 2u);
+	TEST_CHECK(first.clips_offset == first.refs_offset + first.ref_count * 8u &&
+	           first.frame.size == first.clips_offset + sizeof(first_clips));
+	memcpy(first_clips, memory + first.frame.offset + first.clips_offset, sizeof(first_clips));
+	TEST_CHECK(first_clips[0].x0 == -RG_GUI_GPU_UNCLIPPED && first_clips[0].y0 == -RG_GUI_GPU_UNCLIPPED &&
+	           first_clips[0].x1 == RG_GUI_GPU_UNCLIPPED && first_clips[0].y1 == RG_GUI_GPU_UNCLIPPED);
+	TEST_CHECK(first_clips[1].x0 == 1.0f && first_clips[1].y0 == 2.0f &&
+	           first_clips[1].x1 == 31.0f && first_clips[1].y1 == 42.0f);
+	TEST_CHECK(first.items[0].clip_index == 1u && first.items[1].clip_index == 1u);
+	u64 rect_reference;
+	memcpy(&rect_reference, memory + first.frame.offset + first.refs_offset, sizeof(rect_reference));
+	TEST_CHECK((rect_reference >> 62u) == 1u && ((rect_reference >> 33u) & 0x1fffffffu) == 1u &&
+	           ((rect_reference >> 32u) & 1u) == 1u && (u32)rect_reference == 0u);
 	for (u32 glyph = 0u; glyph < 5u; glyph++) {
 		u64 reference;
 		memcpy(&reference, memory + first.frame.offset + first.refs_offset + (glyph + 1u) * 8u, sizeof(reference));
 		TEST_CHECK((u32)reference == glyph && (u32)(reference >> 32u) == glyph / 2u);
 	}
+	TEST_CHECK(first.geometry_offset == 3u * sizeof(RgGuiGpuFrameRun));
+	for (u32 run = 0u; run < 3u; run++) {
+		RgGuiGpuFrameRun record;
+		const RgGuiRendererRun* source = &fixture.gpu.text_prepared->runs[run];
+		memcpy(&record, memory + first.frame.offset + run * sizeof(record), sizeof(record));
+		TEST_CHECK(record.x == source->x && record.y == source->y &&
+		           record.color == source->color && record.clip == 1u);
+	}
+
 	TEST_CHECK(test_item(&first.items[0], RG_GUI_GPU_ITEM_SOLID, 0, 4, 1));
 	TEST_CHECK(test_item(&first.items[1], RG_GUI_GPU_ITEM_TEXT, 0, 5, 1));
 	RgGuiGpuItem saved_items[2]; memcpy(saved_items, first.items, sizeof(saved_items));
@@ -547,6 +573,7 @@ static int test_full_upload_packet_lifetime(void)
 	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, list.count));
 	TEST_CHECK(!memcmp(first.items, saved_items, sizeof(saved_items)) &&
 	           !memcmp(first.batches, &saved_batch, sizeof(saved_batch)) &&
+
 	           !memcmp(memory + first.frame.offset, saved_frame, first.frame.size));
 	TEST_CHECK(!memcmp(second.items, &saved_second_item, sizeof(saved_second_item)) &&
 	           !memcmp(second.batches, &saved_second_batch, sizeof(saved_second_batch)));
@@ -583,7 +610,7 @@ static int test_full_upload_packet_lifetime(void)
 	     sizeof(RgGuiRendererRange) * fixture.text.total_pages +
 	     sizeof(RgGuiRendererBatch) * fixture.gpu.text.run_capacity) * RG_GUI_GPU_UPLOAD_PACKET_COUNT);
 	/* The fixture borrows these two arrays; the renderer owns only packet arrays. */
-	fixture.gpu.items = NULL; fixture.gpu.vertices = NULL;
+	fixture.gpu.items = NULL; fixture.gpu.vertices = NULL; fixture.gpu.clips = NULL;
 	rg_gui_gpu_destroy(&fixture.gpu);
 	free(fixture.memory);
 	return 1;
@@ -594,6 +621,74 @@ static u64 test_packed_reference(const u8* memory, const RgGuiGpuUpload* upload,
 	u64 value;
 	memcpy(&value, memory + upload->frame.offset + upload->refs_offset + index * 8u, sizeof(value));
 	return value;
+}
+
+/* The clip table gets an entry only when something draws under a clip, a clip
+ * equal to the latest entry reuses it (across an unclipped gap, not across a
+ * different clip), the overlay boundary resets to unclipped, a NaN clip draws
+ * nothing, and every reference names its primitive's entry. */
+static int test_clip_table(void)
+{
+	TestGpuFixture fixture;
+	TEST_CHECK(test_fixture_init(&fixture, test_limits()));
+	const RgGuiRect a = {10, 10, 20, 20}, b = {50, 1, 2, 3}, c = {50.5f, 1.5f, 1, 1};
+	const RgGuiRect unused = {40, 0, 5, 5}, nan_clip = {NAN, 0, 5, 5};
+	RgGuiDrawCmd commands[24] = {0};
+	u32 n = 0u;
+#define CLIP_PUSH(r) (commands[n].type = RG_GUI_CMD_CLIP_PUSH, commands[n++].data.clip.rect = (r))
+#define CLIP_POP() (commands[n++].type = RG_GUI_CMD_CLIP_POP)
+#define RECT(pos) (commands[n] = test_rect_command(), commands[n++].data.rect.rect.x = (f32)(pos))
+	CLIP_PUSH(a); RECT(0); RECT(1); CLIP_POP();      /* entry 1; the two rects merge */
+	RECT(2);                                            /* unclipped */
+	CLIP_PUSH(a); RECT(3); CLIP_POP();                 /* reuses entry 1 */
+	CLIP_PUSH(unused); CLIP_POP();                      /* draws nothing: no entry */
+	CLIP_PUSH(b); RECT(4);                              /* entry 2 */
+	CLIP_PUSH(c); RECT(5); CLIP_POP();                 /* entry 3, the intersection */
+	RECT(6); CLIP_POP();                                /* b again after c: entry 4 */
+	CLIP_PUSH(nan_clip); RECT(7); CLIP_POP();          /* entry 5, empty */
+	CLIP_PUSH(a); RECT(8);                              /* entry 6, still pushed... */
+	const u32 overlay_start = n;
+	RECT(9);                                            /* ...but the overlay is unclipped */
+#undef CLIP_PUSH
+#undef CLIP_POP
+#undef RECT
+	RgGuiDrawList list = {commands, n, n};
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, overlay_start));
+	static const u32 item_clips[] = {1u, 0u, 1u, 2u, 3u, 4u, 5u, 6u, 0u};
+	TEST_CHECK(fixture.gpu.item_count == RG_ARRAY_COUNT(item_clips) && fixture.gpu.clip_count == 7u);
+	TEST_CHECK(fixture.items[0].count == 8u);
+	for (u32 i = 0u; i < RG_ARRAY_COUNT(item_clips); i++) TEST_CHECK(fixture.items[i].clip_index == item_clips[i]);
+	u8 memory[4096];
+	RgGpuUploadRing ring = {0}; ring.mapped = memory; ring.size = sizeof(memory);
+	RgGuiGpuUpload upload = {0};
+	TEST_CHECK(rg_gui_gpu_stage_upload(&fixture.gpu, &fixture.text, &ring, &upload));
+	TEST_CHECK(upload.ref_count == 10u && upload.batch_count == 1u && upload.clip_count == 7u);
+	TEST_CHECK(upload.frame.size == upload.clips_offset + 7u * sizeof(RgGuiGpuFrameClip) &&
+	           upload.clips_offset == upload.refs_offset + 10u * 8u);
+	static const u32 ref_clips[] = {1u, 1u, 0u, 1u, 2u, 3u, 4u, 5u, 6u, 0u};
+	for (u32 i = 0u; i < RG_ARRAY_COUNT(ref_clips); i++)
+	{
+		u64 reference = test_packed_reference(memory, &upload, i);
+		TEST_CHECK(((reference >> 33u) & 0x1fffffffu) == ref_clips[i] && (reference >> 62u) == 1u &&
+		           ((reference >> 32u) & 1u) == 1u && (u32)reference == i * 4u);
+	}
+	RgGuiGpuFrameClip clips[7];
+	memcpy(clips, memory + upload.frame.offset + upload.clips_offset, sizeof(clips));
+	const f32 u = RG_GUI_GPU_UNCLIPPED;
+	const RgGuiGpuFrameClip expected[7] = {
+	    {-u, -u, u, u}, {10, 10, 30, 30}, {50, 1, 52, 4}, {50.5f, 1.5f, 51.5f, 2.5f},
+	    {50, 1, 52, 4}, {u, u, -u, -u}, {10, 10, 30, 30}};
+	TEST_CHECK(!memcmp(clips, expected, sizeof(expected)));
+	rg_gui_gpu_upload_abort(&fixture.gpu, &upload);
+	/* A full clip table is a capacity failure, not an overflow. */
+	fixture.gpu.clip_capacity = 6u;
+	rg_gui_renderer_begin_frame(&fixture.text);
+	TEST_CHECK(!rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &list, overlay_start));
+	fixture.gpu.items = NULL; fixture.gpu.vertices = NULL; fixture.gpu.clips = NULL;
+	rg_gui_gpu_destroy(&fixture.gpu);
+	free(fixture.memory);
+	return 1;
 }
 
 static int test_indexed_triangle_packing_and_empty(void)
@@ -667,7 +762,7 @@ static int test_indexed_triangle_packing_and_empty(void)
 	TEST_CHECK(rg_gui_gpu_dispatch_upload(&fixture.gpu, (SDL_GPUCommandBuffer*)(uintptr_t)1u, &first));
 	rg_gui_gpu_upload_commit(&fixture.gpu, &first);
 	TEST_CHECK(!rg_gui_gpu_upload_active(&fixture.gpu, &first));
-	fixture.gpu.items = NULL; fixture.gpu.vertices = NULL;
+	fixture.gpu.items = NULL; fixture.gpu.vertices = NULL; fixture.gpu.clips = NULL;
 	rg_gui_gpu_destroy(&fixture.gpu);
 	free(fixture.memory);
 	return 1;
@@ -737,7 +832,7 @@ static int test_indexed_capacity_rollback(void)
 	TEST_CHECK(rg_gui_gpu_stage_upload(&fixture.gpu, &fixture.text, &ring, &first));
 	TEST_CHECK(first.text.full_cache_upload && first.frame_buffer_index < 3u);
 	rg_gui_gpu_upload_abort(&fixture.gpu, &first);
-	fixture.gpu.items = NULL; fixture.gpu.vertices = NULL;
+	fixture.gpu.items = NULL; fixture.gpu.vertices = NULL; fixture.gpu.clips = NULL;
 	rg_gui_gpu_destroy(&fixture.gpu);
 	free(fixture.memory);
 	return 1;
@@ -814,7 +909,7 @@ static int test_gpu_cache_invalidation(void)
 	rg_gui_gpu_upload_abort(&fixture.gpu, &replacement);
 	rg_gui_gpu_invalidate_cache(NULL);
 	rg_gui_gpu_text_invalidate_cache(NULL);
-	fixture.gpu.items = NULL; fixture.gpu.vertices = NULL;
+	fixture.gpu.items = NULL; fixture.gpu.vertices = NULL; fixture.gpu.clips = NULL;
 	rg_gui_gpu_destroy(&fixture.gpu);
 	TEST_CHECK(rg_gui_gpu_upload_memory_reserved(&fixture.gpu) == 0u);
 	free(fixture.memory);
@@ -1285,12 +1380,19 @@ static int test_upload_ring_size_full_cache(void)
 	fixture.gpu.text.run_capacity = 32u;
 	fixture.gpu.vertex_capacity = 63u;
 	fixture.gpu.ref_capacity = 85u;
-	fixture.gpu.frame_capacity = (u32)RG_ALIGN_UP(
-	    32u * sizeof(RgGuiRendererRun) + 63u * sizeof(RgGuiGpuVertex), 8u) + 85u * 8u;
+	/* Two items, each under its own clip, fill the three-entry clip table the
+	 * reservation allows, so the frame is exactly frame_capacity. */
+	fixture.gpu.frame_capacity = (u32)rg_gui_gpu_frame_bytes(32u, 63u, 85u, 3u);
 	char text[65]; memset(text, 'A', 64u); text[64] = '\0';
-	RgGuiDrawCmd commands[22] = {0};
-	commands[0] = test_text_command(text, 1.0f, 0);
-	for (u32 n = 1u; n < RG_ARRAY_COUNT(commands); n++)
+	RgGuiDrawCmd commands[26] = {0};
+	commands[0].type = RG_GUI_CMD_CLIP_PUSH;
+	commands[0].data.clip.rect = rg_gui_make_rect(0.0f, 0.0f, 200.0f, 50.0f);
+	commands[1] = test_text_command(text, 1.0f, 0);
+	commands[2].type = RG_GUI_CMD_CLIP_POP;
+	commands[3].type = RG_GUI_CMD_CLIP_PUSH;
+	commands[3].data.clip.rect = rg_gui_make_rect(2.0f, 0.0f, 60.0f, 4.0f);
+	commands[RG_ARRAY_COUNT(commands) - 1u].type = RG_GUI_CMD_CLIP_POP;
+	for (u32 n = 4u; n + 1u < RG_ARRAY_COUNT(commands); n++)
 	{
 		f32 x = (f32)n * 4.0f;
 		commands[n].type = RG_GUI_CMD_TRIANGLE;
@@ -1327,7 +1429,17 @@ static int test_upload_ring_size_full_cache(void)
 		TEST_CHECK(upload.frame.size == fixture.gpu.frame_capacity && upload.ref_count == 85u);
 		TEST_CHECK(ring.offset == required && upload.text.cached_quads.offset % RG_GPU_UPLOAD_RING_DEFAULT_ALIGN == 0u);
 		TEST_CHECK(!memcmp(memory + upload.geometry.offset, fixture.vertices, 63u * sizeof(RgGuiGpuVertex)));
-		TEST_CHECK(!memcmp(memory + upload.frame.offset, fixture.gpu.text_prepared->runs, 32u * sizeof(RgGuiRendererRun)));
+		RgGuiGpuFrameClip clips[3];
+		memcpy(clips, memory + upload.frame.offset + upload.clips_offset, sizeof(clips));
+		TEST_CHECK(upload.clip_count == 3u && clips[1].x1 == 200.0f && clips[2].x0 == 2.0f);
+		for (u32 run = 0u; run < 32u; run++)
+		{
+			RgGuiGpuFrameRun record;
+			const RgGuiRendererRun* source = &fixture.gpu.text_prepared->runs[run];
+			memcpy(&record, memory + upload.frame.offset + run * sizeof(record), sizeof(record));
+			TEST_CHECK(record.x == source->x && record.y == source->y &&
+			           record.color == source->color && record.clip == 1u);
+		}
 		TEST_CHECK(!memcmp(memory + upload.text.cached_quads.offset, fixture.text.core.cache_quads,
 		                   64u * sizeof(RgGuiRendererCachedQuad)));
 		for (u32 n = 0u; n < 32u; n++) TEST_CHECK(memory[required + n] == 0xcdu);
@@ -1342,7 +1454,7 @@ static int test_upload_ring_size_full_cache(void)
 			TEST_CHECK(fixture.gpu.text.cache_initialized);
 		}
 	}
-	fixture.gpu.items = NULL; fixture.gpu.vertices = NULL;
+	fixture.gpu.items = NULL; fixture.gpu.vertices = NULL; fixture.gpu.clips = NULL;
 	rg_gui_gpu_destroy(&fixture.gpu);
 	free(memory);
 	free(fixture.memory);
@@ -1420,11 +1532,14 @@ int main(void)
 
 	RgGuiGpuVertex vertices[64];
 	RgGuiGpuItem items[16];
+	RgGuiGpuFrameClip clips[17];
 	RgGuiGpuRenderer gpu = {0};
 	gpu.vertices = vertices;
 	gpu.vertex_capacity = RG_ARRAY_COUNT(vertices);
 	gpu.items = items;
 	gpu.item_capacity = RG_ARRAY_COUNT(items);
+	gpu.clips = clips;
+	gpu.clip_capacity = RG_ARRAY_COUNT(clips);
 
 	rg_gui_renderer_begin_frame(&text_renderer);
 	const RgGuiDrawList* list = rg_gui_draw_list(&gui);
@@ -1432,7 +1547,7 @@ int main(void)
 	    gpu.vertex_count != 27u || gpu.item_count != 7u ||
 	    gpu.items[0].type != RG_GUI_GPU_ITEM_SOLID ||
 	    gpu.items[1].type != RG_GUI_GPU_ITEM_TRIANGLES ||
-	    !gpu.items[1].clip_enabled ||
+	    !gpu.items[1].clip_index ||
 	    gpu.items[2].type != RG_GUI_GPU_ITEM_IMAGE ||
 	    gpu.items[2].material != 0u ||
 	    gpu.items[3].type != RG_GUI_GPU_ITEM_IMAGE ||
@@ -1460,7 +1575,8 @@ int main(void)
 	    !test_indexed_triangle_packing_and_empty() || !test_indexed_capacity_rollback() ||
 	    !test_gpu_cache_invalidation() || !test_independent_frame_capacity() ||
 	    !test_fragmented_upload_ranges() || !test_upload_ring_size_boundaries() ||
-	    !test_upload_ring_size_full_cache() || !test_frame_signature() || !test_tile_cache()) return 1;
+	    !test_upload_ring_size_full_cache() || !test_frame_signature() || !test_tile_cache() ||
+	    !test_clip_table()) return 1;
 	puts("rg_gui_gpu draw-list preparation checks passed");
 	return 0;
 }

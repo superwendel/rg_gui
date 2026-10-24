@@ -1,7 +1,8 @@
 /* Host-only staging benchmark: rg_gui_gpu_stage_upload of one prepared frame
  * into a mapped ring, alone and together with rg_gui_gpu_prepare, for 128 and
- * 1,024 solid rectangles (one merged item) and images that alternate between
- * two textures (one item and batch each). No window or GPU device is used.
+ * 1,024 solid rectangles (one merged item), images that alternate between
+ * two textures (one item and batch each), and the same images inside one clip
+ * rectangle. No window or GPU device is used.
  * The source compiles against older headers, so a before/after comparison
  * builds it twice; see benchmarks/README.md. Before timing each case, an
  * untimed check decodes the staged frame as rg_gui_indexed.vert does and
@@ -29,14 +30,18 @@ typedef struct Bench {
 	RgTextFont font;
 	RgTextGlyph glyph;
 	RgGuiDrawCmd commands[COMMANDS];
+	/* The images behind one clip push, for the clipped workload. */
+	RgGuiDrawCmd clipped[COMMANDS + 1u];
 	RgGuiDrawList list;
+	int clip;
 	void* text_memory;
 	u8* ring_memory;
 	RgGpuUploadRing ring;
 } Bench;
 
-static void init(Bench* b, int images) {
+static void init(Bench* b, int images, int clip) {
 	memset(b, 0, sizeof(*b));
+	b->clip = clip;
 	b->font.metrics.atlas_width = 64; b->font.metrics.atlas_height = 64; b->font.metrics.line_height = 16;
 	b->glyph.codepoint = '?'; b->glyph.w = 8; b->glyph.h = 12; b->glyph.x_advance = 8;
 	b->font.glyphs = &b->glyph; b->font.glyph_count = 1; b->font.fallback_codepoint = '?';
@@ -51,10 +56,20 @@ static void init(Bench* b, int images) {
 	b->gpu.vertices = calloc(b->gpu.vertex_capacity, sizeof(*b->gpu.vertices));
 	b->gpu.items = calloc(b->gpu.item_capacity, sizeof(*b->gpu.items));
 	if (!b->gpu.vertices || !b->gpu.items) fail("geometry allocation");
+#if defined(RG_GUI_GPU_FRAME_CLIP_LIMIT)
+	b->gpu.clip_capacity = b->gpu.item_capacity + 1u;
+	b->gpu.clips = calloc(b->gpu.clip_capacity, sizeof(*b->gpu.clips));
+	if (!b->gpu.clips) fail("clip allocation");
+#endif
 	b->gpu.text.run_capacity = 64u; b->gpu.text.instance_capacity = 64u; b->gpu.text.cached_quad_capacity = 64u;
 	b->gpu.ref_capacity = 64u + b->gpu.vertex_capacity / 3u;
+#if defined(RG_GUI_GPU_FRAME_CLIP_LIMIT)
+	b->gpu.frame_capacity = (u32)rg_gui_gpu_frame_bytes(64u, b->gpu.vertex_capacity, b->gpu.ref_capacity,
+	                                                    b->gpu.clip_capacity);
+#else
 	b->gpu.frame_capacity = (u32)RG_ALIGN_UP(64u * sizeof(RgGuiRendererRun) +
 	    b->gpu.vertex_capacity * sizeof(RgGuiGpuVertex), 8u) + b->gpu.ref_capacity * 8u;
+#endif
 	b->gpu.frame_buffer_count = 1u;
 	b->ring_memory = malloc((size_t)b->gpu.frame_capacity + 4096u);
 	if (!b->ring_memory) fail("ring allocation");
@@ -76,12 +91,16 @@ static void init(Bench* b, int images) {
 		}
 	}
 	b->list = (RgGuiDrawList){b->commands, COMMANDS, COMMANDS};
+	b->clipped[0].type = RG_GUI_CMD_CLIP_PUSH;
+	b->clipped[0].data.clip.rect = (RgGuiRect){4.5f, 3.25f, 600.0f, 300.0f};
+	memcpy(b->clipped + 1, b->commands, sizeof(b->commands));
+	if (clip) b->list = (RgGuiDrawList){b->clipped, COMMANDS + 1u, COMMANDS + 1u};
 }
 
 static void prepare(Bench* b, u32 count) {
-	b->list.count = count;
+	b->list.count = count + (b->clip ? 1u : 0u);
 	rg_gui_renderer_begin_frame(&b->text);
-	if (!rg_gui_gpu_prepare(&b->gpu, &b->text, &b->list, count)) fail("prepare");
+	if (!rg_gui_gpu_prepare(&b->gpu, &b->text, &b->list, b->list.count)) fail("prepare");
 }
 
 /* Raw vertex of each quad corner (top-left, top-right, bottom-right,
@@ -108,6 +127,11 @@ static void verify(const Bench* b, const RgGuiGpuUpload* upload, u32 count, int 
 		memcpy(&reference, frame + upload->refs_offset + (size_t)i * 8u, sizeof(reference));
 		if ((u32)(reference >> 62u) != (images ? 2u : 1u) || ((reference >> 32u) & 1u) == 0u)
 			fail("reference kind or quad flag");
+#if defined(RG_GUI_GPU_FRAME_CLIP_LIMIT)
+		/* Every reference names the unclipped entry, or the one clip's entry. */
+		if (((reference >> 33u) & 0x1fffffffu) != (b->clip ? 1u : 0u) ||
+		    upload->clip_count != (b->clip ? 2u : 1u)) fail("clip index");
+#endif
 		const RgGuiDrawCmd* cmd = &b->commands[i];
 		RgGuiRect r = images ? cmd->data.image.rect : cmd->data.rect.rect;
 		RgGuiRect uv = images ? cmd->data.image.uv : (RgGuiRect){0};
@@ -139,8 +163,9 @@ static RG_NOINLINE void frame(Bench* b, u32 count, int full) {
 int main(void) {
 	Uint64 freq = SDL_GetPerformanceFrequency(); if (!freq) fail("counter"); clock_scale = 1.0 / (double)freq;
 	static const u32 counts[] = {128, 1024};
-	for (int images = 0; images < 2; images++) {
-		Bench* b = calloc(1, sizeof(*b)); if (!b) fail("bench"); init(b, images);
+	for (int workload = 0; workload < 3; workload++) {
+		const int images = workload != 0, clip = workload == 2;
+		Bench* b = calloc(1, sizeof(*b)); if (!b) fail("bench"); init(b, images, clip);
 		for (int full = 0; full < 2; full++) for (u32 k = 0; k < 2; k++) {
 			u32 count = counts[k];
 			prepare(b, count);
@@ -158,11 +183,16 @@ int main(void) {
 			for (u32 s = 0; s < 7; s++) { start = now(); for (u32 i = 0; i < frames; i++) frame(b, count, full); times[s] = (now() - start) * 1e9 / (double)frames; }
 			qsort(times, 7, sizeof(double), cmp);
 			printf("{\"case\":\"%s_%s_%u\",\"median_ns\":%.3f,\"min_ns\":%.3f,\"max_ns\":%.3f,\"refs\":%u,\"batches\":%u,\"frame_bytes\":%u,\"vertices\":%u,\"packed\":\"%016llx\"}\n",
-			       full ? "prepare+stage" : "stage", images ? "images" : "rects", count, times[3], times[0], times[6],
+			       full ? "prepare+stage" : "stage", clip ? "clipped_images" : images ? "images" : "rects", count, times[3], times[0], times[6],
 			       refs, batches, bytes, b->gpu.vertex_count, (unsigned long long)packed);
 		}
 		free(b->gpu.vertices); free(b->gpu.items); free(b->text_memory); free(b->ring_memory);
-		for (u32 i = 0; i < RG_GUI_GPU_UPLOAD_PACKET_COUNT; i++) { SDL_free(b->gpu.upload_packets[i].items); SDL_free(b->gpu.upload_packets[i].batches); }
+		for (u32 i = 0; i < RG_GUI_GPU_UPLOAD_PACKET_COUNT; i++) {
+			SDL_free(b->gpu.upload_packets[i].items); SDL_free(b->gpu.upload_packets[i].batches);
+		}
+#if defined(RG_GUI_GPU_FRAME_CLIP_LIMIT)
+		free(b->gpu.clips);
+#endif
 		free(b);
 	}
 	return 0;

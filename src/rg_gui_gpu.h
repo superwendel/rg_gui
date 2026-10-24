@@ -783,8 +783,85 @@ typedef struct RgGuiGpuItem
 	u32 first;
 	u32 count;
 	u32 type;
-	u32 clip_enabled;
+	/* Zero when unclipped; otherwise the item's entry in the frame clip table. */
+	u32 clip_index;
 } RgGuiGpuItem;
+
+/* The indexed frame buffer holds, in order: one RgGuiGpuFrameRun per prepared
+ * text run, the geometry vertices, the 8-byte references, and the clip table.
+ * Every reference names a clip-table entry (a text glyph through its run), so
+ * the vertex shader clips each primitive and a clip change does not end a
+ * draw call. */
+typedef struct RgGuiGpuFrameRun
+{
+	f32 x;
+	f32 y;
+	u32 color;
+	u32 clip;
+} RgGuiGpuFrameRun;
+
+typedef char RgGuiGpuFrameRunMustBe16Bytes[(sizeof(RgGuiGpuFrameRun) == 16u) ? 1 : -1];
+
+/* A clip-table entry: the clip rectangle's edges in draw-list coordinates. The
+ * shader adds the draw offset, floors the minimum, and ceils the maximum, the
+ * same rounding as rg_gui_gpu_scissor. Entry 0 is unclipped. */
+typedef struct RgGuiGpuFrameClip
+{
+	f32 x0;
+	f32 y0;
+	f32 x1;
+	f32 y1;
+} RgGuiGpuFrameClip;
+
+typedef char RgGuiGpuFrameClipMustBe16Bytes[(sizeof(RgGuiGpuFrameClip) == 16u) ? 1 : -1];
+
+/* Geometry references carry the clip index in bits 33..61. */
+#define RG_GUI_GPU_FRAME_CLIP_LIMIT 0x20000000u
+#define RG_GUI_GPU_UNCLIPPED 1.0e30f
+
+RGINLINE f32 rg_gui_gpu_clamp_edge(f32 edge)
+{
+	return edge < -RG_GUI_GPU_UNCLIPPED ? -RG_GUI_GPU_UNCLIPPED :
+	       edge > RG_GUI_GPU_UNCLIPPED ? RG_GUI_GPU_UNCLIPPED : edge;
+}
+
+/** Clip-table edges for a clip rectangle. The far edges are formed as x + w, the
+ * association rg_gui_gpu_scissor uses. A NaN edge draws nothing, as the empty
+ * scissor it produced did; infinities clamp so the shader's distances stay finite. */
+RGINLINE RgGuiGpuFrameClip rg_gui_gpu_frame_clip(RgGuiRect clip)
+{
+	RgGuiGpuFrameClip edges = {clip.x, clip.y, clip.x + clip.w, clip.y + clip.h};
+	if (edges.x0 != edges.x0 || edges.y0 != edges.y0 || edges.x1 != edges.x1 || edges.y1 != edges.y1)
+	{
+		edges.x0 = edges.y0 = RG_GUI_GPU_UNCLIPPED;
+		edges.x1 = edges.y1 = -RG_GUI_GPU_UNCLIPPED;
+		return edges;
+	}
+	edges.x0 = rg_gui_gpu_clamp_edge(edges.x0);
+	edges.y0 = rg_gui_gpu_clamp_edge(edges.y0);
+	edges.x1 = rg_gui_gpu_clamp_edge(edges.x1);
+	edges.y1 = rg_gui_gpu_clamp_edge(edges.y1);
+	return edges;
+}
+
+/* Bitwise equality of two 16-byte clip records, without a library call. */
+RGINLINE int rg_gui_gpu_clip_bits_equal(const void* a, const void* b)
+{
+	u64 a0, a1, b0, b1;
+	memcpy(&a0, a, 8u);
+	memcpy(&a1, (const u8*)a + 8u, 8u);
+	memcpy(&b0, b, 8u);
+	memcpy(&b1, (const u8*)b + 8u, 8u);
+	return a0 == b0 && a1 == b1;
+}
+
+/** Bytes of one indexed frame buffer for the given capacities. A frame's clip
+ * table has at most one entry per item after the unclipped entry 0. */
+RGINLINE u64 rg_gui_gpu_frame_bytes(u64 runs, u64 vertices, u64 refs, u64 clips)
+{
+	u64 bytes = runs * sizeof(RgGuiGpuFrameRun) + vertices * sizeof(RgGuiGpuVertex);
+	return ((bytes + 7u) & ~(u64)7u) + refs * 8u + clips * sizeof(RgGuiGpuFrameClip);
+}
 
 /** Result from an application image-material binding callback. */
 typedef enum RgGuiGpuImageBindResult
@@ -847,7 +924,10 @@ typedef struct RgGuiGpuDesc
 
 typedef RgGuiGpuRunDrawDesc RgGuiGpuDrawDesc;
 
-/** Immutable painter-ordered draw span. Nonzero material is a callback boundary. */
+/** Immutable painter-ordered draw span. Nonzero material is a callback boundary.
+ * A material batch is clipped by the scissor in clip/clip_enabled. A stock batch
+ * has clip_enabled zero: the shader clips each primitive to its own clip, so one
+ * batch can span any number of clip changes. */
 typedef struct RgGuiGpuIndexedBatch
 {
 	RgGuiRect clip;
@@ -891,6 +971,9 @@ typedef struct RgGuiGpuUpload
 	u32 geometry_offset;
 	u32 refs_offset;
 	u32 frame_buffer_index;
+	/* The clip table: clip_count RgGuiGpuFrameClip entries at clips_offset. */
+	u32 clip_count;
+	u32 clips_offset;
 } RgGuiGpuUpload;
 
 typedef struct RgGuiGpuStats
@@ -928,6 +1011,10 @@ typedef struct RgGuiGpuRenderer
 	u32 vertex_capacity;
 	u32 item_count;
 	u32 item_capacity;
+	/* The prepared frame's clip table; holds item_capacity + 1 entries. */
+	RgGuiGpuFrameClip* clips;
+	u32 clip_count;
+	u32 clip_capacity;
 	const RgGuiRendererPrepared* text_prepared;
 	RgGuiGpuImageBindFn image_bind;
 	void* image_bind_user;
@@ -1142,13 +1229,15 @@ RGINLINE int rg_gui_gpu_create(RgGuiGpuRenderer* renderer, const RgGuiGpuDesc* d
 	renderer->frame_buffer_count = desc->frame_buffer_count ? desc->frame_buffer_count : 1u;
 	renderer->frame_signature_enabled = desc->frame_signature ? 1u : 0u;
 	u64 refs = desc->max_frame_refs ? desc->max_frame_refs : (u64)desc->max_text_instances + renderer->vertex_capacity / 3u;
-	u64 frame_bytes = (u64)desc->max_runs * sizeof(RgGuiRendererRun) +
-	                  (u64)renderer->vertex_capacity * sizeof(RgGuiGpuVertex);
-	frame_bytes = ((frame_bytes + 7u) & ~(u64)7u) + refs * 8u;
-	if (!refs || !renderer->item_capacity || refs > UINT32_MAX / 24u || frame_bytes > UINT32_MAX ||
+	u64 frame_bytes = rg_gui_gpu_frame_bytes(desc->max_runs, renderer->vertex_capacity, refs,
+	                                         (u64)renderer->item_capacity + 1u);
+	/* Each item adds at most one clip-table entry after the unclipped entry 0. */
+	if (!refs || !renderer->item_capacity || renderer->item_capacity >= RG_GUI_GPU_FRAME_CLIP_LIMIT ||
+	    refs > UINT32_MAX / 24u || frame_bytes > UINT32_MAX ||
 	    renderer->vertex_capacity > UINT32_MAX / (u32)sizeof(RgGuiGpuVertex) ||
 	    sizeof(RgGuiGpuIndexedBatch) > SIZE_MAX / (size_t)renderer->item_capacity ||
-	    sizeof(RgGuiGpuItem) > SIZE_MAX / (size_t)renderer->item_capacity)
+	    sizeof(RgGuiGpuItem) > SIZE_MAX / (size_t)renderer->item_capacity ||
+	    sizeof(RgGuiGpuFrameClip) > SIZE_MAX / ((size_t)renderer->item_capacity + 1u))
 	{
 		return 0;
 	}
@@ -1159,7 +1248,10 @@ RGINLINE int rg_gui_gpu_create(RgGuiGpuRenderer* renderer, const RgGuiGpuDesc* d
 	    sizeof(RgGuiGpuVertex) * renderer->vertex_capacity);
 	renderer->items = (RgGuiGpuItem*)SDL_malloc(
 	    sizeof(RgGuiGpuItem) * renderer->item_capacity);
-	if (!renderer->vertices || !renderer->items)
+	renderer->clip_capacity = renderer->item_capacity + 1u;
+	renderer->clips = (RgGuiGpuFrameClip*)SDL_malloc(
+	    sizeof(RgGuiGpuFrameClip) * renderer->clip_capacity);
+	if (!renderer->vertices || !renderer->items || !renderer->clips)
 	{
 		rg_gui_gpu_destroy(renderer);
 		return 0;
@@ -1270,6 +1362,7 @@ RGINLINE void rg_gui_gpu_destroy(RgGuiGpuRenderer* renderer)
 		SDL_ReleaseGPUGraphicsPipeline(renderer->device, renderer->solid_pipeline);
 	rg_gui_gpu_text_destroy(&renderer->text);
 	if (renderer->items) SDL_free(renderer->items);
+	if (renderer->clips) SDL_free(renderer->clips);
 	if (renderer->vertices) SDL_free(renderer->vertices);
 	memset(renderer, 0, sizeof(*renderer));
 }
@@ -1279,19 +1372,36 @@ RGINLINE int rg_gui_gpu_clip_equal(RgGuiRect a, RgGuiRect b)
 	return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
 }
 
+/* A clip in effect whose clip-table entry is not chosen yet. */
+#define RG_GUI_GPU_CLIP_PENDING UINT32_MAX
+
+/* Choose the clip-table entry for a clip the first time something draws under
+ * it: the latest entry when its edges match, else a new one. The table grows
+ * only with clips that draw, by at most one entry per item, so items can merge
+ * by comparing entries. Returns RG_GUI_GPU_CLIP_PENDING when the table is full.
+ * Kept out of line: it runs once per clip change, not per command. */
+static RG_NOINLINE u32 rg_gui_gpu_clip_entry(RgGuiGpuRenderer* renderer, RgGuiRect clip)
+{
+	const RgGuiGpuFrameClip edges = rg_gui_gpu_frame_clip(clip);
+	const u32 last = renderer->clip_count - 1u;
+	if (renderer->clip_count > 1u && rg_gui_gpu_clip_bits_equal(&renderer->clips[last], &edges)) return last;
+	if (renderer->clip_count >= renderer->clip_capacity) return RG_GUI_GPU_CLIP_PENDING;
+	renderer->clips[renderer->clip_count] = edges;
+	return renderer->clip_count++;
+}
+
+/* clip_index is 0 when unclipped, else the clip's table entry (never pending). */
 RGINLINE int rg_gui_gpu_add_item(RgGuiGpuRenderer* renderer, u32 type,
                                  RgGuiTexture texture, RgGuiImageMaterial material,
                                  u32 first, u32 count,
-                                 int clip_enabled, RgGuiRect clip)
+                                 u32 clip_index, RgGuiRect clip)
 {
 	if (!count) return 1;
 	if (renderer->item_count)
 	{
 		RgGuiGpuItem* previous = &renderer->items[renderer->item_count - 1u];
 		if (previous->type == type && previous->texture == texture &&
-		    previous->material == material &&
-		    previous->clip_enabled == (u32)clip_enabled &&
-		    (!clip_enabled || rg_gui_gpu_clip_equal(previous->clip, clip)) &&
+		    previous->material == material && previous->clip_index == clip_index &&
 		    previous->first + previous->count == first)
 		{
 			previous->count += count;
@@ -1306,9 +1416,14 @@ RGINLINE int rg_gui_gpu_add_item(RgGuiGpuRenderer* renderer, u32 type,
 	item->first = first;
 	item->count = count;
 	item->type = type;
-	item->clip_enabled = (u32)clip_enabled;
+	item->clip_index = clip_index;
 	return 1;
 }
+
+/* Resolve a pending clip before the first item drawn under it. */
+#define RG_GUI_GPU_RESOLVE_CLIP(renderer, entry, clip)                                 \
+	(RG_LIKELY((entry) != RG_GUI_GPU_CLIP_PENDING) ||                                  \
+	 ((entry) = rg_gui_gpu_clip_entry((renderer), (clip))) != RG_GUI_GPU_CLIP_PENDING)
 
 RGINLINE void rg_gui_gpu_set_vertex(RgGuiGpuVertex* vertex, f32 x, f32 y,
                                     u32 color, f32 u, f32 v)
@@ -1412,10 +1527,15 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 {
 	/* Any failure, including rejected arguments, leaves no stale digest behind. */
 	if (renderer) renderer->frame_signature = 0u;
-	if (!renderer || !text_renderer || !list || (list->count && !list->cmds)) return 0;
+	if (!renderer || !text_renderer || !list || (list->count && !list->cmds) ||
+	    !renderer->clips || !renderer->clip_capacity) return 0;
 	renderer->vertex_count = 0u;
 	renderer->item_count = 0u;
 	renderer->text_prepared = NULL;
+	const RgGuiGpuFrameClip unclipped = {-RG_GUI_GPU_UNCLIPPED, -RG_GUI_GPU_UNCLIPPED,
+	                                     RG_GUI_GPU_UNCLIPPED, RG_GUI_GPU_UNCLIPPED};
+	renderer->clips[0] = unclipped;
+	renderer->clip_count = 1u;
 	if (!rg_gui_renderer_prepare(text_renderer, list, overlay_start)) return 0;
 	renderer->text_prepared = rg_gui_renderer_prepared(text_renderer);
 	if (!renderer->text_prepared) return 0;
@@ -1426,6 +1546,7 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 	u32 ignored_pushes = 0u;
 	int clip_enabled = 0;
 	RgGuiRect clip = {0};
+	u32 clip_entry = 0u;
 	u32 run_cursor = 0u;
 	const int sign = renderer->frame_signature_enabled != 0u;
 	u64 signature = rg_gui_renderer_base_mix(0x9e3779b97f4a7c15ull, ((u64)list->count << 32u) | overlay_start);
@@ -1438,6 +1559,7 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 			ignored_pushes = 0u;
 			clip_enabled = 0;
 			memset(&clip, 0, sizeof(clip));
+			clip_entry = 0u;
 		}
 
 		const RgGuiDrawCmd* cmd = &list->cmds[i];
@@ -1453,6 +1575,7 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 			clip = clip_enabled ? rg_gui_renderer_base_clip_intersect(clip, cmd->data.clip.rect) : cmd->data.clip.rect;
 			clip_stack[clip_depth++] = clip;
 			clip_enabled = 1;
+			clip_entry = RG_GUI_GPU_CLIP_PENDING;
 			continue;
 		}
 		if (cmd->type == RG_GUI_CMD_CLIP_POP)
@@ -1463,6 +1586,7 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 				clip_depth--;
 				clip_enabled = clip_depth != 0u;
 				if (clip_enabled) clip = clip_stack[clip_depth - 1u];
+				clip_entry = clip_enabled ? RG_GUI_GPU_CLIP_PENDING : 0u;
 			}
 			continue;
 		}
@@ -1478,10 +1602,11 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 				signature = rg_gui_renderer_base_mix(signature, color);
 			}
 			RgGuiRect uv = {0};
-			if (!rg_gui_gpu_add_rect_vertices(renderer, cmd->data.rect.rect, uv, color) ||
+			if (!RG_GUI_GPU_RESOLVE_CLIP(renderer, clip_entry, clip) ||
+			    !rg_gui_gpu_add_rect_vertices(renderer, cmd->data.rect.rect, uv, color) ||
 			    !rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_SOLID, 0u, 0u,
 			                         first, RG_GUI_GPU_QUAD_VERTICES,
-			                         clip_enabled, clip))
+			                         clip_entry, clip))
 				goto capacity_failure;
 			continue;
 		}
@@ -1504,9 +1629,10 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 			rg_gui_gpu_set_vertex(&out[1], cmd->data.triangle.b.x, cmd->data.triangle.b.y, color, 0.0f, 0.0f);
 			rg_gui_gpu_set_vertex(&out[2], cmd->data.triangle.c.x, cmd->data.triangle.c.y, color, 0.0f, 0.0f);
 			renderer->vertex_count += 3u;
-			if (!rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_TRIANGLES, 0u, 0u,
+			if (!RG_GUI_GPU_RESOLVE_CLIP(renderer, clip_entry, clip) ||
+			    !rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_TRIANGLES, 0u, 0u,
 			                         first, 3u,
-			                         clip_enabled, clip))
+			                         clip_entry, clip))
 				goto capacity_failure;
 			continue;
 		}
@@ -1523,12 +1649,13 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 				signature = rg_gui_renderer_base_mix(signature, (u64)cmd->data.image.texture);
 				signature = rg_gui_renderer_base_mix(signature, (u64)cmd->data.image.material);
 			}
-			if (!rg_gui_gpu_add_rect_vertices(renderer, cmd->data.image.rect,
+			if (!RG_GUI_GPU_RESOLVE_CLIP(renderer, clip_entry, clip) ||
+			    !rg_gui_gpu_add_rect_vertices(renderer, cmd->data.image.rect,
 			                                  cmd->data.image.uv, color) ||
 			    !rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_IMAGE,
 			                         cmd->data.image.texture, cmd->data.image.material,
 			                         first, RG_GUI_GPU_QUAD_VERTICES,
-			                         clip_enabled, clip))
+			                         clip_entry, clip))
 				goto capacity_failure;
 			continue;
 		}
@@ -1552,8 +1679,10 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 				glyph_count += renderer->text_prepared->runs[run_cursor++].quad_count;
 			} while (run_cursor < renderer->text_prepared->run_count &&
 			         rg_gui_renderer_run_command_index(&renderer->text_prepared->runs[run_cursor]) == i);
-			if (!rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_TEXT, 0u, 0u,
-			                         first_glyph, glyph_count, clip_enabled, clip))
+			if (glyph_count &&
+			    (!RG_GUI_GPU_RESOLVE_CLIP(renderer, clip_entry, clip) ||
+			     !rg_gui_gpu_add_item(renderer, RG_GUI_GPU_ITEM_TEXT, 0u, 0u,
+			                          first_glyph, glyph_count, clip_entry, clip)))
 				goto capacity_failure;
 		}
 	}
@@ -1571,6 +1700,7 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 capacity_failure:
 	renderer->vertex_count = 0u;
 	renderer->item_count = 0u;
+	renderer->clip_count = 0u;
 	renderer->text_prepared = NULL;
 	renderer->frame_signature = 0u;
 	return 0;
@@ -1580,30 +1710,38 @@ RGINLINE int rg_gui_gpu_pack_frame(const RgGuiGpuRenderer* renderer,
                                    RgGuiGpuFramePacketSlot* slot,
                                    u8* frame, u32 capacity, RgGuiGpuUpload* upload)
 {
-	upload->ref_count = upload->batch_count = upload->frame.size = 0u;
+	upload->ref_count = upload->batch_count = upload->clip_count = upload->frame.size = 0u;
+	upload->clips_offset = 0u;
 	if (!renderer || !renderer->text_prepared || renderer->text_prepared->run_count > renderer->text.run_capacity ||
-	    renderer->vertex_count > renderer->vertex_capacity) return 0;
+	    renderer->vertex_count > renderer->vertex_capacity ||
+	    !renderer->clip_count || renderer->clip_count > renderer->clip_capacity ||
+	    renderer->clip_count > RG_GUI_GPU_FRAME_CLIP_LIMIT) return 0;
 	const RgGuiRendererPrepared* text = renderer->text_prepared;
 	upload->text.run_count = text->run_count;
 	upload->text.glyph_count = text->glyph_count;
 	upload->vertex_count = renderer->vertex_count;
 	upload->item_count = renderer->item_count;
-	upload->geometry_offset = upload->text.run_count * (u32)sizeof(RgGuiRendererRun);
+	upload->geometry_offset = upload->text.run_count * (u32)sizeof(RgGuiGpuFrameRun);
 	const u32 geometry_bytes = upload->vertex_count * (u32)sizeof(RgGuiGpuVertex);
 	upload->refs_offset = (upload->geometry_offset + geometry_bytes + 7u) & ~7u;
-	if (upload->refs_offset > capacity) return 0;
-	const u32 ref_limit = (capacity - upload->refs_offset) / 8u;
-	if (upload->geometry_offset) memcpy(frame, text->runs, upload->geometry_offset);
+	/* The clip table follows the references, which may not use its space. */
+	const u32 clip_reserve = renderer->item_count ? renderer->clip_count * (u32)sizeof(RgGuiGpuFrameClip) : 0u;
+	if (upload->refs_offset > capacity || clip_reserve > capacity - upload->refs_offset) return 0;
+	u32 ref_limit = (capacity - upload->refs_offset - clip_reserve) / 8u;
+	if (ref_limit > renderer->ref_capacity) ref_limit = renderer->ref_capacity;
 	if (geometry_bytes) memcpy(frame + upload->geometry_offset, renderer->vertices, geometry_bytes);
 	/* Initialize the at-most-four-byte alignment pad included in the upload. */
 	const u32 padding = upload->refs_offset - upload->geometry_offset - geometry_bytes;
 	if (padding) memset(frame + upload->geometry_offset + geometry_bytes, 0, padding);
+	RgGuiGpuFrameRun* runs = (RgGuiGpuFrameRun*)(void*)frame;
 	u8* refs = frame ? frame + upload->refs_offset : NULL;
 	u32 cursor = 0u;
 	for (u32 n = 0u; n < renderer->item_count; ++n)
 	{
 		const RgGuiGpuItem* source = &renderer->items[n];
 		const u32 first = upload->ref_count;
+		const u32 clip = source->clip_index;
+		if (clip >= renderer->clip_count) goto failure;
 		if (source->type == RG_GUI_GPU_ITEM_TEXT)
 		{
 			if (source->first > text->glyph_count || source->count > text->glyph_count - source->first)
@@ -1619,6 +1757,8 @@ RGINLINE int rg_gui_gpu_pack_frame(const RgGuiGpuRenderer* renderer,
 				    run->first_cached_quad > renderer->text.cached_quad_capacity ||
 				    run->quad_count > renderer->text.cached_quad_capacity - run->first_cached_quad)
 					goto failure;
+				RgGuiGpuFrameRun record = {run->x, run->y, run->color, clip};
+				memcpy(&runs[index], &record, sizeof(record));
 				/* Addition changes only the low cached-quad index. No floats. */
 				const u64 base = ((u64)index << 32u) | run->first_cached_quad;
 				for (u32 j = 0u; j < run->quad_count; ++j)
@@ -1640,14 +1780,15 @@ RGINLINE int rg_gui_gpu_pack_frame(const RgGuiGpuRenderer* renderer,
 			     source->type != RG_GUI_GPU_ITEM_TRIANGLES) ||
 			    source->count % stride || source->first > renderer->vertex_count ||
 			    source->count > renderer->vertex_count - source->first) goto failure;
-			const u64 kind = source->type == RG_GUI_GPU_ITEM_IMAGE ? (u64)2u << 62u : (u64)1u << 62u;
+			/* Word1: kind in bits 30..31, clip index in bits 1..29, quad flag in
+			 * bit 0. Text keeps its run index in word1 and its clip in the run. */
+			const u64 kind = (source->type == RG_GUI_GPU_ITEM_IMAGE ? (u64)2u << 62u : (u64)1u << 62u) |
+			                 ((u64)clip << 33u) | ((u64)(quad != 0) << 32u);
 			u32 offset = source->first, remaining = source->count;
 			while (remaining)
 			{
 				if (upload->ref_count >= ref_limit) goto failure;
-				/* Geometry word1 bit0 is the quad flag, separate from kind in
-				 * bits30..31. Text still uses word1 as its original run index. */
-				u64 reference = kind | ((u64)(quad != 0) << 32u) | offset;
+				u64 reference = kind | offset;
 				memcpy(refs + upload->ref_count++ * 8u, &reference, sizeof(reference));
 				offset += stride;
 				remaining -= stride;
@@ -1658,8 +1799,9 @@ RGINLINE int rg_gui_gpu_pack_frame(const RgGuiGpuRenderer* renderer,
 		const RgGuiTexture texture = source->type == RG_GUI_GPU_ITEM_IMAGE ? source->texture : (RgGuiTexture)(uintptr_t)renderer->text.atlas_texture;
 		RgGuiGpuIndexedBatch* batch = upload->batch_count ? &slot->batches[upload->batch_count - 1u] : NULL;
 		const int custom = source->type == RG_GUI_GPU_ITEM_IMAGE && source->material != 0u;
-		if (!batch || batch->material || custom || batch->texture != texture || batch->clip_enabled != source->clip_enabled ||
-		    (source->clip_enabled && memcmp(&batch->clip, &source->clip, sizeof(source->clip))))
+		/* The shader clips stock batches per primitive, so only a texture or a
+		 * material boundary ends one. A material batch keeps its scissor clip. */
+		if (!batch || batch->material || custom || batch->texture != texture)
 		{
 			if (upload->batch_count >= slot->batch_capacity) goto failure;
 			batch = &slot->batches[upload->batch_count++];
@@ -1668,19 +1810,38 @@ RGINLINE int rg_gui_gpu_pack_frame(const RgGuiGpuRenderer* renderer,
 			batch->texture = texture;
 			batch->material = custom ? source->material : 0u;
 			batch->first_vertex = source->first;
-			batch->clip_enabled = source->clip_enabled;
-			batch->clip = source->clip;
+			if (custom && clip)
+			{
+				batch->clip_enabled = 1u;
+				batch->clip = source->clip;
+			}
 		}
 		batch->ref_count += count;
 		++batch->source_items;
 		if (source->type == RG_GUI_GPU_ITEM_TEXT) batch->glyph_count += source->count;
 		else batch->geometry_vertices += source->count;
 	}
+	/* Runs after the last text item are never referenced; keep their bytes defined. */
+	for (; cursor < text->run_count; ++cursor)
+	{
+		const RgGuiRendererRun* run = &text->runs[cursor];
+		RgGuiGpuFrameRun record = {run->x, run->y, run->color, 0u};
+		memcpy(&runs[cursor], &record, sizeof(record));
+	}
 	upload->frame.size = upload->refs_offset + upload->ref_count * 8u;
+	if (renderer->item_count)
+	{
+		if (upload->frame.size > capacity || clip_reserve > capacity - upload->frame.size) goto failure;
+		upload->clips_offset = upload->frame.size;
+		memcpy(frame + upload->clips_offset, renderer->clips, clip_reserve);
+		upload->clip_count = renderer->clip_count;
+		upload->frame.size += clip_reserve;
+	}
 	if (upload->frame.size > capacity) goto failure;
 	return 1;
 failure:
-	upload->ref_count = upload->batch_count = upload->frame.size = 0u;
+	upload->ref_count = upload->batch_count = upload->clip_count = upload->frame.size = 0u;
+	upload->clips_offset = 0u;
 	return 0;
 }
 
@@ -1755,9 +1916,8 @@ RGINLINE int rg_gui_gpu_stage_upload(RgGuiGpuRenderer* renderer,
 	const u32 initial_offset = ring->offset;
 	u64 maximum_refs = (u64)prepared->glyph_count + renderer->vertex_count / 3u;
 	if (maximum_refs > renderer->ref_capacity) maximum_refs = renderer->ref_capacity;
-	u64 reserved = (u64)prepared->run_count * sizeof(RgGuiRendererRun) +
-	               (u64)renderer->vertex_count * sizeof(RgGuiGpuVertex);
-	reserved = ((reserved + 7u) & ~(u64)7u) + maximum_refs * 8u;
+	u64 reserved = rg_gui_gpu_frame_bytes(prepared->run_count, renderer->vertex_count, maximum_refs,
+	                                      renderer->item_count ? renderer->clip_count : 0u);
 	if (reserved > renderer->frame_capacity) return 0;
 	RgGpuUploadSlice packed = {0};
 	u8* mapped = NULL;
@@ -2029,21 +2189,29 @@ RGINLINE RgGuiGpuStats rg_gui_gpu_draw(const RgGuiGpuRenderer* renderer,
 		f32 offset_x, offset_y;
 		f32 atlas_inv_width, atlas_inv_height;
 		u32 geometry_offset, refs_offset;
+		u32 clips_offset, padding[3];
 	} uniforms = {
 	    (f32)desc->output_width, (f32)desc->output_height, desc->offset_x, desc->offset_y,
 	    1.0f / (f32)renderer->text.atlas_width, 1.0f / (f32)renderer->text.atlas_height,
-	    upload->geometry_offset, upload->refs_offset};
+	    upload->geometry_offset, upload->refs_offset, upload->clips_offset, {0u, 0u, 0u}};
 	f32 geometry_uniforms[4] = {
 	    (f32)desc->output_width, (f32)desc->output_height, desc->offset_x, desc->offset_y};
 	SDL_GPUBuffer* frame = renderer->frame_buffers[upload->frame_buffer_index];
 	int indexed_bound = 0;
 	RgGuiTexture bound_texture = 0u;
+	/* Stock batches clip in the shader and share the viewport scissor; only a
+	 * material batch sets its own clip, and the next stock batch restores it. */
+	int viewport_scissor = 0;
 	for (u32 i = 0u; i < upload->batch_count; i++)
 	{
 		const RgGuiGpuIndexedBatch* batch = &upload->batches[i];
 		SDL_Rect scissor = rg_gui_gpu_scissor(batch->clip, batch->clip_enabled != 0u, desc);
 		if (scissor.w <= 0 || scissor.h <= 0) continue;
-		SDL_SetGPUScissor(pass, &scissor);
+		if (batch->clip_enabled || !viewport_scissor)
+		{
+			SDL_SetGPUScissor(pass, &scissor);
+			viewport_scissor = !batch->clip_enabled;
+		}
 		int custom = 0;
 		if (batch->material && renderer->image_bind)
 		{
