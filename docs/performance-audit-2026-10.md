@@ -347,40 +347,45 @@ The `static` scenario freezes the showcase after warmup so every frame is
 identical, and `--tile-cache-skip-present` makes a frame with no dirty tiles
 neither draw nor present: the swapchain keeps the last image and the loop
 waits for input with a 16 ms timeout. Verify mode confirmed the frozen frames
-identical by readback (400 compared, 0 mismatches). Four alternating rounds at
-VSync, 600 measured frames each, three variants in rotating order
-(`benchmarks/measure_tiles.py static vsync 600 4 ...`):
+identical by readback (400 compared, 0 mismatches).
+
+Measured on 2026-10-24 on a quiet machine (load average 0.8 to 1.05, no other
+GPU application), in six alternating rounds at VSync, 600 measured frames
+each, three variants in rotating order
+(`benchmarks/measure_tiles.py static vsync 600 6 ...`):
 
 | static scenario, VSync | direct | tile cache, present every frame | tile cache, skip unchanged presents |
 | --- | ---: | ---: | ---: |
 | frames presented (of 600) | 600 | 600 | 1 |
-| GPU time outside RC6 idle per frame | 4.25 ms [4.03-4.30] | 3.71 ms [3.64-3.75] | 1.65 ms [1.58-1.68] |
-| package energy per frame | 85.6 mJ [77-208] | 79.6 mJ [76-166] | 60.5 mJ [58.7-61.6] |
-| lower than direct | | 4/4 and 3/4 pairs | 4/4 and 4/4 pairs |
+| average package power | 3.32 W [2.75-5.12] | 2.93 W [2.69-3.03] | 1.93 W [1.75-2.00] |
+| GPU time outside RC6 idle per frame | 3.53 ms [3.49-3.86] | 3.09 ms [3.06-3.10] | 0.35 ms [0.31-0.39] |
+| lower than direct | | 6/6 pairs | 6/6 pairs |
 
-What this does and does not show:
+The idle desktop, measured right afterwards with nothing else running, drew
+1.92 to 2.23 W, with the GPU outside idle 2.8 to 3.0 percent of the time.
 
-- The GPU-activity result is solid. An independent rerun (Codex, 2026-10-23)
-  measured 4.61, 4.05, and 2.06 ms for the three variants, the skip variant
-  lower in 4 of 4 rounds, about 55 percent against this run's 61. Both are
-  whole-device counters, so what is established is that the device spends far
-  less time active when unchanged frames are not presented.
-- The energy result is not established. This run's direct column caught a
-  background spike, the independent rerun found the skip variant lower in only
-  2 of 4 rounds with essentially unchanged average power, and the skip variant
-  is paced by a 16 ms wait rather than the 16.7 ms swapchain, which biases its
-  energy per frame low by about 4 percent before any real saving. The script
-  now also reports average power, the fair unit across variants. A dependable
-  battery claim needs a quiet machine and several matched-duration rounds; the
-  earlier "29 percent, 1.5 W" figure should not be quoted.
-- The attribution is a hypothesis. Skipping a frame removes rg_gui's own
-  upload encoding, the full-window blit, and the submission as well as the
-  present and whatever the compositor does with it. The measurement shows that
-  this per-present path costs about 2 ms of GPU activity per frame on this X11
-  desktop whether one pixel or every pixel changed; how much of that is the
-  compositor was not isolated.
+- Skipping unchanged presents brought the static showcase down to the idle
+  desktop's power. Repainting every frame cost about 1.2 W above idle. The
+  tile cache, still presenting every frame, removed a third of that (0.4 W),
+  and skipping presents removed the rest. The skip variant was also below the
+  tile cache in all six rounds.
+- A background burst at the start inflated the first direct round (5.12 W)
+  and an idle reading taken just before the run (4.5 to 5.1 W). The medians
+  and the other five direct rounds (2.75 to 3.42 W) agree.
+- Power is the fair unit. The skip variant is paced by its 16 ms wait rather
+  than by the swapchain (a 16.55 ms frame period against 16.71 ms), which
+  biases its energy per frame low. Earlier runs on a busy machine, with
+  another GPU application active, could not separate the energy at all; their
+  "29 percent, 1.5 W" figure should not be quoted, and this run supersedes it.
+- The GPU split agrees with the earlier runs, which measured 4.25, 3.71, and
+  1.65 ms (4.61, 4.05, and 2.06 ms in an independent rerun by Codex) with more
+  background activity in every column. The render pass the tile cache skips
+  is about 0.4 ms of GPU activity per frame. The per-present path, which
+  skipping removes, is about 2.7 ms: rg_gui's upload encoding, the full-window
+  blit, the submission, the present, and whatever the compositor does with
+  it. How much of that is the compositor was not isolated.
 
-The conclusion for integrators still follows from the GPU-activity result:
+The conclusion for integrators follows from both results:
 the article's level one matters more than its level two here. Detect unchanged
 frames and present nothing. Both mechanisms in this library do that.
 `rg_gui_gpu_frame_signature` is the cheap whole-frame test for applications

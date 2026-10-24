@@ -231,13 +231,16 @@ Intel RAPL energy counters (root-only by default) and the i915 RC6 residency
 counter, reported as "GPU busy" time per measured frame. Startup and warmup are
 removed by subtracting a warmup-only run. Both indicators include every process
 on the machine; compare pairs taken under the same load, and prefer Immediate
-presentation when the question is the demo's own GPU work. See the
+presentation when the question is the demo's own GPU work. Energy differences
+only separate on a quiet machine with no other GPU application running;
+compare average power rather than energy per frame, and read the package
+counter over a few idle seconds as a floor. See the
 [performance audit](../docs/performance-audit-2026-10.md#level-two-dirty-tiles)
 for measured results and their limits.
 
 ```sh
 python3 benchmarks/measure_tiles.py idle immediate 1200 3
-python3 benchmarks/measure_tiles.py static vsync 600 4 "direct=" "tiles=--tile-cache" "skip=--tile-cache --tile-cache-skip-present"
+python3 benchmarks/measure_tiles.py static vsync 600 6 "direct=" "tiles=--tile-cache" "skip=--tile-cache --tile-cache-skip-present"
 ```
 
 ## Many docked panels
