@@ -421,12 +421,15 @@ shows that every draw call after the first begins at a clip change, in the
 idle showcase and with 60 extra panels; none begins at a texture or material
 change. SDL spends about 0.5 us of CPU encoding each one.
 
-The showcase's own layout leaves the right half of its dock space empty.
-`rg_gui_dockspace_dock` always splits the first leaf, so docking Frame Stats on
-the right splits the Inspector's leaf, the original root leaf is never filled,
-and Inspector, Workspace, and Node Graph become tabs of one leaf. That is a
-layout bug rather than a performance one, but it keeps the idle frame's GPU
-fill below that of a filled layout.
+Until 2026-10-23 the showcase's own layout left the right half of its dock
+space empty. `rg_gui_dockspace_dock` always splits the first leaf, so docking
+Frame Stats on the right split the Inspector's leaf, the original root leaf
+was never filled, and Inspector, Workspace, and Node Graph became tabs of one
+leaf. The demo now docks the center tabs first, then Frame Stats to their
+right and Inspector to their left, giving the three columns its floating
+layout implies. Showcase measurements in this document taken before that
+change used the old layout, which drew fewer commands because Inspector was a
+hidden tab.
 
 ## Remaining opportunities, in priority order
 

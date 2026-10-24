@@ -67,6 +67,9 @@ between 0.x releases.
 
 ### Fixed
 
+- The full showcase docks Inspector, the Workspace and Node Graph tabs, and
+  Frame Stats into three columns. It previously left half its dock space
+  empty, because `rg_gui_dockspace_dock` splits the first leaf.
 - Strict GCC builds on LP64 Linux and decorated-window tear-out hit testing.
 - Restore cached maximized/minimized tear-outs reliably on X11 before applying
   their requested size and position.

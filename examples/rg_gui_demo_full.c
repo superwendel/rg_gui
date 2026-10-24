@@ -547,6 +547,21 @@ static void full_draw_graph(RgGuiContext* gui, FullDemoState* state, u32 window_
 	rg_gui_window_end(gui, &state->graph_window);
 }
 
+/* Give the outer columns their floating width and the center the rest. */
+static void full_dock_side_columns(RgGuiContext* gui, const RgGuiDockSpaceState* dockspace, f32 width, f32 side)
+{
+	u32 root = dockspace->root;
+	if (root == 0u || root > gui->dock_node_capacity || width <= 3.0f * side) return;
+	RgGuiDockNode* outer = &gui->dock_nodes[root];
+	if (outer->split != RG_GUI_DOCK_SPLIT_VERT || outer->child_a == 0u ||
+	    outer->child_a > gui->dock_node_capacity)
+		return;
+	RgGuiDockNode* inner = &gui->dock_nodes[outer->child_a];
+	if (inner->split != RG_GUI_DOCK_SPLIT_VERT) return;
+	outer->split_ratio = (width - side) / width;
+	inner->split_ratio = side / (width - side);
+}
+
 static RgGuiId full_dock_panel_id(u32 index)
 {
 	return rg_gui_id_combine(rg_gui_id_str("dock_panel"), index);
@@ -651,14 +666,18 @@ static void full_build_ui(RgGuiContext* gui, FullDemoState* state, int width, in
 	rg_gui_dockspace_begin(gui, &state->dockspace, dock_rect, rg_gui_id_str("showcase_dockspace"));
 	if (!state->dock_initialized && dock_rect.w > 0.0f && dock_rect.h > 0.0f)
 	{
-		rg_gui_dockspace_dock(gui, &state->dockspace, &state->inspector_window, "Inspector",
-		                      rg_gui_id_str("inspector_window"), RG_GUI_DOCK_SLOT_LEFT);
-		rg_gui_dockspace_dock(gui, &state->dockspace, &state->stats_window, "Frame Stats",
-		                      rg_gui_id_str("stats_window"), RG_GUI_DOCK_SLOT_RIGHT);
+		/* rg_gui_dockspace_dock splits the first (leftmost) leaf, so build the
+		 * columns from the middle out: the center tabs, then Frame Stats to
+		 * their right, then Inspector to their left. */
 		rg_gui_dockspace_dock(gui, &state->dockspace, &state->assets_window, "Workspace",
 		                      rg_gui_id_str("assets_window"), RG_GUI_DOCK_SLOT_CENTER);
 		rg_gui_dockspace_dock(gui, &state->dockspace, &state->graph_window, "Node Graph",
 		                      rg_gui_id_str("graph_window"), RG_GUI_DOCK_SLOT_CENTER);
+		rg_gui_dockspace_dock(gui, &state->dockspace, &state->stats_window, "Frame Stats",
+		                      rg_gui_id_str("stats_window"), RG_GUI_DOCK_SLOT_RIGHT);
+		rg_gui_dockspace_dock(gui, &state->dockspace, &state->inspector_window, "Inspector",
+		                      rg_gui_id_str("inspector_window"), RG_GUI_DOCK_SLOT_LEFT);
+		full_dock_side_columns(gui, &state->dockspace, dock_rect.w, 330.0f);
 		full_dock_panels(gui, state);
 		state->dock_initialized = 1;
 	}
