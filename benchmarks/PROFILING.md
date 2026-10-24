@@ -133,6 +133,7 @@ alone does not establish a better frame time or lower input latency.
 | `images-grouped` | Keep those 512 quads and their geometry, but use the first texture for 256 consecutive quads and the second for the remaining 256. |
 | `tearout` | Tear-out demo: create a native Inspector window at each 240-frame cycle start, then redock and close it at cycle frame 180. |
 | `static` | Full showcase frozen after warmup: statistics and animation stop, so every measured frame is identical. Direct launch only; with `--tile-cache-skip-present` unchanged frames are neither drawn nor presented. |
+| `docks` | Full showcase plus extra docked property panels, 20 unless `--dock-panels N` (0 to 60) says otherwise. Every third panel opens a new leaf and the next two join it as tabs. Direct launch only. |
 | `manual` | Direct demo launch only; interact normally while recording. Both full and tear-out demos support it. |
 
 The image control deliberately changes texture order while preserving geometry
@@ -238,6 +239,24 @@ for measured results and their limits.
 python3 benchmarks/measure_tiles.py idle immediate 1200 3
 python3 benchmarks/measure_tiles.py static vsync 600 4 "direct=" "tiles=--tile-cache" "skip=--tile-cache --tile-cache-skip-present"
 ```
+
+## Many docked panels
+
+The `docks` scenario measures how frame cost grows with the number of docked
+panels. Rotate the panel counts between rounds, because the counts change the
+workload itself:
+
+```sh
+for n in 0 20 40 60; do
+    out/linux/rg_gui_demo_full --scenario docks --dock-panels $n --present immediate \
+        --frames 1320 --profile-warmup 120 --profile out/docks-$n.csv
+done
+```
+
+Compare `ui_ms`, `main_prepare_ms`, `main_stage_upload_ms`, and
+`main_draw_calls` across counts. See the
+[performance audit](../docs/performance-audit-2026-10.md#many-docked-panels)
+for results.
 
 ## Loaded-font Unicode CPU workloads
 

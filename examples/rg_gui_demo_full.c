@@ -39,6 +39,17 @@ typedef enum FullHelpMenuItem
 	FULL_HELP_KEYBOARD
 } FullHelpMenuItem;
 
+/* Extra docked property panels for the dock-pressure profile (--dock-panels). */
+#define FULL_DOCK_PANEL_MAX 60u
+
+typedef struct FullDockPanel
+{
+	RgGuiWindowState window;
+	char title[16];
+	f32 values[3];
+	int enabled;
+} FullDockPanel;
+
 typedef struct FullDemoState
 {
 	RgGuiDockSpaceState dockspace;
@@ -104,6 +115,9 @@ typedef struct FullDemoState
 	RgGuiNodeGraphState node_state;
 	RgGuiNodeGraph graph;
 	f32 node_values[4];
+
+	FullDockPanel dock_panels[FULL_DOCK_PANEL_MAX];
+	u32 dock_panel_count;
 } FullDemoState;
 
 static const char* full_menu_labels[] = {"File", "View", "Help"};
@@ -533,6 +547,89 @@ static void full_draw_graph(RgGuiContext* gui, FullDemoState* state, u32 window_
 	rg_gui_window_end(gui, &state->graph_window);
 }
 
+static RgGuiId full_dock_panel_id(u32 index)
+{
+	return rg_gui_id_combine(rg_gui_id_str("dock_panel"), index);
+}
+
+static void full_dock_panels_init(FullDemoState* state, u32 count)
+{
+	state->dock_panel_count = count < FULL_DOCK_PANEL_MAX ? count : FULL_DOCK_PANEL_MAX;
+	for (u32 i = 0u; i < state->dock_panel_count; i++)
+	{
+		FullDockPanel* panel = &state->dock_panels[i];
+		rg_snprintf(panel->title, sizeof(panel->title), "Panel %02u", i + 1u);
+		panel->values[0] = 0.5f;
+		panel->values[1] = 0.0f;
+		panel->values[2] = 1.0f;
+		panel->enabled = (int)(i % 2u);
+	}
+}
+
+/* Give every leaf of the dock tree an equal share of its parent's space. */
+static u32 full_dock_balance(RgGuiContext* gui, u32 node_index)
+{
+	if (node_index == 0u || node_index > gui->dock_node_capacity) return 0u;
+	RgGuiDockNode* node = &gui->dock_nodes[node_index];
+	if (node->split == RG_GUI_DOCK_SPLIT_NONE) return 1u;
+	u32 a = full_dock_balance(gui, node->child_a);
+	u32 b = full_dock_balance(gui, node->child_b);
+	if (a && b) node->split_ratio = (f32)a / (f32)(a + b);
+	return a + b;
+}
+
+/* Every third panel opens a new leaf, alternating left and top so the tree
+ * spirals inward; the next two join that leaf as tabs. */
+static void full_dock_panels(RgGuiContext* gui, FullDemoState* state)
+{
+	for (u32 i = 0u; i < state->dock_panel_count; i++)
+	{
+		RgGuiDockSlot slot = i % 3u ? RG_GUI_DOCK_SLOT_CENTER :
+		                     (i / 3u) % 2u ? RG_GUI_DOCK_SLOT_TOP : RG_GUI_DOCK_SLOT_LEFT;
+		rg_gui_dockspace_dock(gui, &state->dockspace, &state->dock_panels[i].window,
+		                      state->dock_panels[i].title, full_dock_panel_id(i), slot);
+	}
+	if (state->dock_panel_count) full_dock_balance(gui, state->dockspace.root);
+}
+
+/* A small property inspector: one changing readout, sliders, a toggle, a
+ * meter, and a button, as a typical editor panel shows. */
+static void full_draw_dock_panels(RgGuiContext* gui, FullDemoState* state, u32 window_flags)
+{
+	for (u32 i = 0u; i < state->dock_panel_count; i++)
+	{
+		FullDockPanel* panel = &state->dock_panels[i];
+		RgGuiRect initial = rg_gui_make_rect(40.0f + 12.0f * (f32)(i % 20u), 80.0f + 8.0f * (f32)(i % 20u),
+		                                     240.0f, 220.0f);
+		if (!rg_gui_window_begin(gui, &panel->window, panel->title, initial, 160.0f, 120.0f, 6.0f,
+		                         window_flags, full_dock_panel_id(i)))
+			continue;
+		rg_gui_push_id_u64(gui, i);
+		char readout[48];
+		f32 phase = state->activity + 0.07f * (f32)i;
+		phase -= (f32)(int)phase;
+		rg_snprintf(readout, sizeof(readout), "Output %.3f", (double)(phase * panel->values[2]));
+		rg_gui_label(gui, readout, rg_gui_layout_next(gui, 20.0f));
+		rg_gui_slider_float(gui, "Weight", &panel->values[0], 0.0f, 1.0f,
+		                    rg_gui_layout_next(gui, 24.0f), rg_gui_id_str("weight"));
+		rg_gui_slider_float(gui, "Bias", &panel->values[1], -1.0f, 1.0f,
+		                    rg_gui_layout_next(gui, 24.0f), rg_gui_id_str("bias"));
+		rg_gui_slider_float(gui, "Gain", &panel->values[2], 0.0f, 4.0f,
+		                    rg_gui_layout_next(gui, 24.0f), rg_gui_id_str("gain"));
+		rg_gui_checkbox_static(gui, "Enabled", &panel->enabled,
+		                       rg_gui_layout_next(gui, 22.0f), rg_gui_id_str("enabled"));
+		rg_gui_progress_bar(gui, "Load", phase, 0.0f, 1.0f, rg_gui_layout_next(gui, 20.0f));
+		if (rg_gui_button_static(gui, "Reset", rg_gui_layout_next(gui, 26.0f), rg_gui_id_str("reset")))
+		{
+			panel->values[0] = 0.5f;
+			panel->values[1] = 0.0f;
+			panel->values[2] = 1.0f;
+		}
+		rg_gui_pop_id(gui);
+		rg_gui_window_end(gui, &panel->window);
+	}
+}
+
 static void full_build_ui(RgGuiContext* gui, FullDemoState* state, int width, int height)
 {
 	/* Paint the backdrop so every pixel belongs to a command; dirty-rectangle
@@ -562,6 +659,7 @@ static void full_build_ui(RgGuiContext* gui, FullDemoState* state, int width, in
 		                      rg_gui_id_str("assets_window"), RG_GUI_DOCK_SLOT_CENTER);
 		rg_gui_dockspace_dock(gui, &state->dockspace, &state->graph_window, "Node Graph",
 		                      rg_gui_id_str("graph_window"), RG_GUI_DOCK_SLOT_CENTER);
+		full_dock_panels(gui, state);
 		state->dock_initialized = 1;
 	}
 	rg_gui_dockspace_end(gui, &state->dockspace);
@@ -573,6 +671,7 @@ static void full_build_ui(RgGuiContext* gui, FullDemoState* state, int width, in
 	full_draw_stats(gui, state, window_flags);
 	full_draw_assets(gui, state, window_flags);
 	full_draw_graph(gui, state, window_flags);
+	full_draw_dock_panels(gui, state, window_flags);
 }
 
 static int full_apply_present_mode(SDL_GPUDevice* device, SDL_Window* window, FullDemoState* state)
@@ -602,12 +701,14 @@ typedef enum FullProfileScenario
 	FULL_PROFILE_IMAGES_GROUPED,
 	/* Like idle, but after warmup the statistics and animation freeze so every
 	 * frame is identical: the case where a cached renderer can present nothing. */
-	FULL_PROFILE_STATIC
+	FULL_PROFILE_STATIC,
+	/* Like idle, with extra docked property panels (20 unless --dock-panels). */
+	FULL_PROFILE_DOCKS
 } FullProfileScenario;
 
 static int full_profile_scenario(const char* name)
 {
-	static const char* names[] = {"manual", "idle", "text-idle", "edit", "scroll", "resize", "images", "images-grouped", "static"};
+	static const char* names[] = {"manual", "idle", "text-idle", "edit", "scroll", "resize", "images", "images-grouped", "static", "docks"};
 	for (u32 i = 0u; i < RG_ARRAY_COUNT(names); i++)
 		if (strcmp(name, names[i]) == 0) return (int)i;
 	return -1;
@@ -730,6 +831,7 @@ int main(int argc, char** argv)
 	int tile_verify = 0;
 	int tile_skip_present = 0;
 	int tile_verify_interval = 1;
+	int dock_panels = -1;
 	DemoProfileOptions profile_options;
 	demo_profile_options_init(&profile_options);
 	DemoProfileCapture profile_capture = {0};
@@ -764,6 +866,15 @@ int main(int argc, char** argv)
 		{
 			tile_verify_interval = atoi(argv[++i]);
 			if (tile_verify_interval < 1 || tile_verify_interval > 100000) return 1;
+		}
+		else if (strcmp(argv[i], "--dock-panels") == 0 && i + 1 < argc)
+		{
+			dock_panels = atoi(argv[++i]);
+			if (dock_panels < 0 || dock_panels > (int)FULL_DOCK_PANEL_MAX)
+			{
+				fprintf(stderr, "--dock-panels must be 0 to %u\n", FULL_DOCK_PANEL_MAX);
+				return 1;
+			}
 		}
 		else
 		{
@@ -911,6 +1022,8 @@ int main(int argc, char** argv)
 	SDL_WindowID window_id = SDL_GetWindowID(window);
 	FullDemoState state;
 	full_state_init(&state);
+	if (dock_panels < 0) dock_panels = profile_scenario == FULL_PROFILE_DOCKS ? 20 : 0;
+	full_dock_panels_init(&state, (u32)dock_panels);
 	if (profile_scenario >= FULL_PROFILE_TEXT_IDLE && profile_scenario <= FULL_PROFILE_SCROLL)
 		full_profile_seed_notes(&state);
 	state.immediate_present_supported = SDL_WindowSupportsGPUPresentMode(
@@ -925,6 +1038,8 @@ int main(int argc, char** argv)
 	printf("Profile configuration: backend=%s scenario=%s present=%s\n", SDL_GetGPUDeviceDriver(device),
 	       profile_options.scenario, demo_present_name(state.present_mode));
 	demo_profile_log_runtime(window, &profile_options);
+	if (state.dock_panel_count)
+		printf("Profile dock panels: %u added to the four showcase windows\n", state.dock_panel_count);
 	if (capture_wait_ms) SDL_Delay((u32)capture_wait_ms);
 	u64 previous_ticks = SDL_GetTicksNS();
 	u64 previous_frame_start = previous_ticks;

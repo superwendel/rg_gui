@@ -7,6 +7,9 @@ between 0.x releases.
 
 ### Added
 
+- A `docks` profiling scenario and `--dock-panels N` option in the full
+  showcase, which dock up to 60 extra property panels to measure how frame
+  cost grows with the number of panels.
 - `rg_gui_gpu_tiles.h`: an opt-in dirty-tile pass that bins prepared commands
   into 64-pixel tiles, digests each tile's command list, and reports the
   rectangles to repaint in a persistent target. The full demo's `--tile-cache`

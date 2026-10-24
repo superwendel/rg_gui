@@ -386,16 +386,83 @@ still has to be presented, and on this desktop the per-present path costs more
 GPU activity than the partial repaint saves. Wayland or an uncomposited session
 may change that balance; it was not measured.
 
+## Many docked panels
+
+The `docks` scenario adds docked property panels to the showcase, 20 unless
+`--dock-panels` says otherwise. Every third panel opens a new leaf and the next
+two join it as tabs, so a third of them are visible. Each visible panel shows a
+changing readout, three sliders, a checkbox, a meter, and a button. Split
+ratios are balanced so every leaf gets an equal share. Immediate presentation,
+three rotated rounds of 1,200 measured frames, median of run medians:
+
+| Extra panels | 0 | 20 | 40 | 60 |
+| --- | ---: | ---: | ---: | ---: |
+| Draw commands | 583 | 1,143 | 1,386 | 1,901 |
+| Draw calls | 18 | 62 | 100 | 134 |
+| UI build | 69.9 us | 105.4 us | 123.0 us | 140.4 us |
+| Prepare | 45.4 us | 90.6 us | 110.3 us | 150.4 us |
+| Stage | 19.9 us | 45.0 us | 57.5 us | 76.5 us |
+| SDL draw encode | 77.4 us | 113.6 us | 130.3 us | 139.2 us |
+| Frame work | 1.59 ms | 1.88 ms | 1.96 ms | 1.97 ms |
+
+Docking itself is not a cost center. Preparation grows by about 80 ns and
+staging by 40 to 50 ns per added command, and the UI build grows less than
+linearly in panels because hidden tabs emit almost nothing. In a gprof profile
+of the 60-panel case, dock layout, splitter handling, and tab bookkeeping are
+about 2% of sampled CPU time; the rest is the renderer's cache probes, text
+lookup, preparation, and staging discussed above. Frame work rises over the
+first 20 panels and then flattens. The frame is GPU-bound in Immediate mode,
+and filling the space the idle layout leaves empty costs more GPU time than
+extra draw calls do: going from 40 to 60 panels adds 34 draw calls and 7 us
+per frame.
+
+Each visible panel adds about six draw calls. Counting why batches start
+shows that every draw call after the first begins at a clip change, in the
+idle showcase and with 60 extra panels; none begins at a texture or material
+change. SDL spends about 0.5 us of CPU encoding each one.
+
+The showcase's own layout leaves the right half of its dock space empty.
+`rg_gui_dockspace_dock` always splits the first leaf, so docking Frame Stats on
+the right splits the Inspector's leaf, the original root leaf is never filled,
+and Inspector, Workspace, and Node Graph become tabs of one leaf. That is a
+layout bug rather than a performance one, but it keeps the idle frame's GPU
+fill below that of a filled layout.
+
 ## Remaining opportunities, in priority order
 
-1. **A smaller `RgGuiDrawCmd`.** The command is 80 bytes because `rg_vec4`
-   colors force 16-byte alignment and padding. Packing colors to 32-bit RGBA
-   (the renderer converts them anyway) and tightening the union would bring a
-   command to 32-48 bytes. The list is written once and read three times per
-   frame (overlay merge, renderer prepare, GPU prepare), so this is cache
-   footprint, not instructions. It changes a public struct and belongs in a
-   1.0 break.
-2. **Larger fonts.** Done on the rg_text side on 2026-10-22: its loader now
+1. **A smaller `RgGuiDrawCmd`.** The command is 80 bytes: each `rg_vec4`
+   color is 16-byte aligned, which also leaves 12 bytes of padding after the
+   type. The list is written once and read by the renderer and GPU
+   preparation, so the size is cache traffic, not instructions. Padding the
+   command to 144 bytes measured the sensitivity (three alternating rounds):
+   the idle showcase's UI build rose 13% and preparation 10%, and with 60
+   extra panels 15% and 23%. Staging, which never reads commands, did not
+   change. Scaled linearly, a 56-byte command would save about 5 us per idle
+   frame and 20 us at 60 extra panels, 4 to 6% of the library's CPU time.
+   The plan, for a 1.0 break:
+   - Store color once, outside the union, as the packed 32-bit RGBA value the
+     GPU reads, packed at push time after the disabled tint. Output pixels and
+     the frame signature are unchanged, because the renderer already packs
+     with the same function.
+   - Keep the union 8-byte aligned: a rectangle or clip is 16 bytes, a
+     triangle 24, text 32 (position, scale, a 32-bit length, pointer,
+     identity), and an image 48 (rectangle, UV, texture, material). With the
+     type and color in front, that is 56 bytes.
+   - The freed text slot can carry the byte length. Recording it was not
+     worth a separate change (see below), but it costs nothing once the
+     command loops are rewritten for the new layout.
+   - 48 bytes would need quantized UVs or an indirect material, which changes
+     what custom renderers can express, so 56 is the recommended target.
+   Every custom renderer that reads `cmd->data.*.color` changes, as do the
+   reference renderer, the tile cache, and the tests.
+2. **Clip changes split batches.** The 60-panel case issues 134 draw calls and
+   the idle showcase 18; both would be one draw call without clip breaks,
+   because no batch starts at a texture change. Each costs about 0.5 us of
+   SDL encoding on the CPU and little GPU time on this machine. Clipping per reference in the shader, with the clip rectangle in
+   the reference stream, would let batches span clip changes. That is a
+   renderer redesign with its own GPU cost per fragment or vertex, so measure
+   it on a GPU where draw calls are expensive before committing to it.
+3. **Larger fonts.** Done on the rg_text side on 2026-10-22: its loader now
    builds an ASCII glyph table, a cached fallback index, and per-glyph kerning
    ranges, and aligned layout resolves each glyph once. rg_text's own paired
    benchmark improved 35 to 88 percent across every workload with identical
@@ -404,11 +471,11 @@ may change that balance; it was not measured.
    in rg_text is still a binary search (3 to 4x slower than the table on the
    4,096-glyph benchmark font). Raising the slot counts is the remaining knob
    for very large fonts.
-3. **Text-area relayout on edit.** Each keystroke re-wraps the whole document.
+4. **Text-area relayout on edit.** Each keystroke re-wraps the whole document.
    At the current 1,024-visual-line cap that is 100-200 us for 8 KiB of ASCII,
    acceptable, but a paragraph-local relayout would make it independent of
    document size if the cap is ever raised.
-4. **`rg_gui_text_area_find_visual_line` is a linear scan** over up to 1,024
+5. **`rg_gui_text_area_find_visual_line` is a linear scan** over up to 1,024
    lines, called a few times per frame. A binary search over line starts is a
    small, safe win.
 
