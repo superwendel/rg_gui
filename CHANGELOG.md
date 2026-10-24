@@ -46,6 +46,12 @@ between 0.x releases.
 
 ### Changed
 
+- Dock tab bars keep each tab's measured title width with a copy of its bytes
+  and measure again only when the title or text scale changes, so the UI build
+  with 60 tabbed panels is 6 to 7 us faster per frame. Titles longer than
+  `RG_GUI_DOCK_TAB_TITLE_CACHE` (32 bytes) are measured every frame. Each dock
+  tab grows from 40 to 88 bytes, 24 KB at the default 512 tabs; set the macro
+  to 0 to remove the cache.
 - The indexed shader clips each primitive itself, so a clip change no longer
   ends a draw call: the idle showcase draws in one call instead of 23 and a
   60-panel dock layout in one instead of 42. With VSync that saves 29 and

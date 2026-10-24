@@ -255,6 +255,31 @@ offsets and in a reduced viewport, and checks all 20,480 pixels against
 `rg_gui_gpu_scissor`. It fails when the shader drops the draw offset from the
 clip or ignores a glyph's clip.
 
+### 7. Dock tab title widths
+
+A visible docked window lays out its node's tab bar every frame, and that
+measured every tab's title: a glyph and kerning lookup per character, about
+0.1 to 0.3 us per title. Titles are ordinary mutable strings, so the pointer
+cannot key a cache. Each dock tab now keeps the width it measured with a copy
+of the title's bytes, up to `RG_GUI_DOCK_TAB_TITLE_CACHE` (32 by default), and
+measures again only when the bytes or the text scale change. Comparing the
+bytes is cheaper than measuring them, and a title edited in place, even to
+another string of the same length, is measured again. Longer titles are
+measured every frame, as before. The copy grows each dock tab from 40 to 88
+bytes, 24 KB at the default 512 tabs; setting the macro to 0 removes it.
+
+UI build time, median of per-run medians, alternating builds:
+
+| Scenario | Immediate, 6 rounds | VSync, 4 rounds |
+| --- | ---: | ---: |
+| docks, 60 panels (64 tabs measured per frame) | 119.6 to 112.4 us (6/6) | 91.9 to 85.9 us (4/4) |
+| idle (4 tabs) | 88.4 to 88.8 us | 71.1 to 70.2 us |
+
+The idle showcase measures only four titles per frame, and the change there is
+within noise. A new test edits a docked window's title in place across
+same-length and longer strings and checks the tab bar's layout against fresh
+measurements; it fails if the cache compares only the length.
+
 ## Measured effect of the changes
 
 Extended CPU suite, `benchmarks/run.py compare`, five alternating process
@@ -500,6 +525,7 @@ window lays out its node's tab bar by measuring every tab's title each frame,
 so its begin call grows by about 0.09 us per tab in its node; a hidden tab's
 begin call costs about 0.06 us. Together the dock calls are about 17 us of a
 76 us UI build at 60 extra panels: linear and modest, but not negligible.
+Change 7 now keeps those title widths between frames.
 A gprof profile was not used for this. In this binary it attributed 60 calls
 per frame to the once-per-frame menu function, so its labels are unreliable.
 
@@ -549,12 +575,7 @@ hidden tab.
      what custom renderers can express, so 56 is the recommended target.
    Every custom renderer that reads `cmd->data.*.color` changes, as do the
    reference renderer, the tile cache, and the tests.
-2. **Tab bars measure every tab each frame.** A visible docked window measures
-   the title of every tab in its node, about 0.09 us per tab, and each hidden
-   tab's window call adds about 0.06 us. Caching tab widths until a title
-   changes could remove most of the tab-bar part, about 5 us per frame at 60
-   tabbed panels.
-3. **Larger fonts.** Done on the rg_text side on 2026-10-22: its loader now
+2. **Larger fonts.** Done on the rg_text side on 2026-10-22: its loader now
    builds an ASCII glyph table, a cached fallback index, and per-glyph kerning
    ranges, and aligned layout resolves each glyph once. rg_text's own paired
    benchmark improved 35 to 88 percent across every workload with identical
@@ -563,11 +584,11 @@ hidden tab.
    in rg_text is still a binary search (3 to 4x slower than the table on the
    4,096-glyph benchmark font). Raising the slot counts is the remaining knob
    for very large fonts.
-4. **Text-area relayout on edit.** Each keystroke re-wraps the whole document.
+3. **Text-area relayout on edit.** Each keystroke re-wraps the whole document.
    At the current 1,024-visual-line cap that is 100-200 us for 8 KiB of ASCII,
    acceptable, but a paragraph-local relayout would make it independent of
    document size if the cap is ever raised.
-5. **`rg_gui_text_area_find_visual_line` is a linear scan** over up to 1,024
+4. **`rg_gui_text_area_find_visual_line` is a linear scan** over up to 1,024
    lines, called a few times per frame. A binary search over line starts is a
    small, safe win.
 

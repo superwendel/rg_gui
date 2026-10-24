@@ -352,6 +352,99 @@ static void count_deserialize(void* user, RgGuiId id, const u8* data, u32 size)
 	(*count)++;
 }
 
+static int dock_tab_text_x(RgGuiContext* gui, const char* text, f32* x)
+{
+	const RgGuiDrawList* list = rg_gui_draw_list(gui);
+	for (u32 i = 0u; list && i < list->count; i++)
+	{
+		const RgGuiDrawCmd* cmd = &list->cmds[i];
+		if (cmd->type == RG_GUI_CMD_TEXT && cmd->data.text.text && strcmp(cmd->data.text.text, text) == 0)
+		{
+			*x = cmd->data.text.pos.x;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* A dock tab keeps its title's measured width with a copy of the bytes, so a
+ * title edited in place re-measures, even to another string of the same
+ * length, and a title too long for the copy is measured every frame. */
+static int test_dock_tab_title_cache(RgGuiContext* gui)
+{
+	RgInputState input;
+	rg_input_init(&input);
+	input.mouse_x = -1000;
+	input.mouse_y = -1000;
+	RgGuiDockSpaceState dockspace;
+	RgGuiWindowState first, second;
+	memset(&dockspace, 0, sizeof(dockspace));
+	memset(&first, 0, sizeof(first));
+	memset(&second, 0, sizeof(second));
+	/* Same-length changes follow each other (AA to MM, A?M to MMA) so a cache
+	 * keyed on length alone would keep a stale width. */
+	static const char* const titles[] = {
+	    "AA", "MM", "AAAAAAAA", "A?M", "MMA", "????????????????????????????????????", "AA"};
+	const u32 flags = RG_GUI_WINDOW_MOVABLE | RG_GUI_WINDOW_RESIZABLE | RG_GUI_WINDOW_DOCKABLE;
+	const RgGuiRect rect = rg_gui_make_rect(20.0f, 20.0f, 300.0f, 200.0f);
+	char title[48];
+	f32 base_gap = 0.0f, base_width = 0.0f;
+	for (u32 frame = 0u; frame < RG_ARRAY_COUNT(titles); frame++)
+	{
+		strcpy(title, titles[frame]);
+		rg_gui_begin_frame(gui, &input, 1.0f / 60.0f);
+		rg_gui_dockspace_begin(gui, &dockspace, rg_gui_make_rect(0.0f, 0.0f, 1200.0f, 400.0f), 0x7301u);
+		if (frame == 0u)
+		{
+			rg_gui_dockspace_dock(gui, &dockspace, &first, title, 0x7302u, RG_GUI_DOCK_SLOT_CENTER);
+			rg_gui_dockspace_dock(gui, &dockspace, &second, "MA", 0x7303u, RG_GUI_DOCK_SLOT_CENTER);
+		}
+		if (rg_gui_window_begin(gui, &first, title, rect, 50.0f, 50.0f, 4.0f, flags, 0x7302u))
+			rg_gui_window_end(gui, &first);
+		if (rg_gui_window_begin(gui, &second, "MA", rect, 50.0f, 50.0f, 4.0f, flags, 0x7303u))
+			rg_gui_window_end(gui, &second);
+		rg_gui_dockspace_end(gui, &dockspace);
+		f32 first_x = 0.0f, second_x = 0.0f;
+		const int found = dock_tab_text_x(gui, title, &first_x) && dock_tab_text_x(gui, "MA", &second_x);
+		const f32 width = rg_gui_text_measure_prefix(gui, titles[frame], strlen(titles[frame]));
+		rg_gui_end_frame(gui);
+		if (!found || second_x <= first_x)
+		{
+			fprintf(stderr, "dock tab titles not drawn in docking order (frame %u)\n", frame);
+			return 0;
+		}
+		if (frame == 0u)
+		{
+			base_gap = second_x - first_x;
+			base_width = width;
+		}
+		else if (!nearly_equal(second_x - first_x - base_gap, width - base_width))
+		{
+			fprintf(stderr, "dock tab width did not follow an in-place title change (frame %u: %.3f vs %.3f)\n",
+			        frame, (double)(second_x - first_x - base_gap), (double)(width - base_width));
+			return 0;
+		}
+#if RG_GUI_DOCK_TAB_TITLE_CACHE > 0
+		const size_t length = strlen(titles[frame]);
+		for (u32 i = 1u; i <= gui->dock_tab_capacity; i++)
+		{
+			const RgGuiDockTab* tab = &gui->dock_tabs[i];
+			if (tab->window != &first) continue;
+			const int cached = length <= RG_GUI_DOCK_TAB_TITLE_CACHE;
+			if ((tab->title_cached == (u32)length + 1u) != cached ||
+			    (cached && (!nearly_equal(tab->title_width, width) ||
+			                memcmp(tab->title_bytes, titles[frame], length) != 0)))
+			{
+				fprintf(stderr, "dock tab title cache state wrong (frame %u)\n", frame);
+				return 0;
+			}
+			break;
+		}
+#endif
+	}
+	return 1;
+}
+
 static int test_node_graph_bundle_validation(void)
 {
 	RgGuiNodeGraph graph;
@@ -1077,7 +1170,8 @@ int main(void)
 		return 1;
 	}
 
-	if (!test_dock_layout_validation(&gui) || !test_node_graph_bundle_validation() ||
+	if (!test_dock_layout_validation(&gui) || !test_dock_tab_title_cache(&gui) ||
+	    !test_node_graph_bundle_validation() ||
 	    !test_integer_widget_boundaries(&gui) ||
 	    !test_viewport_and_input_router(&gui) || !test_viewport_storage(&font) ||
 	    !test_incremental_text_wrapping() || !test_text_area_layout_edits(&gui) ||

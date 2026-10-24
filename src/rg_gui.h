@@ -46,6 +46,7 @@
 //   #define RG_GUI_MAX_DOCKSPACES       - Max dockspaces per frame (default: 16)
 //   #define RG_GUI_MAX_DOCK_NODES       - Dock node capacity (default: 256)
 //   #define RG_GUI_MAX_DOCK_TABS        - Dock tab capacity (default: 512)
+//   #define RG_GUI_DOCK_TAB_TITLE_CACHE - Title bytes each dock tab keeps to reuse its measured width (default: 32, 0 disables)
 //   #define RG_GUI_DOCK_ZONE_FRACTION   - Drop zone size ratio (default: 0.25)
 //   #define RG_GUI_DOCK_ZONE_MIN        - Drop zone min size in pixels (default: 48)
 //   #define RG_GUI_DOCK_ZONE_MAX        - Drop zone max size in pixels (default: 200)
@@ -325,6 +326,10 @@
 
 #if RG_GUI_MAX_DOCK_TABS < 1 || RG_GUI_MAX_DOCK_TABS >= UINT32_MAX
 #error RG_GUI_MAX_DOCK_TABS must be between 1 and UINT32_MAX - 1
+#endif
+
+#ifndef RG_GUI_DOCK_TAB_TITLE_CACHE
+#define RG_GUI_DOCK_TAB_TITLE_CACHE 32u
 #endif
 
 #ifndef RG_GUI_DOCK_ZONE_FRACTION
@@ -1241,6 +1246,14 @@ typedef struct RgGuiDockTab
 	u32 flags;
 	RgGuiWindowState* window;
 	const char* title;
+#if RG_GUI_DOCK_TAB_TITLE_CACHE > 0
+	/* The title's measured width and a copy of the bytes it was measured from:
+	 * titles may change in place, so the bytes, not the pointer, are the key. */
+	f32 title_width;
+	u32 title_scale_bits;
+	u32 title_cached; /* cached length + 1, or 0 */
+	char title_bytes[RG_GUI_DOCK_TAB_TITLE_CACHE];
+#endif
 } RgGuiDockTab;
 
 typedef struct RgGuiDockLayoutTab
@@ -12127,6 +12140,33 @@ RGINLINE void rg_gui_dock_reset(RgGuiContext* ctx)
 	}
 }
 
+/* A tab bar lays out every tab of its node each frame. Measuring a title costs
+ * a glyph and kerning lookup per character, so the width is kept with a copy of
+ * the bytes and measured again only when they or the text scale change.
+ * Titles longer than RG_GUI_DOCK_TAB_TITLE_CACHE are measured every frame. */
+RGINLINE f32 rg_gui_dock_tab_title_width(RgGuiContext* ctx, RgGuiDockTab* tab, const char* title,
+                                         size_t length, u32 scale_bits)
+{
+#if RG_GUI_DOCK_TAB_TITLE_CACHE > 0
+	if (length <= RG_GUI_DOCK_TAB_TITLE_CACHE)
+	{
+		if (tab->title_cached == (u32)length + 1u && tab->title_scale_bits == scale_bits &&
+		    memcmp(tab->title_bytes, title, length) == 0)
+			return tab->title_width;
+		const f32 width = rg_gui_text_measure_label(ctx, title, length, RG_GUI_LABEL_COPY);
+		memcpy(tab->title_bytes, title, length);
+		tab->title_cached = (u32)length + 1u;
+		tab->title_scale_bits = scale_bits;
+		tab->title_width = width;
+		return width;
+	}
+#else
+	RG_GUI_UNUSED(tab);
+	RG_GUI_UNUSED(scale_bits);
+#endif
+	return rg_gui_text_measure_label(ctx, title, length, RG_GUI_LABEL_COPY);
+}
+
 RGINLINE int rg_gui_window_begin_docked(RgGuiContext* ctx, RgGuiWindowState* window, const char* title,
                                         f32 spacing, u32 flags, RgGuiId id, int* out_fallback)
 {
@@ -12300,6 +12340,7 @@ RGINLINE int rg_gui_window_begin_docked(RgGuiContext* ctx, RgGuiWindowState* win
 
 	f32 tab_total = 0.0f;
 	f32 tab_widths[RG_GUI_MAX_DOCK_TABS + 1u];
+	const u32 title_scale_bits = rg_gui_text_scale_bits(ctx);
 	f32 active_start = -1.0f;
 	f32 active_end = -1.0f;
 	f32 content_x = 0.0f;
@@ -12309,7 +12350,7 @@ RGINLINE int rg_gui_window_begin_docked(RgGuiContext* ctx, RgGuiWindowState* win
 		RgGuiDockTab* cur = &ctx->dock_tabs[iter];
 		const char* tab_title = cur->title ? cur->title : "";
 		size_t title_len = rg_gui_text_len_label(ctx, tab_title, RG_GUI_LABEL_COPY);
-		f32 text_w = rg_gui_text_measure_label(ctx, tab_title, title_len, RG_GUI_LABEL_COPY);
+		f32 text_w = rg_gui_dock_tab_title_width(ctx, cur, tab_title, title_len, title_scale_bits);
 		f32 tab_w = text_w + pad * 2.0f;
 		const RgGuiIcon* tab_icon = cur->window ? &cur->window->icon : NULL;
 		if (rg_gui_icon_valid(tab_icon))
