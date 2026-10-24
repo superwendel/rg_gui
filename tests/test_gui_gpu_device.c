@@ -95,7 +95,7 @@ static int test_gpu_full_cache_ring(SDL_GPUDevice* device, SDL_GPUTexture* targe
 			text_cmd->data.text.text = i & 1u ? "????" : "AAAA";
 			text_cmd->data.text.pos = rg_vec2((f32)i * 4.0f, 48.0f);
 			text_cmd->data.text.scale = 1.0f;
-			text_cmd->data.text.color = rg_gui_color(1, 1, 1, 1);
+			text_cmd->color = rg_gui_pack_color(rg_gui_color(1, 1, 1, 1));
 		}
 		commands[command_count++].type = RG_GUI_CMD_CLIP_POP;
 		clip = &commands[command_count++];
@@ -121,7 +121,7 @@ static int test_gpu_full_cache_ring(SDL_GPUDevice* device, SDL_GPUTexture* targe
 		rg_gui_gpu_invalidate_cache(gpu);
 		for (u32 i = 0u; i < command_count; i++)
 			if (commands[i].type == RG_GUI_CMD_TRIANGLE)
-				commands[i].data.triangle.color = rg_gui_color(1, phase ? 0.0f : 1.0f, 0, 1);
+				commands[i].color = rg_gui_pack_color(rg_gui_color(1, phase ? 0.0f : 1.0f, 0, 1));
 		rg_gui_renderer_begin_frame(text);
 		if (!rg_gui_gpu_prepare(gpu, text, &list, list.count)) goto cleanup;
 		rg_gpu_upload_ring_begin(ring, 1);
@@ -300,12 +300,12 @@ static int test_gpu_clip_distances(SDL_GPUDevice* device, SDL_GPUTexture* target
 		const ClipCase* c = &cases[i];
 		RgGuiDrawCmd cmd = {0};
 		cmd.type = c->type;
-		if (c->type == RG_GUI_CMD_RECT) { cmd.data.rect.rect = c->rect; cmd.data.rect.color = c->color; }
+		if (c->type == RG_GUI_CMD_RECT) { cmd.data.rect.rect = c->rect; cmd.color = rg_gui_pack_color(c->color); }
 		else if (c->type == RG_GUI_CMD_IMAGE)
 		{
 			cmd.data.image.rect = c->rect;
 			cmd.data.image.uv = rg_gui_make_rect(0, 0, 1, 1);
-			cmd.data.image.color = c->color;
+			cmd.color = rg_gui_pack_color(c->color);
 			cmd.data.image.texture = (RgGuiTexture)(uintptr_t)gpu->text.atlas_texture;
 		}
 		else if (c->type == RG_GUI_CMD_TRIANGLE)
@@ -313,14 +313,14 @@ static int test_gpu_clip_distances(SDL_GPUDevice* device, SDL_GPUTexture* target
 			cmd.data.triangle.a = rg_vec2(c->rect.x, c->rect.y);
 			cmd.data.triangle.b = rg_vec2(c->rect.x + c->rect.w, c->rect.y);
 			cmd.data.triangle.c = rg_vec2(c->rect.x, c->rect.y + c->rect.h);
-			cmd.data.triangle.color = c->color;
+			cmd.color = rg_gui_pack_color(c->color);
 		}
 		else
 		{
 			cmd.data.text.text = "AAAAAAAA";
 			cmd.data.text.pos = rg_vec2(c->rect.x + 2.0f, c->rect.y + 4.0f);
 			cmd.data.text.scale = 3.0f;
-			cmd.data.text.color = c->color;
+			cmd.color = rg_gui_pack_color(c->color);
 		}
 		plain[i] = cmd;
 		for (u32 k = 0u; k < c->clips; k++)

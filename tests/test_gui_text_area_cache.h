@@ -90,10 +90,6 @@ static void text_area_cache_widget_rect_equal(RgGuiRect a,RgGuiRect b)
 {
     TEXT_AREA_CACHE_CHECK(a.x==b.x&&a.y==b.y&&a.w==b.w&&a.h==b.h);
 }
-static void text_area_cache_widget_color_equal(rg_vec4 a,rg_vec4 b)
-{
-    TEXT_AREA_CACHE_CHECK(a.x==b.x&&a.y==b.y&&a.z==b.z&&a.w==b.w);
-}
 static void text_area_cache_widget_draw_equal(const RgGuiContext* a,const RgGuiContext* b)
 {
     const RgGuiDrawList* x=rg_gui_draw_list(a);const RgGuiDrawList* y=rg_gui_draw_list(b);
@@ -104,12 +100,12 @@ static void text_area_cache_widget_draw_equal(const RgGuiContext* a,const RgGuiC
         switch(p->type) {
         case RG_GUI_CMD_RECT:
             text_area_cache_widget_rect_equal(p->data.rect.rect,q->data.rect.rect);
-            text_area_cache_widget_color_equal(p->data.rect.color,q->data.rect.color);break;
+            TEXT_AREA_CACHE_CHECK(p->color==q->color);break;
         case RG_GUI_CMD_TEXT:
             TEXT_AREA_CACHE_CHECK(p->data.text.pos.x==q->data.text.pos.x&&p->data.text.pos.y==q->data.text.pos.y);
             TEXT_AREA_CACHE_CHECK(p->data.text.scale==q->data.text.scale);
             TEXT_AREA_CACHE_CHECK(!strcmp(p->data.text.text,q->data.text.text));
-            text_area_cache_widget_color_equal(p->data.text.color,q->data.text.color);break;
+            TEXT_AREA_CACHE_CHECK(p->color==q->color);break;
         case RG_GUI_CMD_CLIP_PUSH:text_area_cache_widget_rect_equal(p->data.clip.rect,q->data.clip.rect);break;
         case RG_GUI_CMD_CLIP_POP:break;
         default:TEXT_AREA_CACHE_CHECK(p->type==RG_GUI_CMD_RECT);break; /* no other widget primitive expected */

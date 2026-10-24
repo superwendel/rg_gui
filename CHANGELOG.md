@@ -46,6 +46,12 @@ between 0.x releases.
 
 ### Changed
 
+- Draw commands are 56 bytes instead of 80. The color is stored once, packed as
+  the GPU reads it, outside the payload union, and copied text records its byte
+  length, so preparation no longer packs colors or measures copied text. With
+  VSync, preparation is 19 to 20 percent faster and the library's CPU time per
+  frame about 6 percent lower, idle and with 60 docked panels, with identical
+  pixels.
 - `rg_gui_text_area_find_visual_line` bisects to the cursor's line instead of
   scanning from the top, with identical results: 13 ns instead of 631 ns at
   the end of a 1,024-line text area.
@@ -95,6 +101,12 @@ between 0.x releases.
 
 ### Migration notes
 
+- `RgGuiDrawCmd` stores its color once as `cmd->color`, a packed RGBA8 value
+  (red in the low byte) instead of `cmd->data.rect.color`, `.triangle.color`,
+  `.text.color`, and `.image.color`. Build it with `rg_gui_pack_color`. Text
+  commands gain `data.text.length`; zero means the string's length is not
+  recorded. `RG_GUI_DRAW_CMD_PACKED_COLOR` is defined for code that supports
+  both layouts.
 - Ordinary text APIs copy changing text. Use explicit `*_static` APIs only for
   immutable strings; see [text ownership](docs/rg_gui.md#ownership-text-identity-and-threads).
 - GPU upload packets remain immutable until commit or abort. Pass the staged

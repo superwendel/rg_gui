@@ -13,6 +13,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Commands store one packed color since RG_GUI_DRAW_CMD_PACKED_COLOR; older
+ * headers keep a float color per payload. */
+#if defined(RG_GUI_DRAW_CMD_PACKED_COLOR)
+#define BENCH_CMD_COLOR(cmd, member, value) ((cmd)->color = rg_gui_pack_color(value))
+#define BENCH_CMD_PACKED(cmd, member) ((cmd)->color)
+#else
+#define BENCH_CMD_COLOR(cmd, member, value) ((cmd)->data.member.color = (value))
+#define BENCH_CMD_PACKED(cmd, member) rg_gui_renderer_base_pack_color((cmd)->data.member.color)
+#endif
+
 #ifndef RG_GUI_BENCH_LOOKUP
 #define RG_GUI_BENCH_LOOKUP 0
 #endif
@@ -209,7 +219,7 @@ static void init_bench(Bench* b, int synthetic) {
         cmd->data.text.pos.x = (f32)(i % 4u) * 400.0f;
         cmd->data.text.pos.y = (f32)(i / 4u) * 20.0f;
         cmd->data.text.scale = 1.0f;
-        cmd->data.text.color = (rg_vec4){.x = 1, .y = 1, .z = 1, .w = 1};
+        BENCH_CMD_COLOR(cmd, text, ((rg_vec4){.x = 1, .y = 1, .z = 1, .w = 1}));
     }
     b->list = (RgGuiDrawList){b->commands, LABEL_COUNT, LABEL_COUNT};
 }

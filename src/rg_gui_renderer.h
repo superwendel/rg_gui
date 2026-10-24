@@ -921,17 +921,20 @@ static RgGuiRendererBaseRunResult rg_gui_renderer_base_get_run(RgGuiRendererBase
 
 RGINLINE f32 rg_gui_renderer_base_clamp_color(f32 value)
 {
-	if (!(value > 0.0f)) return 0.0f;
-	return value < 1.0f ? value : 1.0f;
+	return rg_gui_clamp_color_channel(value);
 }
 
+/* Draw commands store this packed form; see rg_gui_pack_color. */
 RGINLINE u32 rg_gui_renderer_base_pack_color(rg_vec4 color)
 {
-	u32 r = (u32)(rg_gui_renderer_base_clamp_color(color.x) * 255.0f + 0.5f);
-	u32 g = (u32)(rg_gui_renderer_base_clamp_color(color.y) * 255.0f + 0.5f);
-	u32 b = (u32)(rg_gui_renderer_base_clamp_color(color.z) * 255.0f + 0.5f);
-	u32 a = (u32)(rg_gui_renderer_base_clamp_color(color.w) * 255.0f + 0.5f);
-	return r | (g << 8u) | (b << 16u) | (a << 24u);
+	return rg_gui_pack_color(color);
+}
+
+/* Bytes of a copied text command: its recorded length, or the terminated
+ * string's length for commands that did not record one. */
+RGINLINE size_t rg_gui_renderer_base_text_size(const RgGuiDrawCmd* cmd, const char* text)
+{
+	return cmd->data.text.length ? (size_t)cmd->data.text.length : strlen(text);
 }
 
 RGINLINE RgGuiRect rg_gui_renderer_base_clip_intersect(RgGuiRect a, RgGuiRect b)
@@ -1003,7 +1006,7 @@ static int rg_gui_renderer_base_prepare_run_stream(RgGuiRendererBaseContext* ctx
 		if (cmd->type != RG_GUI_CMD_TEXT) continue;
 		const char* text = cmd->data.text.text ? cmd->data.text.text : "";
 		uintptr_t cache_identity = cmd->data.text.cache_identity;
-		size_t text_size = cache_identity ? 0u : strlen(text);
+		size_t text_size = cache_identity ? 0u : rg_gui_renderer_base_text_size(cmd, text);
 		const RgGuiRendererBaseCachedRun* run = NULL;
 		u32 quad_count = 0u;
 		RgGuiRendererBaseRunResult result = rg_gui_renderer_base_get_run(
@@ -1074,7 +1077,7 @@ static int rg_gui_renderer_base_prepare_run_stream(RgGuiRendererBaseContext* ctx
 
 		const char* text = cmd->data.text.text ? cmd->data.text.text : "";
 		uintptr_t cache_identity = cmd->data.text.cache_identity;
-		size_t text_size = cache_identity ? 0u : strlen(text);
+		size_t text_size = cache_identity ? 0u : rg_gui_renderer_base_text_size(cmd, text);
 		const RgGuiRendererBaseCachedRun* run = rg_gui_renderer_base_lookup_run(
 		    ctx, text, text_size, cmd->data.text.scale, cache_identity);
 		if (!run || run->quad_count == 0u) continue;
@@ -1109,7 +1112,7 @@ static int rg_gui_renderer_base_prepare_run_stream(RgGuiRendererBaseContext* ctx
 		output->quad_count = run->quad_count;
 		output->x = cmd->data.text.pos.x;
 		output->y = cmd->data.text.pos.y;
-		output->color = rg_gui_renderer_base_pack_color(cmd->data.text.color);
+		output->color = cmd->color;
 		output->first_output_instance = output_glyph_count;
 		output->padding[0] = i;
 		output->padding[1] = (u32)run->hash;
@@ -1200,7 +1203,7 @@ static int rg_gui_renderer_base_prepare_draw_list(RgGuiRendererBaseContext* ctx,
 
 		const char* text = cmd->data.text.text ? cmd->data.text.text : "";
 		uintptr_t cache_identity = cmd->data.text.cache_identity;
-		size_t text_size = cache_identity ? 0u : strlen(text);
+		size_t text_size = cache_identity ? 0u : rg_gui_renderer_base_text_size(cmd, text);
 		const RgGuiRendererBaseCachedRun* run = NULL;
 		u32 quad_count = 0u;
 		RgGuiRendererBaseRunResult run_result = rg_gui_renderer_base_get_run(ctx, text, text_size,
@@ -1237,7 +1240,7 @@ static int rg_gui_renderer_base_prepare_draw_list(RgGuiRendererBaseContext* ctx,
 		force_new_batch = 0;
 
 		u32 first_instance = ctx->frame_instance_count;
-		u32 color = rg_gui_renderer_base_pack_color(cmd->data.text.color);
+		u32 color = cmd->color;
 		if (run_result == RG_GUI_RENDERER_BASE_RUN_CACHED)
 		{
 			const RgGuiRendererBaseCachedQuad* quads = ctx->cache_quads + run->first_quad;
@@ -2012,7 +2015,7 @@ RGINLINE int rg_gui_renderer_prepare(RgGuiRenderer* ctx,
 
 		const char* text = cmd->data.text.text ? cmd->data.text.text : "";
 		uintptr_t cache_identity = cmd->data.text.cache_identity;
-		size_t text_size = cache_identity ? 0u : strlen(text);
+		size_t text_size = cache_identity ? 0u : rg_gui_renderer_base_text_size(cmd, text);
 		u32 run_index = UINT32_MAX;
 		u32 quad_count = 0u;
 		RgGuiRendererBaseRunResult result = rg_gui_renderer_get_run(
@@ -2055,7 +2058,7 @@ RGINLINE int rg_gui_renderer_prepare(RgGuiRenderer* ctx,
 		}
 		force_new_batch = 0;
 		u32 page = ctx->run_first_pages[run_index];
-		u32 packed_color = rg_gui_renderer_base_pack_color(cmd->data.text.color);
+		u32 packed_color = cmd->color;
 		u32 content_hash = (u32)core->runs[run_index].hash;
 		if (segment_count == 1u)
 		{

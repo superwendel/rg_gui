@@ -1595,7 +1595,7 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 		if (cmd->type == RG_GUI_CMD_RECT)
 		{
 			u32 first = renderer->vertex_count;
-			u32 color = rg_gui_renderer_base_pack_color(cmd->data.rect.color);
+			u32 color = cmd->color;
 			if (sign)
 			{
 				/* The packed color is what the GPU reads, so it is what the digest covers. */
@@ -1617,7 +1617,7 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 			    renderer->vertex_capacity - renderer->vertex_count < 3u)
 				goto capacity_failure;
 			u32 first = renderer->vertex_count;
-			u32 color = rg_gui_renderer_base_pack_color(cmd->data.triangle.color);
+			u32 color = cmd->color;
 			if (sign)
 			{
 				signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.triangle.a, sizeof(cmd->data.triangle.a));
@@ -1641,7 +1641,7 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 		{
 			if (!cmd->data.image.texture) continue;
 			u32 first = renderer->vertex_count;
-			u32 color = rg_gui_renderer_base_pack_color(cmd->data.image.color);
+			u32 color = cmd->color;
 			if (sign)
 			{
 				signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.image.rect, sizeof(cmd->data.image.rect));
@@ -1665,7 +1665,7 @@ RGINLINE int rg_gui_gpu_prepare(RgGuiGpuRenderer* renderer, RgGuiRenderer* text_
 			if (sign)
 			{
 				signature = rg_gui_gpu_signature_bytes(signature, &cmd->data.text.pos, sizeof(cmd->data.text.pos));
-				signature = rg_gui_renderer_base_mix(signature, rg_gui_renderer_base_pack_color(cmd->data.text.color));
+				signature = rg_gui_renderer_base_mix(signature, cmd->color);
 			}
 			if (run_cursor >= renderer->text_prepared->run_count) continue;
 			const RgGuiRendererRun* first_run = &renderer->text_prepared->runs[run_cursor];

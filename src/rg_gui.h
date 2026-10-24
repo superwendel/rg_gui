@@ -646,28 +646,32 @@ typedef enum RgGuiDrawCmdType
 	RG_GUI_CMD_TRIANGLE = 5
 } RgGuiDrawCmdType;
 
+/* One drawing command. The color is stored once, packed as the GPU reads it:
+ * RGBA8 with red in the low byte, after the disabled tint (rg_gui_pack_color).
+ * Clip commands leave it zero. A text command records the byte length of
+ * copied text; zero means the length is not recorded and consumers measure
+ * the terminated string. A nonzero length must match the text. */
 typedef struct RgGuiDrawCmd
 {
 	RgGuiDrawCmdType type;
+	u32 color;
 	union
 	{
 		struct
 		{
 			RgGuiRect rect;
-			rg_vec4 color;
 		} rect;
 		struct
 		{
 			rg_vec2 a;
 			rg_vec2 b;
 			rg_vec2 c;
-			rg_vec4 color;
 		} triangle;
 		struct
 		{
 			rg_vec2 pos;
-			rg_vec4 color;
 			f32 scale;
+			u32 length;
 			const char* text;
 #if defined(RG_GUI_TEXT_CACHE_IDENTITY)
 			uintptr_t cache_identity;
@@ -677,7 +681,6 @@ typedef struct RgGuiDrawCmd
 		{
 			RgGuiRect rect;
 			RgGuiRect uv;
-			rg_vec4 color;
 			RgGuiTexture texture;
 			RgGuiImageMaterial material;
 		} image;
@@ -687,6 +690,14 @@ typedef struct RgGuiDrawCmd
 		} clip;
 	} data;
 } RgGuiDrawCmd;
+
+#if defined(RG_GUI_TEXT_CACHE_IDENTITY)
+typedef char RgGuiDrawCmdMustBe56Bytes[(sizeof(RgGuiDrawCmd) == 56u) ? 1 : -1];
+#endif
+
+/* Defined since draw commands store one packed color; code that builds
+ * commands for several releases can test it. */
+#define RG_GUI_DRAW_CMD_PACKED_COLOR 1
 
 typedef struct RgGuiDrawList
 {
@@ -3460,6 +3471,42 @@ RGINLINE rg_vec4 rg_gui_color(f32 r, f32 g, f32 b, f32 a)
 	return color;
 }
 
+RGINLINE f32 rg_gui_clamp_color_channel(f32 value)
+{
+	if (!(value > 0.0f)) return 0.0f;
+	return value < 1.0f ? value : 1.0f;
+}
+
+/** A color as a draw command stores it: each channel clamped to [0, 1] and
+ * rounded to 8 bits, red in the low byte. NaN channels become 0. */
+RGINLINE u32 rg_gui_pack_color_scalar(rg_vec4 color)
+{
+	u32 r = (u32)(rg_gui_clamp_color_channel(color.x) * 255.0f + 0.5f);
+	u32 g = (u32)(rg_gui_clamp_color_channel(color.y) * 255.0f + 0.5f);
+	u32 b = (u32)(rg_gui_clamp_color_channel(color.z) * 255.0f + 0.5f);
+	u32 a = (u32)(rg_gui_clamp_color_channel(color.w) * 255.0f + 0.5f);
+	return r | (g << 8u) | (b << 16u) | (a << 24u);
+}
+
+/** rg_gui_pack_color_scalar, with SSE2 four channels at once and the same
+ * result: MAXPS returns its second operand when the first is NaN, so a NaN
+ * channel clamps to 0, and the scale, offset, and truncation are the same
+ * single-precision operations. Every push packs its color, so this is hot. */
+RGINLINE u32 rg_gui_pack_color(rg_vec4 color)
+{
+#if defined(RG_MATH_SSE2)
+	__m128 v = _mm_max_ps(_mm_setr_ps(color.x, color.y, color.z, color.w), _mm_setzero_ps());
+	v = _mm_min_ps(v, _mm_set1_ps(1.0f));
+	v = _mm_add_ps(_mm_mul_ps(v, _mm_set1_ps(255.0f)), _mm_set1_ps(0.5f));
+	__m128i channels = _mm_cvttps_epi32(v);
+	channels = _mm_packs_epi32(channels, channels);
+	channels = _mm_packus_epi16(channels, channels);
+	return (u32)_mm_cvtsi128_si32(channels);
+#else
+	return rg_gui_pack_color_scalar(color);
+#endif
+}
+
 RGINLINE rg_vec3 rg_gui_color_hsv_to_rgb(f32 h, f32 s, f32 v)
 {
 	f32 r = v;
@@ -5923,6 +5970,7 @@ RGINLINE void rg_gui_push_clip(RgGuiContext* ctx, RgGuiRect rect)
 
 	RgGuiDrawCmd* cmd = &list->cmds[list->count++];
 	cmd->type = RG_GUI_CMD_CLIP_PUSH;
+	cmd->color = 0u;
 	cmd->data.clip.rect = rect;
 }
 
@@ -5940,6 +5988,7 @@ RGINLINE void rg_gui_pop_clip(RgGuiContext* ctx)
 
 	RgGuiDrawCmd* cmd = &list->cmds[list->count++];
 	cmd->type = RG_GUI_CMD_CLIP_POP;
+	cmd->color = 0u;
 }
 
 RGINLINE void rg_gui_push_rect_to(RgGuiContext* ctx, RgGuiDrawList* list, RgGuiRect rect, rg_vec4 color)
@@ -5955,8 +6004,8 @@ RGINLINE void rg_gui_push_rect_to(RgGuiContext* ctx, RgGuiDrawList* list, RgGuiR
 
 	RgGuiDrawCmd* cmd = &list->cmds[list->count++];
 	cmd->type = RG_GUI_CMD_RECT;
+	cmd->color = rg_gui_pack_color(rg_gui_apply_disabled_color(ctx, color));
 	cmd->data.rect.rect = rect;
-	cmd->data.rect.color = rg_gui_apply_disabled_color(ctx, color);
 }
 
 RGINLINE void rg_gui_push_triangle_to(RgGuiContext* ctx, RgGuiDrawList* list, rg_vec2 a, rg_vec2 b, rg_vec2 c, rg_vec4 color)
@@ -5972,10 +6021,10 @@ RGINLINE void rg_gui_push_triangle_to(RgGuiContext* ctx, RgGuiDrawList* list, rg
 
 	RgGuiDrawCmd* cmd = &list->cmds[list->count++];
 	cmd->type = RG_GUI_CMD_TRIANGLE;
+	cmd->color = rg_gui_pack_color(rg_gui_apply_disabled_color(ctx, color));
 	cmd->data.triangle.a = a;
 	cmd->data.triangle.b = b;
 	cmd->data.triangle.c = c;
-	cmd->data.triangle.color = rg_gui_apply_disabled_color(ctx, color);
 }
 
 RGINLINE void rg_gui_push_image_to(RgGuiContext* ctx, RgGuiDrawList* list, RgGuiRect rect,
@@ -6097,9 +6146,9 @@ RGINLINE void rg_gui_push_image_material_to(RgGuiContext* ctx, RgGuiDrawList* li
 
 	RgGuiDrawCmd* cmd = &list->cmds[list->count++];
 	cmd->type = RG_GUI_CMD_IMAGE;
+	cmd->color = rg_gui_pack_color(rg_gui_apply_disabled_color(ctx, color));
 	cmd->data.image.rect = rect;
 	cmd->data.image.uv = uv;
-	cmd->data.image.color = rg_gui_apply_disabled_color(ctx, color);
 	cmd->data.image.texture = texture;
 	cmd->data.image.material = material;
 }
@@ -6173,17 +6222,25 @@ RGINLINE void rg_gui_push_text_scaled_internal_to(RgGuiContext* ctx, RgGuiDrawLi
 
 	RgGuiDrawCmd* cmd = &list->cmds[list->count++];
 	cmd->type = RG_GUI_CMD_TEXT;
+	cmd->color = rg_gui_pack_color(rg_gui_apply_disabled_color(ctx, color));
 	cmd->data.text.pos = rg_gui_snap_text_pos(pos);
-	cmd->data.text.color = rg_gui_apply_disabled_color(ctx, color);
 	cmd->data.text.scale = rg_gui_text_base_scale(ctx) * (scale > 0.0f ? scale : 1.0f);
-	if (copy)
+	/* The length is recorded where the copy measures it anyway. Borrowed text
+	 * leaves it zero: static text is keyed by its address and never needs it,
+	 * and other borrowed text is measured by the consumer as before. */
+	size_t length = 0u;
+	if (copy && text)
 	{
-		cmd->data.text.text = text ? rg_gui_copy_text(ctx, text) : "";
+		length = strlen(text);
+		const char* stored = length ? rg_gui_copy_text_range(ctx, text, 0u, length) : "";
+		if (!*stored) length = 0u; /* empty, or dropped because the buffer was full */
+		cmd->data.text.text = stored;
 	}
 	else
 	{
 		cmd->data.text.text = text ? text : "";
 	}
+	cmd->data.text.length = length <= UINT32_MAX ? (u32)length : 0u;
 #if defined(RG_GUI_TEXT_CACHE_IDENTITY)
 	cmd->data.text.cache_identity = immutable && text ? (uintptr_t)text : 0u;
 #endif

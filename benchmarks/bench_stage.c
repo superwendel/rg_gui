@@ -16,6 +16,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Commands store one packed color since RG_GUI_DRAW_CMD_PACKED_COLOR; older
+ * headers keep a float color per payload. */
+#if defined(RG_GUI_DRAW_CMD_PACKED_COLOR)
+#define BENCH_CMD_COLOR(cmd, member, value) ((cmd)->color = rg_gui_pack_color(value))
+#define BENCH_CMD_PACKED(cmd, member) ((cmd)->color)
+#else
+#define BENCH_CMD_COLOR(cmd, member, value) ((cmd)->data.member.color = (value))
+#define BENCH_CMD_PACKED(cmd, member) rg_gui_renderer_base_pack_color((cmd)->data.member.color)
+#endif
+
 #define COMMANDS 1024u
 static volatile u64 sink;
 static double clock_scale;
@@ -82,12 +92,12 @@ static void init(Bench* b, int images, int clip) {
 			cmd->type = RG_GUI_CMD_IMAGE;
 			cmd->data.image.rect = rect;
 			cmd->data.image.uv = (RgGuiRect){(f32)(i % 8) * 0.0625f, (f32)(i % 16) * 0.03125f, 0.125f, 0.25f};
-			cmd->data.image.color = (rg_vec4){.x = 0.2f, .y = 0.3f, .z = 0.7f, .w = 0.9f};
+			BENCH_CMD_COLOR(cmd, image, ((rg_vec4){.x = 0.2f, .y = 0.3f, .z = 0.7f, .w = 0.9f}));
 			cmd->data.image.texture = (RgGuiTexture)(1u + i % 2);
 		} else {
 			cmd->type = RG_GUI_CMD_RECT;
 			cmd->data.rect.rect = rect;
-			cmd->data.rect.color = (rg_vec4){.x = 0.2f, .y = 0.3f, .z = 0.7f, .w = 0.9f};
+			BENCH_CMD_COLOR(cmd, rect, ((rg_vec4){.x = 0.2f, .y = 0.3f, .z = 0.7f, .w = 0.9f}));
 		}
 	}
 	b->list = (RgGuiDrawList){b->commands, COMMANDS, COMMANDS};
@@ -135,7 +145,7 @@ static void verify(const Bench* b, const RgGuiGpuUpload* upload, u32 count, int 
 		const RgGuiDrawCmd* cmd = &b->commands[i];
 		RgGuiRect r = images ? cmd->data.image.rect : cmd->data.rect.rect;
 		RgGuiRect uv = images ? cmd->data.image.uv : (RgGuiRect){0};
-		u32 color = rg_gui_renderer_base_pack_color(images ? cmd->data.image.color : cmd->data.rect.color);
+		u32 color = images ? BENCH_CMD_PACKED(cmd, image) : BENCH_CMD_PACKED(cmd, rect);
 		const f32 xs[4] = {r.x, r.x + r.w, r.x + r.w, r.x}, ys[4] = {r.y, r.y, r.y + r.h, r.y + r.h};
 		const f32 us[4] = {uv.x, uv.x + uv.w, uv.x + uv.w, uv.x}, vs[4] = {uv.y, uv.y, uv.y + uv.h, uv.y + uv.h};
 		for (u32 c = 0; c < 4u; c++) {

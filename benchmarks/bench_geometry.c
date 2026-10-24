@@ -14,6 +14,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Commands store one packed color since RG_GUI_DRAW_CMD_PACKED_COLOR; older
+ * headers keep a float color per payload. */
+#if defined(RG_GUI_DRAW_CMD_PACKED_COLOR)
+#define BENCH_CMD_COLOR(cmd, member, value) ((cmd)->color = rg_gui_pack_color(value))
+#define BENCH_CMD_PACKED(cmd, member) ((cmd)->color)
+#else
+#define BENCH_CMD_COLOR(cmd, member, value) ((cmd)->data.member.color = (value))
+#define BENCH_CMD_PACKED(cmd, member) rg_gui_renderer_base_pack_color((cmd)->data.member.color)
+#endif
+
 static RG_NOINLINE int reference_pack(RgGuiGpuRenderer* renderer,
                                           RgGuiRect rect, RgGuiRect uv, u32 color)
 {
@@ -96,7 +107,7 @@ static void init(Bench* b) {
         cmd->type=RG_GUI_CMD_IMAGE;
         cmd->data.image.rect=(RgGuiRect){(f32)(i%32)*20.25f,(f32)(i/32)*10.5f,17.75f,8.25f};
         cmd->data.image.uv=(RgGuiRect){(f32)(i%8)*0.0625f,(f32)(i%16)*0.03125f,0.125f,0.25f};
-        cmd->data.image.color=(rg_vec4){.x=0.2f,.y=0.3f,.z=0.7f,.w=0.9f};
+        BENCH_CMD_COLOR(cmd, image, ((rg_vec4){.x=0.2f,.y=0.3f,.z=0.7f,.w=0.9f}));
         cmd->data.image.texture=(RgGuiTexture)(1u+i%2);
     }
     b->list=(RgGuiDrawList){b->commands,1024,1024};
@@ -131,7 +142,7 @@ int main(int argc,char** argv) {
             RgGuiGpuRenderer ref={0};ref.vertices=expected;ref.vertex_capacity=4;
             for(u32 i=0;i<counts[k];i++) {
                 const RgGuiDrawCmd* cmd=&b->commands[i];ref.vertex_count=0;
-                u32 color=full?rg_gui_renderer_base_pack_color(cmd->data.image.color):0xe6b34d33u;
+                u32 color=full?BENCH_CMD_PACKED(cmd, image):0xe6b34d33u;
                 if(!reference_pack(&ref,cmd->data.image.rect,cmd->data.image.uv,color)||memcmp(expected,b->gpu.vertices+i*4,sizeof(expected))) fail("frame geometry");
             }
             if(b->gpu.vertex_count!=counts[k]*4||(full&&b->gpu.item_count!=counts[k]))fail("frame counts");

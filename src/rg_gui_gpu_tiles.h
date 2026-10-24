@@ -367,7 +367,7 @@ RGINLINE RgGuiTileRedraw rg_gui_tile_cache_update(RgGuiTileCache* cache,
 		{
 			bounds = cmd->data.rect.rect;
 			digest = rg_gui_tile_mix_rect(digest, bounds);
-			digest = rg_gui_tile_mix(digest, rg_gui_renderer_base_pack_color(cmd->data.rect.color));
+			digest = rg_gui_tile_mix(digest, cmd->color);
 		}
 		else if (cmd->type == RG_GUI_CMD_TRIANGLE)
 		{
@@ -376,7 +376,7 @@ RGINLINE RgGuiTileRedraw rg_gui_tile_cache_update(RgGuiTileCache* cache,
 			digest = rg_gui_gpu_signature_bytes(digest, &cmd->data.triangle.a, sizeof(cmd->data.triangle.a));
 			digest = rg_gui_gpu_signature_bytes(digest, &cmd->data.triangle.b, sizeof(cmd->data.triangle.b));
 			digest = rg_gui_gpu_signature_bytes(digest, &cmd->data.triangle.c, sizeof(cmd->data.triangle.c));
-			digest = rg_gui_tile_mix(digest, rg_gui_renderer_base_pack_color(cmd->data.triangle.color));
+			digest = rg_gui_tile_mix(digest, cmd->color);
 		}
 		else if (cmd->type == RG_GUI_CMD_IMAGE)
 		{
@@ -384,7 +384,7 @@ RGINLINE RgGuiTileRedraw rg_gui_tile_cache_update(RgGuiTileCache* cache,
 			bounds = cmd->data.image.rect;
 			digest = rg_gui_tile_mix_rect(digest, bounds);
 			digest = rg_gui_tile_mix_rect(digest, cmd->data.image.uv);
-			digest = rg_gui_tile_mix(digest, rg_gui_renderer_base_pack_color(cmd->data.image.color));
+			digest = rg_gui_tile_mix(digest, cmd->color);
 			digest = rg_gui_tile_mix(digest, (u64)cmd->data.image.texture);
 			digest = rg_gui_tile_mix(digest, (u64)cmd->data.image.material);
 		}
@@ -399,7 +399,7 @@ RGINLINE RgGuiTileRedraw rg_gui_tile_cache_update(RgGuiTileCache* cache,
 			f32 x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
 			int any = 0;
 			digest = rg_gui_gpu_signature_bytes(digest, &cmd->data.text.pos, sizeof(cmd->data.text.pos));
-			digest = rg_gui_tile_mix(digest, rg_gui_renderer_base_pack_color(cmd->data.text.color));
+			digest = rg_gui_tile_mix(digest, cmd->color);
 			do
 			{
 				const RgGuiRendererRun* run = &prepared->runs[run_cursor++];

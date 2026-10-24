@@ -175,7 +175,7 @@ static RgGuiDrawCmd test_text_command(const char* text, f32 scale, int identity)
 	cmd.data.text.text = text;
 	cmd.data.text.scale = scale;
 	cmd.data.text.pos = rg_vec2(10.0f, 20.0f);
-	cmd.data.text.color = rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f);
+	cmd.color = rg_gui_pack_color(rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f));
 	cmd.data.text.cache_identity = identity ? (uintptr_t)text : 0u;
 	return cmd;
 }
@@ -185,7 +185,7 @@ static RgGuiDrawCmd test_rect_command(void)
 	RgGuiDrawCmd cmd = {0};
 	cmd.type = RG_GUI_CMD_RECT;
 	cmd.data.rect.rect = rg_gui_make_rect(0.0f, 0.0f, 10.0f, 10.0f);
-	cmd.data.rect.color = rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f);
+	cmd.color = rg_gui_pack_color(rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f));
 	return cmd;
 }
 
@@ -703,7 +703,7 @@ static int test_indexed_triangle_packing_and_empty(void)
 		commands[i].data.triangle.a = rg_vec2(x, 0);
 		commands[i].data.triangle.b = (i & 1u) ? rg_vec2(x + 10, 0) : rg_vec2(x + 10, 10);
 		commands[i].data.triangle.c = (i & 1u) ? rg_vec2(x + 10, 10) : rg_vec2(x, 10);
-		commands[i].data.triangle.color = i == 4u ? rg_gui_color(1, 0, 0, 1) : rg_gui_color(1, 1, 1, 1);
+		commands[i].color = rg_gui_pack_color(i == 4u ? rg_gui_color(1, 0, 0, 1) : rg_gui_color(1, 1, 1, 1));
 	}
 	RgGuiDrawList list = {commands, 5u, 5u};
 	rg_gui_renderer_begin_frame(&fixture.text);
@@ -1036,7 +1036,7 @@ static int test_frame_signature(void)
 	cmds[5].type = RG_GUI_CMD_IMAGE;
 	cmds[5].data.image.rect = rg_gui_make_rect(5.0f, 5.0f, 8.0f, 8.0f);
 	cmds[5].data.image.uv = rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f);
-	cmds[5].data.image.color = rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f);
+	cmds[5].color = rg_gui_pack_color(rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f));
 	cmds[5].data.image.texture = (RgGuiTexture)(uintptr_t)1u;
 	cmds[5].data.image.material = 0u;
 	RgGuiDrawList list = {cmds, 6u, 6u};
@@ -1081,12 +1081,12 @@ static int test_frame_signature(void)
 		{
 			case RG_GUI_CMD_RECT:
 				if (edits[n].field == 0u) cmd->data.rect.rect.w += 1.0f;
-				else cmd->data.rect.color.x = 0.5f;
+				else cmd->color = (cmd->color & ~0xffu) | 128u; /* red to 0.5 */
 				break;
 			case RG_GUI_CMD_CLIP_PUSH: cmd->data.clip.rect.h += 1.0f; break;
 			case RG_GUI_CMD_TEXT:
 				if (edits[n].field == 0u) cmd->data.text.pos.x += 1.0f;
-				else if (edits[n].field == 1u) cmd->data.text.color.y = 0.25f;
+				else if (edits[n].field == 1u) cmd->color = (cmd->color & ~0xff00u) | (64u << 8u); /* green to 0.25 */
 				else cmd->data.text.scale = 2.0f;
 				break;
 			default:
@@ -1161,12 +1161,12 @@ static int test_tile_cache(void)
 	cmds[0] = test_rect_command(); /* 0,0 10x10: tile (0,0) */
 	cmds[1].type = RG_GUI_CMD_RECT;
 	cmds[1].data.rect.rect = rg_gui_make_rect(100.0f, 100.0f, 20.0f, 20.0f); /* tile (1,1) */
-	cmds[1].data.rect.color = rg_gui_color(1.0f, 0.0f, 0.0f, 1.0f);
+	cmds[1].color = rg_gui_pack_color(rg_gui_color(1.0f, 0.0f, 0.0f, 1.0f));
 	cmds[2] = test_text_command(mutable_text, 1.0f, 0); /* pos 10,20: tile (0,0) */
 	cmds[3].type = RG_GUI_CMD_IMAGE;
 	cmds[3].data.image.rect = rg_gui_make_rect(70.0f, 10.0f, 8.0f, 8.0f); /* tile (1,0) */
 	cmds[3].data.image.uv = rg_gui_make_rect(0.0f, 0.0f, 1.0f, 1.0f);
-	cmds[3].data.image.color = rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f);
+	cmds[3].color = rg_gui_pack_color(rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f));
 	cmds[3].data.image.texture = (RgGuiTexture)(uintptr_t)1u;
 	cmds[3].data.image.material = 0u;
 	RgGuiDrawList list = {cmds, 4u, 4u};
@@ -1203,7 +1203,7 @@ static int test_tile_cache(void)
 	rg_gui_tile_cache_commit(&cache);
 
 	/* A color change on the image dirties only tile (1,0); an identical frame after commit is clean. */
-	cmds[3].data.image.color.x = 0.5f;
+	cmds[3].color = (cmds[3].color & ~0xffu) | 128u; /* red to 0.5 */
 	TILE_PREPARE();
 	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &list, list.count, 128u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_PARTIAL);
 	TEST_CHECK(cache.stats.dirty_tiles == 1u && cache.rects[0].x == 64 && cache.rects[0].y == 0);
@@ -1270,7 +1270,7 @@ static int test_tile_cache(void)
 	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &fractional_list, fractional_list.count, 128u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
 	TEST_CHECK(cache.stats.commands == 1u);
 	rg_gui_tile_cache_commit(&cache);
-	fractional[1].data.rect.color = rg_gui_color(0.0f, 1.0f, 0.0f, 1.0f);
+	fractional[1].color = rg_gui_pack_color(rg_gui_color(0.0f, 1.0f, 0.0f, 1.0f));
 	rg_gui_renderer_begin_frame(&fixture.text);
 	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &fractional_list, fractional_list.count));
 	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &fractional_list, fractional_list.count, 128u, 128u, 0.0f, 0.0f) == RG_GUI_TILE_REDRAW_PARTIAL);
@@ -1323,12 +1323,12 @@ static int test_tile_cache(void)
 	rg_gui_tile_cache_invalidate(&cache);
 	fractional[0].data.clip.rect = rg_gui_make_rect(63.9f, 0.0f, 1.0f, 10.0f);
 	fractional[1].data.rect.rect = rg_gui_make_rect(63.1f, 0.0f, 0.7f, 10.0f);
-	fractional[1].data.rect.color = rg_gui_color(1.0f, 0.0f, 0.0f, 1.0f);
+	fractional[1].color = rg_gui_pack_color(rg_gui_color(1.0f, 0.0f, 0.0f, 1.0f));
 	rg_gui_renderer_begin_frame(&fixture.text);
 	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &fractional_list, fractional_list.count));
 	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &fractional_list, fractional_list.count, 128u, 128u, 0.3f, 0.0f) == RG_GUI_TILE_REDRAW_FULL);
 	rg_gui_tile_cache_commit(&cache);
-	fractional[1].data.rect.color = rg_gui_color(0.0f, 1.0f, 0.0f, 1.0f);
+	fractional[1].color = rg_gui_pack_color(rg_gui_color(0.0f, 1.0f, 0.0f, 1.0f));
 	rg_gui_renderer_begin_frame(&fixture.text);
 	TEST_CHECK(rg_gui_gpu_prepare(&fixture.gpu, &fixture.text, &fractional_list, fractional_list.count));
 	TEST_CHECK(rg_gui_tile_cache_update(&cache, &fixture.gpu, &fixture.text, &fractional_list, fractional_list.count, 128u, 128u, 0.3f, 0.0f) == RG_GUI_TILE_REDRAW_PARTIAL);
@@ -1399,7 +1399,7 @@ static int test_upload_ring_size_full_cache(void)
 		commands[n].data.triangle.a = rg_vec2(x, 0.0f);
 		commands[n].data.triangle.b = rg_vec2(x + 1.0f, 0.0f);
 		commands[n].data.triangle.c = rg_vec2(x, 1.0f);
-		commands[n].data.triangle.color = rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f);
+		commands[n].color = rg_gui_pack_color(rg_gui_color(1.0f, 1.0f, 1.0f, 1.0f));
 	}
 	RgGuiDrawList list = {commands, RG_ARRAY_COUNT(commands), RG_ARRAY_COUNT(commands)};
 	rg_gui_renderer_begin_frame(&fixture.text);

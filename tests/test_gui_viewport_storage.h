@@ -230,7 +230,7 @@ static int test_viewport_storage(const RgTextFont* font)
 		const RgGuiDrawCmd* command = &eager_viewport->draw_list.cmds[i];
 		VIEWPORT_STORAGE_CHECK(command->type == saved[i].type &&
 		    memcmp(&command->data.rect.rect, &saved[i].data.rect.rect, sizeof(RgGuiRect)) == 0 &&
-		    memcmp(&command->data.rect.color, &saved[i].data.rect.color, sizeof(rg_vec4)) == 0);
+		    command->color == saved[i].color);
 	}
 	// Frontend teardown is caller-owned; release never freed these buffers.
 	VIEWPORT_STORAGE_CHECK(probe.frees == 0u && probe.owned_bytes > 0u);

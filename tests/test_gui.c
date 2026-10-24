@@ -498,6 +498,57 @@ static int test_visual_line_lookup(void)
 	       rg_gui_text_area_find_visual_line(lines, 0u, 3u) == 0u;
 }
 
+/* The packed command color is the same with or without SSE2: random colors,
+ * every channel value near each 8-bit boundary, and NaN, infinities, signed
+ * zeros, denormals, and out-of-range values. */
+static int test_pack_color(void)
+{
+	static const f32 specials[] = {0.0f, -0.0f, 1.0f, -1.0f, 0.5f, 2.0f, 1e-45f, -1e-45f,
+	                               1.0f / 510.0f, 0.99999994f, 1.00000012f, 1e30f, -1e30f};
+	f32 values[256 * 3 + sizeof(specials) / sizeof(specials[0]) + 3];
+	u32 count = 0u;
+	for (u32 k = 0u; k < 256u; k++)
+	{
+		f32 boundary = ((f32)k + 0.5f) / 255.0f;
+		values[count++] = boundary;
+		values[count++] = nextafterf(boundary, 0.0f);
+		values[count++] = nextafterf(boundary, 2.0f);
+	}
+	for (u32 i = 0u; i < sizeof(specials) / sizeof(specials[0]); i++) values[count++] = specials[i];
+	values[count++] = NAN;
+	values[count++] = INFINITY;
+	values[count++] = -INFINITY;
+	for (u32 i = 0u; i < count; i++)
+	{
+		for (u32 channel = 0u; channel < 4u; channel++)
+		{
+			rg_vec4 color = rg_gui_color(0.25f, 0.5f, 0.75f, 1.0f);
+			color.data[channel] = values[i];
+			if (rg_gui_pack_color(color) != rg_gui_pack_color_scalar(color))
+			{
+				fprintf(stderr, "packed color differs for %a in channel %u\n", (double)values[i], channel);
+				return 0;
+			}
+		}
+	}
+	u32 seed = 99u;
+	for (u32 i = 0u; i < 1000000u; i++)
+	{
+		rg_vec4 color;
+		for (u32 channel = 0u; channel < 4u; channel++)
+		{
+			seed = seed * 1664525u + 1013904223u;
+			color.data[channel] = (f32)(seed >> 8) / (f32)(1u << 23) * 1.5f - 0.25f;
+		}
+		if (rg_gui_pack_color(color) != rg_gui_pack_color_scalar(color))
+		{
+			fprintf(stderr, "packed color differs for a random color (%u)\n", i);
+			return 0;
+		}
+	}
+	return rg_gui_pack_color(rg_gui_color(1.0f, 0.0f, 0.5f, 1.0f)) == 0xff8000ffu;
+}
+
 static int test_node_graph_bundle_validation(void)
 {
 	RgGuiNodeGraph graph;
@@ -1224,6 +1275,7 @@ int main(void)
 	}
 
 	if (!test_dock_layout_validation(&gui) || !test_dock_tab_title_cache(&gui) || !test_visual_line_lookup() ||
+	    !test_pack_color() ||
 	    !test_node_graph_bundle_validation() ||
 	    !test_integer_widget_boundaries(&gui) ||
 	    !test_viewport_and_input_router(&gui) || !test_viewport_storage(&font) ||

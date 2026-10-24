@@ -124,7 +124,7 @@ static void unicode_corpus(UnicodeBench* u, int dispersed) {
         cmd->data.text.pos.x = (f32)(i % 4u) * 400.0f;
         cmd->data.text.pos.y = (f32)(i / 4u) * 20.0f;
         cmd->data.text.scale = 1.0f;
-        cmd->data.text.color = (rg_vec4){.x = 1, .y = 1, .z = 1, .w = 1};
+        BENCH_CMD_COLOR(cmd, text, ((rg_vec4){.x = 1, .y = 1, .z = 1, .w = 1}));
     }
     b->list = (RgGuiDrawList){b->commands, LABEL_COUNT, LABEL_COUNT};
     change_labels(b, 0u);

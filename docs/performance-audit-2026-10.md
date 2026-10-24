@@ -293,6 +293,57 @@ with the cursor at the end, and 65 ns instead of 322 ns at random positions.
 The showcase's notes wrap to about 180 lines, so its gain is a fraction of a
 microsecond per frame; the change matters if the line cap is raised.
 
+### 9. A 56-byte draw command
+
+`RgGuiDrawCmd` was 80 bytes: each payload's `rg_vec4` color is 16-byte
+aligned, which also left 12 bytes of padding after the type. The color is now
+stored once, after the type and outside the union, as the packed RGBA8 value
+the GPU reads, packed at push time after the disabled tint. The union is
+8-byte aligned: a rectangle or clip is 16 bytes, a triangle 24, text 32 (it
+gains a 32-bit byte length), and an image 48, so a command is 56 bytes.
+Readers that packed colors themselves (GPU preparation, the text renderer,
+the frame signature, and the tile digest) now read the stored value, and the
+renderer reads a copied text's length instead of calling `strlen` up to three
+times per command.
+
+Two first attempts lost time in the UI build and show where the cost moved.
+Calling `strlen` at push time for every text made static labels 49 percent
+slower in the device-free suite, because static text is keyed by its address
+and never needed a length; the length is now recorded only where the copy
+measures it anyway. Packing with SSE2 from a 16-byte load of a color built by
+four scalar stores was slower than the scalar code, because the load waits on
+store forwarding; building the vector from the four values in registers fixed
+it. Packing is now a handful of SSE2 instructions where available, with a
+scalar fallback that a test checks for identical results over a million
+random colors and every 8-bit boundary, NaN, infinities, and signed zeros.
+
+CPU time per frame, median of per-run medians, alternating builds against the
+previous commit:
+
+| Scenario | UI build | Prepare | Stage |
+| --- | ---: | ---: | ---: |
+| idle, Immediate, 6 rounds | 93.1 to 92.3 us | 72.9 to 59.1 us (6/6) | 36.3 to 34.0 us |
+| docks, 60 panels, Immediate | 115.5 to 116.2 us | 101.3 to 82.7 us (6/6) | 50.8 to 46.7 us |
+| images, Immediate | 143.6 to 137.9 us | 92.8 to 83.0 us (6/6) | 73.7 to 74.2 us |
+| idle, VSync, 4 rounds | 71.8 to 72.7 us | 51.2 to 41.4 us (4/4) | 22.1 to 22.1 us |
+| docks, 60 panels, VSync | 86.0 to 88.1 us | 64.8 to 51.9 us (4/4) | 29.0 to 28.9 us |
+
+Preparation is 19 to 20 percent faster, staging a little faster or equal, and
+the UI build within 2.5 percent either way, since it now does the packing
+that preparation did. Together the library's CPU time per frame fell from
+145.1 to 136.2 us idle and from 179.8 to 168.9 us with 60 panels under VSync,
+about 6 percent, and 8 percent idle under Immediate presentation. The audit
+had projected about 7 us at 60 panels from a padding experiment; the measured
+saving is 11 us under VSync, partly because the renderer no longer measures
+copied text. In the device-free suite static labels are 15 to 17 percent
+slower, about 2.5 ns per label, the packing moved into the push; dynamic labels
+are unchanged.
+
+Pixels are unchanged: the 100 frames across ten scenarios read back
+byte-identical to the frames recorded before any of this audit's GPU changes,
+and the device tests pass. Code that builds or reads commands changes: see
+the changelog's migration notes.
+
 ## Measured effect of the changes
 
 Extended CPU suite, `benchmarks/run.py compare`, five alternating process
@@ -560,35 +611,7 @@ hidden tab.
 
 ## Remaining opportunities, in priority order
 
-1. **A smaller `RgGuiDrawCmd`.** The command is 80 bytes: each `rg_vec4`
-   color is 16-byte aligned, which also leaves 12 bytes of padding after the
-   type. The list is written once and read by the renderer and GPU
-   preparation, so the size is cache traffic, not instructions. Padding the
-   command to 144 bytes measured how much the size matters, over five
-   alternating rounds of 10th-percentile frames on the current layout. With 60
-   extra panels the UI build rose 14% and preparation 18%. In the idle
-   showcase they rose 5% and 3%; an earlier run on the previous layout
-   measured 13% and 10%, so the idle sensitivity is uncertain. Staging, which never reads commands, did not change. Scaled
-   linearly, a 56-byte command would save about 7 us per frame with 60 extra
-   panels, about 5% of the library's CPU time, and 1 to 4% idle. That is a
-   projection, not a measurement: shrinking need not mirror padding, and only
-   a built 56-byte command can confirm it. The plan, for a 1.0 break:
-   - Store color once, outside the union, as the packed 32-bit RGBA value the
-     GPU reads, packed at push time after the disabled tint. Output pixels and
-     the frame signature are unchanged, because the renderer already packs
-     with the same function.
-   - Keep the union 8-byte aligned: a rectangle or clip is 16 bytes, a
-     triangle 24, text 32 (position, scale, a 32-bit length, pointer,
-     identity), and an image 48 (rectangle, UV, texture, material). With the
-     type and color in front, that is 56 bytes.
-   - The freed text slot can carry the byte length. Recording it was not
-     worth a separate change (see below), but it costs nothing once the
-     command loops are rewritten for the new layout.
-   - 48 bytes would need quantized UVs or an indirect material, which changes
-     what custom renderers can express, so 56 is the recommended target.
-   Every custom renderer that reads `cmd->data.*.color` changes, as do the
-   reference renderer, the tile cache, and the tests.
-2. **Larger fonts.** Done on the rg_text side on 2026-10-22: its loader now
+1. **Larger fonts.** Done on the rg_text side on 2026-10-22: its loader now
    builds an ASCII glyph table, a cached fallback index, and per-glyph kerning
    ranges, and aligned layout resolves each glyph once. rg_text's own paired
    benchmark improved 35 to 88 percent across every workload with identical
@@ -597,7 +620,7 @@ hidden tab.
    in rg_text is still a binary search (3 to 4x slower than the table on the
    4,096-glyph benchmark font). Raising the slot counts is the remaining knob
    for very large fonts.
-3. **Text-area relayout on edit.** Each keystroke re-wraps the whole document.
+2. **Text-area relayout on edit.** Each keystroke re-wraps the whole document.
    At the current 1,024-visual-line cap that is 100-200 us for 8 KiB of ASCII,
    acceptable, but a paragraph-local relayout would make it independent of
    document size if the cap is ever raised.
@@ -611,7 +634,8 @@ hidden tab.
   preparation in four paired runs, although image commands never reach the
   changed branch. Those builds differed in other code too, so the slowdown was
   not isolated to the branch, and it likely reflects code layout rather than
-  work. It is worth retrying only as part of a draw-command layout change.
+  work. The 56-byte command (change 9) now records the length of copied text
+  as part of its layout change.
 
 - Reclaim/eviction sweeps: 0.05 to 0.09 ms when they happen, roughly every 450
   frames in the showcase.
