@@ -498,6 +498,36 @@ static int test_visual_line_lookup(void)
 	       rg_gui_text_area_find_visual_line(lines, 0u, 3u) == 0u;
 }
 
+/* Unpacking is exact at 0 and 1, matches the scalar path, and packing returns
+ * every channel value of every channel unchanged. */
+static int test_unpack_color(void)
+{
+	for (u32 channel = 0u; channel < 4u; channel++)
+	{
+		for (u32 value = 0u; value < 256u; value++)
+		{
+			const u32 others[] = {0x00000000u, 0xffffffffu, 0x80402010u};
+			for (u32 k = 0u; k < 3u; k++)
+			{
+				u32 packed = (others[k] & ~(0xffu << (channel * 8u))) | (value << (channel * 8u));
+				rg_vec4 color = rg_gui_unpack_color(packed);
+				rg_vec4 scalar = rg_gui_unpack_color_scalar(packed);
+				if (memcmp(color.data, scalar.data, sizeof(color.data)) != 0 ||
+				    rg_gui_pack_color(color) != packed ||
+				    color.data[channel] != (f32)value / 255.0f)
+				{
+					fprintf(stderr, "unpacked color differs for 0x%08x\n", packed);
+					return 0;
+				}
+			}
+		}
+	}
+	rg_vec4 white = rg_gui_unpack_color(0xffffffffu);
+	rg_vec4 clear = rg_gui_unpack_color(0u);
+	return white.x == 1.0f && white.y == 1.0f && white.z == 1.0f && white.w == 1.0f &&
+	       clear.x == 0.0f && clear.y == 0.0f && clear.z == 0.0f && clear.w == 0.0f;
+}
+
 /* The packed command color is the same with or without SSE2: random colors,
  * every channel value near each 8-bit boundary, and NaN, infinities, signed
  * zeros, denormals, and out-of-range values. */
@@ -1276,6 +1306,7 @@ int main(void)
 
 	if (!test_dock_layout_validation(&gui) || !test_dock_tab_title_cache(&gui) || !test_visual_line_lookup() ||
 	    !test_pack_color() ||
+	    !test_unpack_color() ||
 	    !test_node_graph_bundle_validation() ||
 	    !test_integer_widget_boundaries(&gui) ||
 	    !test_viewport_and_input_router(&gui) || !test_viewport_storage(&font) ||

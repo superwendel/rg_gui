@@ -103,7 +103,9 @@ between 0.x releases.
 
 - `RgGuiDrawCmd` stores its color once as `cmd->color`, a packed RGBA8 value
   (red in the low byte) instead of `cmd->data.rect.color`, `.triangle.color`,
-  `.text.color`, and `.image.color`. Build it with `rg_gui_pack_color`. Text
+  `.text.color`, and `.image.color`. Build it with `rg_gui_pack_color`; a
+  renderer that wants floats reads `rg_gui_unpack_color(cmd->color)`. Colors are
+  rounded to 8 bits per channel when the command is pushed. Text
   commands gain `data.text.length`; zero means the string's length is not
   recorded. `RG_GUI_DRAW_CMD_PACKED_COLOR` is defined for code that supports
   both layouts.

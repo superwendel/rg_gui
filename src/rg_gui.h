@@ -3507,6 +3507,30 @@ RGINLINE u32 rg_gui_pack_color(rg_vec4 color)
 #endif
 }
 
+/** A packed command color as floats, each channel over 255: 0 and 255 become
+ * exactly 0.0 and 1.0, and rg_gui_pack_color returns the same packed value. */
+RGINLINE rg_vec4 rg_gui_unpack_color_scalar(u32 color)
+{
+	return rg_gui_color((f32)(color & 0xffu) / 255.0f, (f32)((color >> 8u) & 0xffu) / 255.0f,
+	                    (f32)((color >> 16u) & 0xffu) / 255.0f, (f32)(color >> 24u) / 255.0f);
+}
+
+/** rg_gui_unpack_color_scalar, with SSE2 four channels at once; division is
+ * correctly rounded either way, so the results are identical. */
+RGINLINE rg_vec4 rg_gui_unpack_color(u32 color)
+{
+#if defined(RG_MATH_SSE2)
+	const __m128i zero = _mm_setzero_si128();
+	__m128i channels = _mm_unpacklo_epi8(_mm_cvtsi32_si128((int)color), zero);
+	channels = _mm_unpacklo_epi16(channels, zero);
+	rg_vec4 result;
+	_mm_store_ps(result.data, _mm_div_ps(_mm_cvtepi32_ps(channels), _mm_set1_ps(255.0f)));
+	return result;
+#else
+	return rg_gui_unpack_color_scalar(color);
+#endif
+}
+
 RGINLINE rg_vec3 rg_gui_color_hsv_to_rgb(f32 h, f32 s, f32 v)
 {
 	f32 r = v;
