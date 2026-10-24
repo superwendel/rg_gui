@@ -890,7 +890,8 @@ typedef struct RgGuiGpuImageBindInfo
  * RG_GUI_GPU_IMAGE_BIND_DEFAULT must not change GPU state. CUSTOM must bind a
  * graphics pipeline compatible with RgGuiGpuVertex and all fragment resources;
  * rg_gui binds the vertex uniforms and vertex buffer. FAILED may be returned
- * after a partial bind because rg_gui invalidates its cached state afterward.
+ * after a partial bind. After CUSTOM or FAILED rg_gui invalidates its cached
+ * pipeline, texture, and scissor state, so a callback may also set a scissor.
  */
 typedef RgGuiGpuImageBindResult (*RgGuiGpuImageBindFn)(
     void* user, const RgGuiGpuImageBindInfo* info);
@@ -2200,7 +2201,8 @@ RGINLINE RgGuiGpuStats rg_gui_gpu_draw(const RgGuiGpuRenderer* renderer,
 	int indexed_bound = 0;
 	RgGuiTexture bound_texture = 0u;
 	/* Stock batches clip in the shader and share the viewport scissor; only a
-	 * material batch sets its own clip, and the next stock batch restores it. */
+	 * material batch sets its own clip or runs a callback that may change it,
+	 * and the next stock batch restores it. */
 	int viewport_scissor = 0;
 	for (u32 i = 0u; i < upload->batch_count; i++)
 	{
@@ -2223,6 +2225,14 @@ RGINLINE RgGuiGpuStats rg_gui_gpu_draw(const RgGuiGpuRenderer* renderer,
 			info.material = batch->material;
 			stats.image_bind_calls++;
 			RgGuiGpuImageBindResult result = renderer->image_bind(renderer->image_bind_user, &info);
+			if (result != RG_GUI_GPU_IMAGE_BIND_DEFAULT)
+			{
+				/* CUSTOM and FAILED may leave any pass state behind, the scissor
+				 * included; the next stock batch rebinds all of it. */
+				indexed_bound = 0;
+				bound_texture = 0u;
+				viewport_scissor = 0;
+			}
 			if (result == RG_GUI_GPU_IMAGE_BIND_CUSTOM)
 			{
 				custom = 1;
@@ -2231,8 +2241,6 @@ RGINLINE RgGuiGpuStats rg_gui_gpu_draw(const RgGuiGpuRenderer* renderer,
 			else if (result != RG_GUI_GPU_IMAGE_BIND_DEFAULT)
 			{
 				stats.image_bind_failures++;
-				indexed_bound = 0;
-				bound_texture = 0u;
 				continue;
 			}
 		}
@@ -2253,8 +2261,6 @@ RGINLINE RgGuiGpuStats rg_gui_gpu_draw(const RgGuiGpuRenderer* renderer,
 			SDL_DrawGPUIndexedPrimitives(pass, index_count, 1u, 0u, 0, 0u);
 			stats.vertices += batch->geometry_vertices;
 			stats.indices += index_count;
-			indexed_bound = 0;
-			bound_texture = 0u;
 		}
 		else
 		{

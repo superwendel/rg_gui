@@ -279,8 +279,9 @@ bottom-right, bottom-left) drawn as an indexed triangle list, so the pipeline
 must use a triangle-list primitive and must not derive corners from the vertex
 index. Return
 `RG_GUI_GPU_IMAGE_BIND_FAILED` to skip the item. CUSTOM and FAILED invalidate
-rg_gui's cached pipeline and texture state, so following stock solid, image, or
-text items rebind correctly even if the callback partially changed GPU state.
+rg_gui's cached pipeline, texture, and scissor state, so following stock solid,
+image, or text items rebind correctly even if the callback partially changed GPU
+state or set its own scissor.
 
 `RgGuiGpuStats.image_bind_calls`, `custom_image_draw_calls`, and
 `image_bind_failures` expose the callback decisions. Treat failures as a

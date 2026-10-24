@@ -55,10 +55,18 @@ static RgGuiGpuImageBindResult test_image_bind(
 		SDL_GPUTextureSamplerBinding image = {
 		    (SDL_GPUTexture*)(uintptr_t)info->texture, info->sampler};
 		SDL_BindGPUFragmentSamplers(info->pass, 0u, &image, 1u);
+		/* A custom material may narrow the scissor to its own quad; the stock
+		 * image after it must still draw. */
+		SDL_Rect own = {24, 0, 8, 8};
+		SDL_SetGPUScissor(info->pass, &own);
 		return RG_GUI_GPU_IMAGE_BIND_CUSTOM;
 	}
 	state->failed_calls++;
+	/* A partial bind before failing, including a scissor that would hide every
+	 * later stock draw if rg_gui kept its cached viewport scissor. */
 	SDL_BindGPUGraphicsPipeline(info->pass, state->failure_pipeline);
+	SDL_Rect corner = {63, 63, 1, 1};
+	SDL_SetGPUScissor(info->pass, &corner);
 	return RG_GUI_GPU_IMAGE_BIND_FAILED;
 }
 
