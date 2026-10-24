@@ -199,9 +199,12 @@ for trial in 1 2 3 4 5 6 7; do
 done
 ```
 
-Compare the median of each case's `median_ns` across trials. The `refs`,
-`batches`, and `frame_bytes` fields describe the workload and must not change
-between trials of one side.
+Before timing each case, the benchmark decodes its staged frame the way
+`rg_gui_indexed.vert` does and compares every quad corner's position, color,
+and UV, and each image's batch texture, with the source command; a mismatch
+exits with an error. Compare the median of each case's `median_ns` across
+trials. The `refs`, `batches`, and `frame_bytes` fields describe the workload
+and must not change between trials of one side.
 
 ## Optional SSE2 geometry packing
 

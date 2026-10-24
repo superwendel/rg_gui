@@ -3,7 +3,10 @@
  * 1,024 solid rectangles (one merged item) and images that alternate between
  * two textures (one item and batch each). No window or GPU device is used.
  * The source compiles against older headers, so a before/after comparison
- * builds it twice; see benchmarks/README.md. Emits one JSON object per case. */
+ * builds it twice; see benchmarks/README.md. Before timing each case, an
+ * untimed check decodes the staged frame as rg_gui_indexed.vert does and
+ * compares every corner with its source command. Emits one JSON object per
+ * case. */
 #define RG_SPRINTF_NO_ASM 1
 #define RGINLINE static inline
 #include "rg_gui_gpu.h"
@@ -81,6 +84,45 @@ static void prepare(Bench* b, u32 count) {
 	if (!rg_gui_gpu_prepare(&b->gpu, &b->text, &b->list, count)) fail("prepare");
 }
 
+/* Raw vertex of each quad corner (top-left, top-right, bottom-right,
+ * bottom-left), as rg_gui_indexed.vert reads it. Headers that predate
+ * RG_GUI_GPU_QUAD_VERTICES wrote six vertices per quad, corner 3 being 5. */
+#if defined(RG_GUI_GPU_QUAD_VERTICES)
+static const u32 quad_corner[4] = {0u, 1u, 2u, 3u};
+#else
+static const u32 quad_corner[4] = {0u, 1u, 2u, 5u};
+#endif
+
+/* Fail unless the staged frame draws exactly the first `count` commands, in
+ * order: one quad reference per command whose corners carry the command's
+ * position, packed color, and UV, inside a batch with the image's texture. */
+static void verify(const Bench* b, const RgGuiGpuUpload* upload, u32 count, int images) {
+	const u8* frame = b->ring_memory + upload->frame.offset;
+	if (upload->ref_count != count || upload->batch_count == 0u) fail("reference or batch count");
+	u32 batch = 0u;
+	for (u32 i = 0; i < count; i++) {
+		while (batch < upload->batch_count &&
+		       i >= upload->batches[batch].first_ref + upload->batches[batch].ref_count) batch++;
+		if (batch == upload->batch_count || i < upload->batches[batch].first_ref) fail("batch coverage");
+		u64 reference;
+		memcpy(&reference, frame + upload->refs_offset + (size_t)i * 8u, sizeof(reference));
+		if ((u32)(reference >> 62u) != (images ? 2u : 1u) || ((reference >> 32u) & 1u) == 0u)
+			fail("reference kind or quad flag");
+		const RgGuiDrawCmd* cmd = &b->commands[i];
+		RgGuiRect r = images ? cmd->data.image.rect : cmd->data.rect.rect;
+		RgGuiRect uv = images ? cmd->data.image.uv : (RgGuiRect){0};
+		u32 color = rg_gui_renderer_base_pack_color(images ? cmd->data.image.color : cmd->data.rect.color);
+		const f32 xs[4] = {r.x, r.x + r.w, r.x + r.w, r.x}, ys[4] = {r.y, r.y, r.y + r.h, r.y + r.h};
+		const f32 us[4] = {uv.x, uv.x + uv.w, uv.x + uv.w, uv.x}, vs[4] = {uv.y, uv.y, uv.y + uv.h, uv.y + uv.h};
+		for (u32 c = 0; c < 4u; c++) {
+			RgGuiGpuVertex v;
+			memcpy(&v, frame + upload->geometry_offset + ((size_t)(u32)reference + quad_corner[c]) * sizeof(v), sizeof(v));
+			if (v.x != xs[c] || v.y != ys[c] || v.color != color || v.u != us[c] || v.v != vs[c]) fail("staged vertex");
+		}
+		if (images && upload->batches[batch].texture != cmd->data.image.texture) fail("batch texture");
+	}
+}
+
 static RG_NOINLINE void stage(Bench* b) {
 	RgGuiGpuUpload upload;
 	b->ring.offset = 0u;
@@ -105,6 +147,7 @@ int main(void) {
 			RgGuiGpuUpload probe;
 			b->ring.offset = 0u;
 			if (!rg_gui_gpu_stage_upload(&b->gpu, &b->text, &b->ring, &probe)) fail("probe");
+			verify(b, &probe, count, images);
 			u64 packed = hash(b->ring_memory + probe.frame.offset, probe.frame.size);
 			u32 refs = probe.ref_count, batches = probe.batch_count, bytes = probe.frame.size;
 			rg_gui_gpu_upload_abort(&b->gpu, &probe);
