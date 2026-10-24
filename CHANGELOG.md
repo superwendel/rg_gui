@@ -46,6 +46,9 @@ between 0.x releases.
 
 ### Changed
 
+- `rg_gui_text_area_find_visual_line` bisects to the cursor's line instead of
+  scanning from the top, with identical results: 13 ns instead of 631 ns at
+  the end of a 1,024-line text area.
 - Dock tab bars keep each tab's measured title width with a copy of its bytes
   and measure again only when the title or text scale changes, so the UI build
   with 60 tabbed panels is 6 to 7 us faster per frame. Titles longer than

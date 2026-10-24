@@ -8827,7 +8827,18 @@ RGINLINE u32 rg_gui_text_area_find_visual_line(const RgGuiTextAreaVisualLine* li
 		return 0u;
 	}
 
-	for (u32 i = 0u; i < line_count; i++)
+	/* Lines are in text order, so their ends never decrease, and the scan below
+	 * passes over every line that ends before the cursor. Bisect past them. */
+	u32 first = 0u;
+	u32 last = line_count;
+	while (first < last)
+	{
+		u32 middle = first + (last - first) / 2u;
+		if (lines[middle].end < cursor) first = middle + 1u;
+		else last = middle;
+	}
+
+	for (u32 i = first; i < line_count; i++)
 	{
 		const RgGuiTextAreaVisualLine* line = &lines[i];
 		if (cursor < line->start)

@@ -445,6 +445,59 @@ static int test_dock_tab_title_cache(RgGuiContext* gui)
 	return 1;
 }
 
+/* The scan rg_gui_text_area_find_visual_line used before it bisected. */
+static u32 reference_find_visual_line(const RgGuiTextAreaVisualLine* lines, u32 line_count, size_t cursor)
+{
+	if (!lines || line_count == 0u) return 0u;
+	for (u32 i = 0u; i < line_count; i++)
+	{
+		if (cursor < lines[i].start) return i > 0u ? i - 1u : 0u;
+		if (cursor < lines[i].end) return i;
+		if (cursor == lines[i].end && !(lines[i].soft_wrap_after && i + 1u < line_count)) return i;
+	}
+	return line_count - 1u;
+}
+
+/* The bisecting lookup returns what the linear scan did for every cursor,
+ * over layouts with empty lines, hard breaks, soft wraps, and gaps of zero to
+ * two bytes between lines, so it holds for any lines in text order, not only
+ * those the wrapper makes. */
+static int test_visual_line_lookup(void)
+{
+	RgGuiTextAreaVisualLine lines[64];
+	u32 seed = 12345u;
+	u32 checked = 0u;
+	for (u32 layout = 0u; layout < 2000u; layout++)
+	{
+		u32 count = 1u + layout % 64u;
+		size_t at = 0u;
+		for (u32 i = 0u; i < count; i++)
+		{
+			seed = seed * 1664525u + 1013904223u;
+			size_t length = (seed >> 8) % 6u;
+			int soft = ((seed >> 16) & 3u) == 0u;
+			size_t gap = (seed >> 20) % 3u;
+			lines[i].start = at;
+			lines[i].end = at + length;
+			lines[i].soft_wrap_after = soft;
+			at = lines[i].end + gap;
+		}
+		for (size_t cursor = 0u; cursor <= at + 2u; cursor++)
+		{
+			if (rg_gui_text_area_find_visual_line(lines, count, cursor) !=
+			    reference_find_visual_line(lines, count, cursor))
+			{
+				fprintf(stderr, "visual line lookup differs from the scan (layout %u, cursor %zu)\n",
+				        layout, cursor);
+				return 0;
+			}
+			checked++;
+		}
+	}
+	return checked > 0u && rg_gui_text_area_find_visual_line(NULL, 4u, 0u) == 0u &&
+	       rg_gui_text_area_find_visual_line(lines, 0u, 3u) == 0u;
+}
+
 static int test_node_graph_bundle_validation(void)
 {
 	RgGuiNodeGraph graph;
@@ -1170,7 +1223,7 @@ int main(void)
 		return 1;
 	}
 
-	if (!test_dock_layout_validation(&gui) || !test_dock_tab_title_cache(&gui) ||
+	if (!test_dock_layout_validation(&gui) || !test_dock_tab_title_cache(&gui) || !test_visual_line_lookup() ||
 	    !test_node_graph_bundle_validation() ||
 	    !test_integer_widget_boundaries(&gui) ||
 	    !test_viewport_and_input_router(&gui) || !test_viewport_storage(&font) ||

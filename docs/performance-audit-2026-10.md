@@ -280,6 +280,19 @@ within noise. A new test edits a docked window's title in place across
 same-length and longer strings and checks the tab bar's layout against fresh
 measurements; it fails if the cache compares only the length.
 
+### 8. Visual-line lookup by bisection
+
+`rg_gui_text_area_find_visual_line`, which finds the cursor's wrapped line a
+few times per frame, scanned the lines from the top. It now bisects to the
+first line that does not end before the cursor and continues the same scan
+from there. The scan passes over every line it skips, so the result is the
+same for any lines in text order; a randomized test compares the two over
+2,000 layouts with empty lines, soft wraps, and gaps between lines, at every
+cursor position. At the 1,024-line cap a lookup takes 13 ns instead of 631 ns
+with the cursor at the end, and 65 ns instead of 322 ns at random positions.
+The showcase's notes wrap to about 180 lines, so its gain is a fraction of a
+microsecond per frame; the change matters if the line cap is raised.
+
 ## Measured effect of the changes
 
 Extended CPU suite, `benchmarks/run.py compare`, five alternating process
@@ -588,10 +601,6 @@ hidden tab.
    At the current 1,024-visual-line cap that is 100-200 us for 8 KiB of ASCII,
    acceptable, but a paragraph-local relayout would make it independent of
    document size if the cap is ever raised.
-4. **`rg_gui_text_area_find_visual_line` is a linear scan** over up to 1,024
-   lines, called a few times per frame. A binary search over line starts is a
-   small, safe win.
-
 ## Verified and left alone
 
 - Text length in the draw command, tried on 2026-10-23 and not adopted.
