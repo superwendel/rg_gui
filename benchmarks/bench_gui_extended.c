@@ -31,6 +31,11 @@ static void extended_init(Bench* b, ExtendedBench* e) {
     memset(e, 0, sizeof(*e));
     e->gpu.item_capacity = LABEL_COUNT;
     e->gpu.items = (RgGuiGpuItem*)allocate(sizeof(*e->gpu.items) * LABEL_COUNT);
+#if defined(RG_GUI_GPU_FRAME_CLIP_LIMIT)
+    /* Preparation builds the frame clip table: one entry per item plus entry 0. */
+    e->gpu.clip_capacity = LABEL_COUNT + 1u;
+    e->gpu.clips = (RgGuiGpuFrameClip*)allocate(sizeof(*e->gpu.clips) * e->gpu.clip_capacity);
+#endif
     for (u32 i = 0u; ; i++) {
         const char* text = b->labels[i % LABEL_COUNT];
         size_t length = strlen(text);
@@ -190,6 +195,9 @@ int main(void) {
             for (int mode = 0; mode < 6; mode++) if (extended_selected(label_cases[mode])) run_case(b, font, mode);
         for (int mode = 0; mode < 6; mode++) if (extended_selected(more_cases[mode])) extended_case(b, e, font, mode);
         free(e->gpu.items);
+#if defined(RG_GUI_GPU_FRAME_CLIP_LIMIT)
+        free(e->gpu.clips);
+#endif
         free(b->gui_memory); free(b->renderer_memory); free(b->glyphs); free(b->kernings);
     }
     free(e); free(b);
