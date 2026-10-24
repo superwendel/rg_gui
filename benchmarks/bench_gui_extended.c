@@ -25,6 +25,17 @@ typedef struct ExtendedBench {
     RgGuiTextAreaVisualLine lines[RG_GUI_TEXT_AREA_VISUAL_LINE_MAX];
     u32 line_count;
     RgGuiTextAreaState area;
+    /* Keystrokes into a cached document of one label per line. */
+    char edit_document[8192];
+    size_t edit_length;
+    RgGuiTextAreaState edit_area;
+    RgGuiTextAreaLayoutCache cache;
+    char cache_text[8192];
+    RgGuiTextAreaVisualLine cache_lines[RG_GUI_TEXT_AREA_VISUAL_LINE_MAX];
+    RgInputEvent event_storage[8];
+    char event_text[64];
+    RgInputEventQueue events;
+    u32 edit_frame;
 } ExtendedBench;
 
 static void extended_init(Bench* b, ExtendedBench* e) {
@@ -45,10 +56,73 @@ static void extended_init(Bench* b, ExtendedBench* e) {
         e->document[e->document_length++] = ' ';
     }
     e->document[e->document_length] = 0;
+    for (u32 i = 0u; ; i++) {
+        const char* text = b->labels[i % LABEL_COUNT];
+        size_t length = strlen(text);
+        if (e->edit_length + length + 2u >= sizeof(e->edit_document)) break;
+        memcpy(e->edit_document + e->edit_length, text, length);
+        e->edit_length += length;
+        e->edit_document[e->edit_length++] = '\n';
+    }
+    e->edit_document[e->edit_length] = 0;
+    rg_gui_text_area_cache_init(&e->cache, e->cache_text, sizeof(e->cache_text),
+                                e->cache_lines, RG_ARRAY_COUNT(e->cache_lines));
+    e->edit_area.layout_cache = &e->cache;
+    rg_input_event_queue_init(&e->events, e->event_storage, RG_ARRAY_COUNT(e->event_storage),
+                              e->event_text, sizeof(e->event_text));
+}
+
+/* A frame with one keystroke: a click focuses the editor, then frames alternate
+ * inserting a character and deleting it again. */
+static void extended_edit_frame(Bench* b, ExtendedBench* e) {
+    rg_input_begin_frame(&b->input);
+    rg_input_event_queue_reset(&e->events, SDL_KMOD_NONE);
+    memset(b->input.current_mouse, 0, sizeof(b->input.current_mouse));
+    memset(b->input.previous_mouse, 0, sizeof(b->input.previous_mouse));
+    b->input.mouse_x = 50;
+    b->input.mouse_y = 50;
+    SDL_Event event;
+    memset(&event, 0, sizeof(event));
+    if (e->edit_frame < 2u) {
+        const int down = e->edit_frame == 0u;
+        b->input.current_mouse[RG_MOUSE_BUTTON_LEFT] = down;
+        b->input.previous_mouse[RG_MOUSE_BUTTON_LEFT] = !down;
+        event.type = down ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+        event.button.button = SDL_BUTTON_LEFT;
+        event.button.down = down != 0;
+        event.button.clicks = 1u;
+        event.button.x = 50.0f;
+        event.button.y = 50.0f;
+        rg_input_process_event_ex(&b->input, &event, &e->events);
+    } else if (e->edit_frame % 2u == 0u) {
+        event.type = SDL_EVENT_TEXT_INPUT;
+        event.text.text = "x";
+        rg_input_process_event_ex(&b->input, &event, &e->events);
+    } else {
+        event.type = SDL_EVENT_KEY_DOWN;
+        event.key.scancode = SDL_SCANCODE_BACKSPACE;
+        event.key.key = SDLK_BACKSPACE;
+        event.key.down = true;
+        rg_input_process_event_ex(&b->input, &event, &e->events);
+        event.type = SDL_EVENT_KEY_UP;
+        event.key.down = false;
+        rg_input_process_event_ex(&b->input, &event, &e->events);
+    }
+    rg_gui_begin_frame_ex(&b->gui, &b->input, &e->events, 0, 1.0f / 60.0f);
+    b->gui.cursor_visible = 1;
+    b->gui.cursor_blink_timer = 0.0f;
+    rg_gui_text_area(&b->gui, &e->edit_area, e->edit_document, sizeof(e->edit_document),
+                     (RgGuiRect){0, 0, 640, 360}, (RgGuiId)174u);
+    rg_gui_end_frame(&b->gui);
+    if (b->gui.diagnostics.flags) fail("text area edit diagnostics");
+    e->edit_frame++;
+    sink += (double)b->gui.draw_list.count + b->gui.text_edit_state->cursor;
 }
 
 RG_NOINLINE static void extended_frame(Bench* b, ExtendedBench* e, int mode) {
-    if (mode < 3) {
+    if (mode == 6) {
+        extended_edit_frame(b, e);
+    } else if (mode < 3) {
         rg_gui_renderer_begin_frame(&b->renderer);
         if (!rg_gui_gpu_prepare(&e->gpu, &b->renderer, &b->list, b->list.count))
             fail("combined GUI CPU preparation");
@@ -113,6 +187,18 @@ static u64 extended_signature(Bench* b, ExtendedBench* e, int mode) {
             hash = hash_u32(hash, (u32)e->lines[i].start);
             hash = hash_u32(hash, (u32)e->lines[i].end);
         }
+    } else if (mode == 6) {
+        /* Finish an insertion's deletion so the document is back to its text,
+         * then the whole cached layout and the editor state are deterministic. */
+        if (e->edit_frame % 2u) extended_frame(b, e, mode);
+        if (strlen(e->edit_document) != e->edit_length) fail("edited document did not return to its text");
+        hash = hash_u32(hash, (u32)b->gui.text_edit_state->cursor);
+        hash = hash_u32(hash, e->cache.count);
+        for (u32 i = 0u; i < e->cache.count; i++) {
+            hash = hash_u32(hash, (u32)e->cache.lines[i].start);
+            hash = hash_u32(hash, (u32)e->cache.lines[i].end);
+            hash = hash_u32(hash, (u32)e->cache.lines[i].soft_wrap_after);
+        }
     } else {
         hash = hash_u32(hash, (u32)b->gui.text_edit_state->cursor);
         hash = hash_u32(hash, b->gui.draw_list.count);
@@ -137,7 +223,8 @@ static u64 extended_signature(Bench* b, ExtendedBench* e, int mode) {
 
 static void extended_case(Bench* b, ExtendedBench* e, const char* font, int mode) {
     static const char* names[] = {"gpu_prepare_static_warm", "gpu_prepare_content_warm",
-        "gpu_prepare_cold", "textarea_wrap_300", "textarea_wrap_1200", "textarea_click_drag"};
+        "gpu_prepare_cold", "textarea_wrap_300", "textarea_wrap_1200", "textarea_click_drag", "textarea_edit"};
+    const size_t document_length = mode == 6 ? e->edit_length : e->document_length;
     change_labels(b, 0u);
     rg_gui_renderer_clear_cache(&b->renderer);
     for (u32 i = 0u; i < LABEL_COUNT; i++)
@@ -156,7 +243,7 @@ static void extended_case(Bench* b, ExtendedBench* e, const char* font, int mode
     if (frames > 20000u) frames = 20000u;
     double times[SAMPLE_COUNT];
     printf("{\"kind\":\"samples\",\"font\":\"%s\",\"case\":\"%s\",\"labels\":%u,\"frames_per_sample\":%u,\"document_bytes\":%zu,\"ns_per_frame\":[",
-        font, names[mode], mode < 3 ? LABEL_COUNT : 1u, frames, mode < 3 ? 0u : e->document_length);
+        font, names[mode], mode < 3 ? LABEL_COUNT : 1u, frames, mode < 3 ? 0u : document_length);
     for (u32 i = 0u; i < SAMPLE_COUNT; i++) {
         times[i] = extended_sample(b, e, mode, frames) * 1e9 / frames;
         printf("%s%.3f", i ? "," : "", times[i]);
@@ -168,7 +255,7 @@ static void extended_case(Bench* b, ExtendedBench* e, const char* font, int mode
     u64 hash = extended_signature(b, e, mode);
     const RgGuiRendererStats* stats = rg_gui_renderer_stats(&b->renderer);
     printf("{\"kind\":\"result\",\"font\":\"%s\",\"case\":\"%s\",\"median_ns_per_frame\":%.3f,\"min_ns_per_frame\":%.3f,\"max_ns_per_frame\":%.3f,\"width_checksum\":%.3f,\"geometry_checksum\":\"%llu\",\"cache_hits\":%u,\"cache_misses\":%u,\"glyphs\":%u,\"renderer_arena_bytes\":%zu,\"renderer_lookup_shared\":%u,\"fixture_bytes\":%zu,\"frontend_lookup_count\":%u}\n",
-        font, names[mode], times[3], times[0], times[6], mode >= 3 ? (double)e->document_length : 0.0,
+        font, names[mode], times[3], times[0], times[6], mode >= 3 ? (double)document_length : 0.0,
         (unsigned long long)hash, mode < 3 ? stats->frame_cache_hits : 0u, mode < 3 ? stats->frame_cache_misses : 0u,
         mode < 3 ? stats->frame_glyphs : 0u, b->renderer_memory_size,
         (unsigned)RG_GUI_BENCH_RENDERER_LOOKUP, sizeof(*b), (unsigned)RG_GUI_BENCH_HAS_LOOKUP);
@@ -179,7 +266,7 @@ int main(void) {
     static const char* label_cases[] = {"frontend_measured_labels_static_warm", "frontend_measured_labels_dynamic",
         "renderer_static_warm", "renderer_content_warm", "renderer_cold", "renderer_init"};
     static const char* more_cases[] = {"gpu_prepare_static_warm", "gpu_prepare_content_warm",
-        "gpu_prepare_cold", "textarea_wrap_300", "textarea_wrap_1200", "textarea_click_drag"};
+        "gpu_prepare_cold", "textarea_wrap_300", "textarea_wrap_1200", "textarea_click_drag", "textarea_edit"};
     Uint64 frequency = SDL_GetPerformanceFrequency();
     if (!frequency) fail("performance counter");
     timer_scale = 1.0 / (double)frequency;
@@ -193,7 +280,7 @@ int main(void) {
             font, b->font.glyph_count, b->font.kerning_count, (unsigned)RG_GUI_LABEL_COPY);
         if (!getenv("RG_GUI_BENCH_VERIFY"))
             for (int mode = 0; mode < 6; mode++) if (extended_selected(label_cases[mode])) run_case(b, font, mode);
-        for (int mode = 0; mode < 6; mode++) if (extended_selected(more_cases[mode])) extended_case(b, e, font, mode);
+        for (int mode = 0; mode < 7; mode++) if (extended_selected(more_cases[mode])) extended_case(b, e, font, mode);
         free(e->gpu.items);
 #if defined(RG_GUI_GPU_FRAME_CLIP_LIMIT)
         free(e->gpu.clips);

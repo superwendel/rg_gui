@@ -344,6 +344,60 @@ byte-identical to the frames recorded before any of this audit's GPU changes,
 and the device tests pass. Code that builds or reads commands changes: see
 the changelog's migration notes.
 
+### 10. Paragraph-local text-area relayout
+
+A keystroke in a text area with a layout cache re-wrapped the whole document:
+the cache compares the text with its snapshot and, on any difference, rebuilt
+every visual line. In a tight loop a keystroke in the showcase's 8 KiB notes
+cost 112 us in the widget, 110 of them the wrap, and the cost grew with the
+document: 28 us at 2 KiB, 207 us at 15 KiB. The showcase's edit scenario spent
+240 us more UI build on a keystroke frame than on the frame after it.
+
+The cache now finds the common prefix and suffix of the old and new text,
+widens them to paragraph boundaries (the newline before the first changed
+byte, the newline at or after the last one), keeps the lines of the paragraphs
+before, wraps the paragraphs between afresh, and keeps the lines after, moved
+by the length change. The result is exact because a paragraph's wrapping
+depends on nothing but its own bytes, and `rg_gui_text_area_build_visual_lines`
+itself wraps the changed region, so pieces, soft-wrap flags, and empty-line
+rules are the ones a full build applies. When either layout reached the
+1,024-line cap, where a layout may be cut short, the full build runs as before.
+A `relayouts` counter records the partial path; `rebuilds` now counts only
+full builds.
+
+An oracle test applies 3,000 random insertions, deletions, and replacements,
+with newlines, tabs, carriage returns, multi-byte and malformed UTF-8, to
+documents of 600 to 1,500 bytes at six widths including one glyph per line,
+and compares every result with a full build; it also requires the partial path
+whenever both layouts are under the cap and the full path otherwise. A list of
+45 hand-written transitions covers empty texts, trailing newlines added and
+removed, paragraphs merged and split, and `\r\n`. Eight deliberately broken
+relayouts (each boundary comparison off by one, no widening to the paragraph
+start or end, unshifted line ends, a dropped soft-wrap flag, a suffix allowed
+to overlap the prefix, and a missing cap guard) all fail the test.
+
+| Measure | Before | After |
+| --- | ---: | ---: |
+| device-free suite, `textarea_edit`, Inter | 90.98 us | 2.28 us |
+| device-free suite, `textarea_edit`, 4,096-glyph mixed UTF-8 | 253.66 us | 2.83 us |
+| widget per keystroke, 8 KiB notes, tight loop | 112 us | 3.3 us |
+| widget per keystroke, 15 KiB | 210 us | 5.2 us |
+| showcase edit scenario, UI build on keystroke frames | 330 us | 114 us |
+| showcase edit scenario, UI build on other frames | 89 us | 86 us |
+
+The suite's `textarea_edit` case is new: one keystroke per frame, alternately
+inserting a character and deleting it, in a cached 8 KiB document of one label
+per line. Its other cases are unchanged within noise; the dynamic-label case on
+the synthetic font moved 7.5 percent, in code this change does not touch. The
+showcase figures are medians of three alternating rounds under Immediate
+presentation. There the widget itself takes 38 us on a keystroke frame and
+14 us on other frames, several times its tight-loop cost, because the demo
+runs it cold and between GPU waits at lower clocks; the old wrap likewise took
+240 us there against 110 us in a loop. What remains per keystroke is mostly
+memory traffic proportional to the document: the prefix and suffix scans and
+the copy of the text and lines into the cache. Relayout in place in the cache
+would roughly halve that traffic and is left for later.
+
 ## Measured effect of the changes
 
 Extended CPU suite, `benchmarks/run.py compare`, five alternating process
@@ -620,10 +674,11 @@ hidden tab.
    in rg_text is still a binary search (3 to 4x slower than the table on the
    4,096-glyph benchmark font). Raising the slot counts is the remaining knob
    for very large fonts.
-2. **Text-area relayout on edit.** Each keystroke re-wraps the whole document.
-   At the current 1,024-visual-line cap that is 100-200 us for 8 KiB of ASCII,
-   acceptable, but a paragraph-local relayout would make it independent of
-   document size if the cap is ever raised.
+2. **Text-area relayout on edit.** Done on 2026-10-24 (change 10): a
+   keystroke wraps only its own paragraphs, 3 us instead of 110 us in an 8 KiB
+   document. The remaining per-keystroke cost is the memory traffic of
+   comparing the text with the snapshot and copying text and lines into the
+   cache; relayout in place would about halve it, a few microseconds.
 ## Verified and left alone
 
 - Text length in the draw command, tried on 2026-10-23 and not adopted.

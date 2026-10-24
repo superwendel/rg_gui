@@ -61,6 +61,80 @@ static void text_area_cache_local_invalidation(RgGuiContext* ctx,RgGuiTextAreaLa
     const u32 count=rg_gui_text_area_build_visual_lines(ctx,text,length,24,expected,RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
     TEXT_AREA_CACHE_CHECK(layout.count==count);text_area_cache_equal_lines(layout.lines,expected,count);
 }
+static u32 text_area_cache_random(u32* seed) { *seed=*seed*1664525u+1013904223u; return *seed>>8; }
+static size_t text_area_cache_random_bytes(u32* seed,char* out,size_t count)
+{
+    static const char* pieces[]={"A","A","A","B","B"," "," ","\n","\t","\r","\xc3\xa9","\xf0","Z","AB ","BA\n"};
+    size_t used=0;
+    while(used<count) {
+        const char* piece=pieces[text_area_cache_random(seed)%15u];size_t n=strlen(piece);
+        if(used+n>count) { n=count-used; }
+        memcpy(out+used,piece,n);used+=n;
+    }
+    return used;
+}
+/* One edit under an unchanged key: the lines a full build gives, through the
+ * paragraph-local path when neither layout is at the line cap, else a rebuild. */
+static void text_area_cache_edit_step(RgGuiContext* ctx,RgGuiTextAreaLayoutCache* cache,const char* previous,const char* text,u32 version,f32 width)
+{
+    const u32 old_count=cache->count;const u64 hits=cache->hits,relayouts=cache->relayouts,rebuilds=cache->rebuilds;
+    TEXT_AREA_CACHE_CHECK(text_area_cache_parity(ctx,cache,text,version,width));
+    if(!strcmp(previous,text)) { TEXT_AREA_CACHE_CHECK(cache->hits==hits+1&&cache->relayouts==relayouts&&cache->rebuilds==rebuilds); return; }
+    const int local=old_count<RG_GUI_TEXT_AREA_VISUAL_LINE_MAX&&cache->count<RG_GUI_TEXT_AREA_VISUAL_LINE_MAX;
+    TEXT_AREA_CACHE_CHECK(cache->relayouts==relayouts+(local?1u:0u));
+    TEXT_AREA_CACHE_CHECK(cache->rebuilds==rebuilds+(local?0u:1u));
+}
+static void text_area_cache_relayout_edges(RgGuiContext* ctx,RgGuiTextAreaLayoutCache* cache)
+{
+    /* Empty and single-byte texts, newlines added, removed, doubled, and split
+     * from \r, edits at both ends, same-length replacements, paragraphs merged
+     * and split, soft-wrapped paragraphs, and whole-text replacement. */
+    static const char* steps[]={"","A","","A","A\n","A\n\n","A\n","A","AB\nAB","AB\n\nAB","AB\nAB","ABZ\nAB","AB\n\nAB","AB\n\nAB\n","B\n\nAB\n",
+        "ABB\nBAA","","AAAA","AAAAA","AAAA","\n\n\n","\n\n","\n","","A\r\nB","A\nB","A B","A  B","A B A B A B A B","A B A B A B A B\n",
+        "A B A B A B A B\nB","B A B A B A B A\nB","B A B A B A B A\nB\n","AB","AB\n\n","AB\n\n\n","AB","A\nB\nA\nB","A\nB\nA\nB\n","B\nA\nB",
+        "B\tA\tB","B \xc3\xa9 A \xf0 B","B \xc3\xa9 A \xf0 B\n\xc3\xa9","\xa9 A \xf0 B\n\xc3\xa9",NULL};
+    rg_gui_text_area_cache_init(cache,cache->text,cache->text_capacity,cache->lines,cache->line_capacity);
+    TEXT_AREA_CACHE_CHECK(text_area_cache_parity(ctx,cache,steps[0],1,24)&&cache->rebuilds==1);
+    for(unsigned i=1;steps[i];i++) text_area_cache_edit_step(ctx,cache,steps[i-1],steps[i],i+1,24);
+    TEXT_AREA_CACHE_CHECK(cache->rebuilds==1);
+}
+static void text_area_cache_relayout_oracle(RgGuiContext* ctx,RgGuiTextAreaLayoutCache* cache)
+{
+    static char doc[4096],previous[4096],insert[64];
+    static const f32 widths[]={0.0f,7.0f,19.0f,24.0f,40.0f,1200.0f};
+    u32 seed=7u;u64 at_cap=0,relayouts=0;
+    for(unsigned w=0;w<6;w++) {
+        const f32 width=widths[w];
+        rg_gui_text_area_cache_init(cache,cache->text,cache->text_capacity,cache->lines,cache->line_capacity);
+        /* One glyph per line at widths 0 and 7: the first stays past the line
+         * cap, the second crosses it back and forth as edits land. */
+        const size_t target=w==0?1300u+text_area_cache_random(&seed)%200u:w==1?1380u+text_area_cache_random(&seed)%60u:600u+text_area_cache_random(&seed)%900u;
+        size_t length=text_area_cache_random_bytes(&seed,doc,target);doc[length]=0;
+        TEXT_AREA_CACHE_CHECK(text_area_cache_parity(ctx,cache,doc,1,width)&&cache->rebuilds==1);
+        for(unsigned step=0;step<500;step++) {
+            memcpy(previous,doc,length+1);
+            /* Insertions and deletions balance so the length drifts, not sinks. */
+            u32 op=text_area_cache_random(&seed)%100u;
+            if(length<target-150u)op=0u; else if(length>target+150u)op=50u;
+            size_t at=length?text_area_cache_random(&seed)%(length+1u):0u,remove=0,add=0;
+            if(op<45u)add=1u+text_area_cache_random(&seed)%24u;
+            else if(op<80u)remove=1u+text_area_cache_random(&seed)%32u;
+            else if(op<95u){remove=1u+text_area_cache_random(&seed)%20u;add=1u+text_area_cache_random(&seed)%20u;}
+            if(remove>length-at)remove=length-at;
+            if(length-remove+add>=sizeof(doc)-1u)add=0;
+            text_area_cache_random_bytes(&seed,insert,add);
+            memmove(doc+at+add,doc+at+remove,length-at-remove);memcpy(doc+at,insert,add);
+            length=length-remove+add;doc[length]=0;
+            const u64 rebuilds=cache->rebuilds;
+            text_area_cache_edit_step(ctx,cache,previous,doc,step+2u,width);
+            at_cap+=cache->rebuilds-rebuilds;
+        }
+        relayouts+=cache->relayouts;
+    }
+    /* Both paths ran often. */
+    if(relayouts<=1500||at_cap<=400) fprintf(stderr,"oracle relayouts=%llu at_cap=%llu\n",(unsigned long long)relayouts,(unsigned long long)at_cap);
+    TEXT_AREA_CACHE_CHECK(relayouts>1500&&at_cap>400);
+}
 static void text_area_cache_alias_checks(RgGuiContext* ctx,char* text)
 {
     RgGuiTextAreaVisualLine storage[RG_GUI_TEXT_AREA_VISUAL_LINE_MAX];
@@ -237,7 +311,7 @@ static int test_text_area_cache(void)
     TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,text,1,24)&&cache.rebuilds==1&&cache.hits==0);
     TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,text,1,24)&&cache.hits==1);
     /* Same pointer, same length, same version: external bytes still invalidate. */
-    text[0]=' ';TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,text,1,24)&&cache.rebuilds==2);
+    text[0]=' ';TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,text,1,24)&&cache.rebuilds==1&&cache.relayouts==1);
     TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,text,0,24)&&cache.hits==2);
     strcpy(text,"ABA ABA\nB A\n");TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,text,2,24));
     strcpy(text,"AAB ABB AAB\nABBA\n");TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,text,3,24));
@@ -266,7 +340,7 @@ static int test_text_area_cache(void)
     }
     /* IME display text may come from a reused frame buffer: compare its bytes. */
     strcpy(text,"AB preedit A\nB");TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,text,7,24));
-    text[3]='X';before=cache.rebuilds;TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,text,7,24)&&cache.rebuilds==before+1);
+    text[3]='X';before=cache.relayouts;TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,text,7,24)&&cache.relayouts==before+1);
     strcpy(text,"AB A\nB");TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,text,7,24));
     strcpy(text,"AAB ABB AAB\nABBA\n");text_area_cache_local_invalidation(&ctx,&cache,text);
     rg_gui_text_area_cache_init(&cache,snapshot,4,storage,RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
@@ -285,10 +359,15 @@ static int test_text_area_cache(void)
     rg_gui_text_area_cache_init(&cache,snapshot,sizeof(snapshot),storage,RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
     TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,long_text,0,1200));
     before=cache.hits;TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,long_text,0,1200)&&cache.hits==before+1);
-    long_text[4096]=' ';before=cache.rebuilds;
-    TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,long_text,0,1200)&&cache.rebuilds==before+1);
-    memset(long_text,'\n',2048);long_text[2048]='\0';
-    TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,long_text,0,24)&&cache.count==RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
+    long_text[4096]=' ';before=cache.relayouts;
+    TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,long_text,0,1200)&&cache.relayouts==before+1);
+    memset(long_text,'\n',2048);long_text[2048]='\0';before=cache.rebuilds;
+    TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,long_text,0,24)&&cache.count==RG_GUI_TEXT_AREA_VISUAL_LINE_MAX&&cache.rebuilds==before+1);
+    /* A layout at the cap may be cut short, so edits to it rebuild. */
+    long_text[5]='A';before=cache.rebuilds;
+    TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,long_text,0,24)&&cache.rebuilds==before+1);
+    text_area_cache_relayout_edges(&ctx,&cache);
+    text_area_cache_relayout_oracle(&ctx,&cache);
     /* Independent editor caches cannot overwrite one another's line metadata. */
     RgGuiTextAreaLayoutCache other;char other_text[256];RgGuiTextAreaVisualLine other_lines[128];
     rg_gui_text_area_cache_init(&cache,snapshot,sizeof(snapshot),storage,RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);

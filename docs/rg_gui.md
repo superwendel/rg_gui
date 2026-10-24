@@ -697,6 +697,15 @@ are no cache allocations inside the widget; the example reserves about 40 KiB
 on a 64-bit build. A missing or undersized cache uses the normal layout path
 without reducing its line capacity.
 
+When the text changes under the same font, scale, and width, only the
+paragraphs between the first and last changed bytes are wrapped again: a
+paragraph's wrapping depends on nothing but its own bytes, so earlier lines are
+kept and later lines move by the length change. A keystroke therefore costs a
+few microseconds whatever the document size. `hits`, `relayouts`, and `rebuilds`
+count the frames that reused the layout, re-wrapped the edited paragraphs, or
+rebuilt everything (after a key change, an invalidation, or when either layout
+reached `RG_GUI_TEXT_AREA_VISUAL_LINE_MAX`, where a layout may be cut short).
+
 Use separate, suitably aligned storage for each live editor. The cache object,
 snapshot bytes, line descriptors, mutable input buffer, and GUI frame-text arena
 must not overlap. Reinitialize or replace storage only between widget calls.

@@ -46,6 +46,12 @@ between 0.x releases.
 
 ### Changed
 
+- An edit in a text area with a layout cache wraps only the paragraphs it
+  touched; lines before them are kept and lines after them move by the length
+  change. A keystroke in an 8 KiB document costs about 3 us instead of a 110 us
+  re-wrap, and no longer grows with the document. `RgGuiTextAreaLayoutCache`
+  gains a `relayouts` counter for these; `rebuilds` now counts only complete
+  re-wraps, after key changes, invalidation, or layouts at the line cap.
 - Draw commands are 56 bytes instead of 80. The color is stored once, packed as
   the GPU reads it, outside the payload union, and copied text records its byte
   length, so preparation no longer packs colors or measures copied text. With

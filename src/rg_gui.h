@@ -8755,6 +8755,7 @@ typedef struct RgGuiTextAreaLayoutCache
     RgGuiTextAreaCacheKey key;
     u64 epoch;
     u64 hits, rebuilds, bypasses;
+    u64 relayouts; /* Edits that wrapped only their own paragraphs again. */
 } RgGuiTextAreaLayoutCache;
 
 RGINLINE void rg_gui_text_area_cache_init(RgGuiTextAreaLayoutCache* cache,
@@ -8851,6 +8852,71 @@ RGINLINE int rg_gui_text_area_cache_storage_usable(const RgGuiContext* ctx,
            !rg_gui_text_area_cache_overlaps(cache->lines, line_bytes, ctx->text_buffer, ctx->text_buffer_capacity);
 }
 
+/* Wrap again only the paragraphs an edit touched. The cache holds the previous
+ * text with its complete layout for the same key, and a paragraph's wrapping
+ * depends on nothing but its own bytes. Lines of paragraphs before the first
+ * changed byte are kept, lines of paragraphs after the last changed byte are
+ * kept and moved by the length change, and the paragraphs between are wrapped
+ * afresh. Returns 0 when either layout may be cut short at the line cap, and
+ * the caller builds everything. */
+static RG_NOINLINE u32 rg_gui_text_area_relayout(const RgGuiContext* ctx,
+                                                 const RgGuiTextAreaLayoutCache* cache,
+                                                 const char* buffer, size_t length,
+                                                 f32 wrap_width,
+                                                 RgGuiTextAreaVisualLine* lines, u32 capacity)
+{
+    const char* old = cache->text;
+    const size_t old_length = cache->length;
+    const RgGuiTextAreaVisualLine* old_lines = cache->lines;
+    const u32 old_count = cache->count;
+    if (!buffer || old_count == 0u || old_count >= capacity) return 0u;
+
+    const size_t shared = old_length < length ? old_length : length;
+    size_t prefix = 0u;
+    while (prefix + 64u <= shared && !memcmp(old + prefix, buffer + prefix, 64u)) prefix += 64u;
+    while (prefix < shared && old[prefix] == buffer[prefix]) prefix++;
+    size_t suffix = 0u;
+    while (suffix + 64u <= shared - prefix &&
+           !memcmp(old + old_length - suffix - 64u, buffer + length - suffix - 64u, 64u)) suffix += 64u;
+    while (suffix < shared - prefix && old[old_length - 1u - suffix] == buffer[length - 1u - suffix]) suffix++;
+
+    /* The changed paragraphs run from the newline before the first changed
+     * byte to the newline at or after the last one. Both texts share every
+     * byte outside the change, so that end sits at the same distance from
+     * both texts' ends. */
+    size_t para_start = prefix;
+    while (para_start > 0u && buffer[para_start - 1u] != '\n') para_start--;
+    size_t old_end = old_length - suffix;
+    while (old_end < old_length && old[old_end] != '\n') old_end++;
+    const size_t new_end = length - (old_length - old_end);
+
+    u32 front = 0u;
+    while (front < old_count && old_lines[front].end < para_start) front++;
+    u32 back = old_count;
+    while (back > front && old_lines[back - 1u].start > old_end) back--;
+    const u32 back_count = old_count - back;
+
+    memcpy(lines, old_lines, sizeof(*lines) * front);
+    const u32 middle_capacity = capacity - front;
+    const u32 middle = rg_gui_text_area_build_visual_lines(
+        ctx, buffer + para_start, new_end - para_start, wrap_width, lines + front, middle_capacity);
+    if (middle >= middle_capacity || back_count > middle_capacity - middle) return 0u;
+    for (u32 i = front; i < front + middle; i++)
+    {
+        lines[i].start += para_start;
+        lines[i].end += para_start;
+    }
+    for (u32 i = 0u; i < back_count; i++)
+    {
+        const RgGuiTextAreaVisualLine* line = &old_lines[back + i];
+        RgGuiTextAreaVisualLine* moved = &lines[front + middle + i];
+        moved->start = length - (old_length - line->start);
+        moved->end = length - (old_length - line->end);
+        moved->soft_wrap_after = line->soft_wrap_after;
+    }
+    return front + middle + back_count;
+}
+
 RGINLINE u32 rg_gui_text_area_ensure_layout(const RgGuiContext* ctx,
                                             RgGuiTextAreaLayout* layout,
                                             const char* buffer, size_t length,
@@ -8875,9 +8941,21 @@ RGINLINE u32 rg_gui_text_area_ensure_layout(const RgGuiContext* ctx,
         else
         {
             layout->lines = layout->scratch_lines;
-            layout->count = rg_gui_text_area_build_visual_lines(
-                ctx, buffer, length, wrap_width, layout->lines, RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
-            if (cache) ++cache->rebuilds;
+            u32 count = 0u;
+            if (fits && cache->valid && cache->count <= cache->line_capacity &&
+                !memcmp(&cache->key, &key, sizeof(key)))
+            {
+                count = rg_gui_text_area_relayout(ctx, cache, buffer, length, wrap_width,
+                                                  layout->lines, RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
+                if (count) ++cache->relayouts;
+            }
+            if (!count)
+            {
+                count = rg_gui_text_area_build_visual_lines(
+                    ctx, buffer, length, wrap_width, layout->lines, RG_GUI_TEXT_AREA_VISUAL_LINE_MAX);
+                if (cache) ++cache->rebuilds;
+            }
+            layout->count = count;
             if (fits && layout->count <= cache->line_capacity)
             {
                 if (length) memcpy(cache->text, buffer, length);
