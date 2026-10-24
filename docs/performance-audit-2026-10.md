@@ -362,26 +362,41 @@ depends on nothing but its own bytes, and `rg_gui_text_area_build_visual_lines`
 itself wraps the changed region, so pieces, soft-wrap flags, and empty-line
 rules are the ones a full build applies. When either layout reached the
 1,024-line cap, where a layout may be cut short, the full build runs as before.
-A `relayouts` counter records the partial path; `rebuilds` now counts only
-full builds.
+The prefix and suffix are compared 64 bytes at a time, the paragraph bounds
+come from `memchr` after a short byte-by-byte look-back, and the kept lines
+are found by bisection, so the fixed cost is under a microsecond for 8 KiB. A
+`relayouts` counter records the partial path; `rebuilds` now counts only full
+builds.
+
+The saving is the wrapping of the untouched paragraphs. A document that is one
+long paragraph still wraps in full on every keystroke, plus about 1.5 us for
+the comparison and bookkeeping: alternating old and new builds three times on
+an 8 KiB paragraph gave 115 to 117 us for both. What remains for ordinary text
+is the wrap of the edited paragraph and a memory pass over the document, so
+the cost still grows slowly with size: 3.0 us at 8 KiB and 4.5 us at 15 KiB.
 
 An oracle test applies 3,000 random insertions, deletions, and replacements,
 with newlines, tabs, carriage returns, multi-byte and malformed UTF-8, to
-documents of 600 to 1,500 bytes at six widths including one glyph per line,
-and compares every result with a full build; it also requires the partial path
-whenever both layouts are under the cap and the full path otherwise. A list of
-45 hand-written transitions covers empty texts, trailing newlines added and
-removed, paragraphs merged and split, and `\r\n`. Eight deliberately broken
+documents of 600 to 1,500 bytes at six widths including one glyph per line and
+one pass of 700-byte paragraphs, and compares every result with a full build;
+it also requires the partial path whenever both layouts are under the cap, the
+full path when the old one is at it, and exactly one of them when the result
+lands on the cap (a relayout proceeds there only when it can tell the layout
+is complete). A list of 45 hand-written transitions covers empty texts,
+trailing newlines added and removed, paragraphs merged and split, and `\r\n`,
+and the paragraph-start search is checked against a plain scan at every
+position of texts with no, dense, and sparse newlines. Ten deliberately broken
 relayouts (each boundary comparison off by one, no widening to the paragraph
 start or end, unshifted line ends, a dropped soft-wrap flag, a suffix allowed
-to overlap the prefix, and a missing cap guard) all fail the test.
+to overlap the prefix, a missing cap guard, and two mistakes in the chunked
+paragraph-start search) all fail the test.
 
 | Measure | Before | After |
 | --- | ---: | ---: |
-| device-free suite, `textarea_edit`, Inter | 90.98 us | 2.28 us |
-| device-free suite, `textarea_edit`, 4,096-glyph mixed UTF-8 | 253.66 us | 2.83 us |
-| widget per keystroke, 8 KiB notes, tight loop | 112 us | 3.3 us |
-| widget per keystroke, 15 KiB | 210 us | 5.2 us |
+| device-free suite, `textarea_edit`, Inter | 91.03 us | 2.08 us |
+| device-free suite, `textarea_edit`, 4,096-glyph mixed UTF-8 | 253.45 us | 2.71 us |
+| widget per keystroke, 8 KiB notes, tight loop | 112 us | 3.0 us |
+| widget per keystroke, 15 KiB | 210 us | 4.5 us |
 | showcase edit scenario, UI build on keystroke frames | 330 us | 114 us |
 | showcase edit scenario, UI build on other frames | 89 us | 86 us |
 
@@ -391,12 +406,14 @@ per line. Its other cases are unchanged within noise; the dynamic-label case on
 the synthetic font moved 7.5 percent, in code this change does not touch. The
 showcase figures are medians of three alternating rounds under Immediate
 presentation. There the widget itself takes 38 us on a keystroke frame and
-14 us on other frames, several times its tight-loop cost, because the demo
-runs it cold and between GPU waits at lower clocks; the old wrap likewise took
-240 us there against 110 us in a loop. What remains per keystroke is mostly
-memory traffic proportional to the document: the prefix and suffix scans and
-the copy of the text and lines into the cache. Relayout in place in the cache
-would roughly halve that traffic and is left for later.
+14 us on other frames, several times its tight-loop cost. Sampling
+`/proc/cpuinfo` every 50 ms during the runs put the busiest core at a median
+1.27 GHz under the demo, which waits on the GPU most of each frame, and at
+3.40 GHz under the tight loop; the old wrap was inflated the same way, 240 us
+there against 110 us in a loop. What remains per keystroke is mostly memory
+traffic proportional to the document: the prefix and suffix comparison and the
+copy of the text and lines into the cache. Relayout in place in the cache would
+roughly halve that traffic and is left for later.
 
 ## Measured effect of the changes
 
@@ -676,9 +693,10 @@ hidden tab.
    for very large fonts.
 2. **Text-area relayout on edit.** Done on 2026-10-24 (change 10): a
    keystroke wraps only its own paragraphs, 3 us instead of 110 us in an 8 KiB
-   document. The remaining per-keystroke cost is the memory traffic of
-   comparing the text with the snapshot and copying text and lines into the
-   cache; relayout in place would about halve it, a few microseconds.
+   document of short paragraphs. A single long paragraph still wraps in full.
+   The remaining per-keystroke cost is the memory traffic of comparing the
+   text with the snapshot and copying text and lines into the cache; relayout
+   in place would about halve it, a microsecond or two.
 ## Verified and left alone
 
 - Text length in the draw command, tried on 2026-10-23 and not adopted.

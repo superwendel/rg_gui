@@ -74,15 +74,18 @@ static size_t text_area_cache_random_bytes(u32* seed,char* out,size_t count)
     return used;
 }
 /* One edit under an unchanged key: the lines a full build gives, through the
- * paragraph-local path when neither layout is at the line cap, else a rebuild. */
+ * paragraph-local path when neither layout is at the line cap, a rebuild when
+ * the old one is, and either when the new one lands exactly on the cap, where
+ * the relayout proceeds only if it can tell the layout is complete. */
 static void text_area_cache_edit_step(RgGuiContext* ctx,RgGuiTextAreaLayoutCache* cache,const char* previous,const char* text,u32 version,f32 width)
 {
     const u32 old_count=cache->count;const u64 hits=cache->hits,relayouts=cache->relayouts,rebuilds=cache->rebuilds;
     TEXT_AREA_CACHE_CHECK(text_area_cache_parity(ctx,cache,text,version,width));
     if(!strcmp(previous,text)) { TEXT_AREA_CACHE_CHECK(cache->hits==hits+1&&cache->relayouts==relayouts&&cache->rebuilds==rebuilds); return; }
-    const int local=old_count<RG_GUI_TEXT_AREA_VISUAL_LINE_MAX&&cache->count<RG_GUI_TEXT_AREA_VISUAL_LINE_MAX;
-    TEXT_AREA_CACHE_CHECK(cache->relayouts==relayouts+(local?1u:0u));
-    TEXT_AREA_CACHE_CHECK(cache->rebuilds==rebuilds+(local?0u:1u));
+    const u64 taken=(cache->relayouts-relayouts)+(cache->rebuilds-rebuilds);
+    TEXT_AREA_CACHE_CHECK(taken==1);
+    if(old_count>=RG_GUI_TEXT_AREA_VISUAL_LINE_MAX) TEXT_AREA_CACHE_CHECK(cache->rebuilds==rebuilds+1);
+    else if(cache->count<RG_GUI_TEXT_AREA_VISUAL_LINE_MAX) TEXT_AREA_CACHE_CHECK(cache->relayouts==relayouts+1);
 }
 static void text_area_cache_relayout_edges(RgGuiContext* ctx,RgGuiTextAreaLayoutCache* cache)
 {
@@ -98,6 +101,20 @@ static void text_area_cache_relayout_edges(RgGuiContext* ctx,RgGuiTextAreaLayout
     for(unsigned i=1;steps[i];i++) text_area_cache_edit_step(ctx,cache,steps[i-1],steps[i],i+1,24);
     TEXT_AREA_CACHE_CHECK(cache->rebuilds==1);
 }
+/* The paragraph-start helper against a plain backward scan at every position
+ * of texts with no, dense, and sparse newlines; sparse ones reach its chunks. */
+static void text_area_cache_paragraph_start_oracle(void)
+{
+    static char text[2048];u32 seed=11u;
+    for(unsigned density=0;density<5;density++) {
+        const u32 every=density==0?0u:density==1?3u:density==2?40u:density==3?100u:700u;
+        for(size_t i=0;i<sizeof(text);i++) text[i]=every&&text_area_cache_random(&seed)%every==0?'\n':'A';
+        for(size_t position=0;position<=sizeof(text);position++) {
+            size_t expected=position;while(expected>0&&text[expected-1]!='\n')expected--;
+            TEXT_AREA_CACHE_CHECK(rg_gui_text_area_paragraph_start(text,position)==expected);
+        }
+    }
+}
 static void text_area_cache_relayout_oracle(RgGuiContext* ctx,RgGuiTextAreaLayoutCache* cache)
 {
     static char doc[4096],previous[4096],insert[64];
@@ -110,6 +127,10 @@ static void text_area_cache_relayout_oracle(RgGuiContext* ctx,RgGuiTextAreaLayou
          * cap, the second crosses it back and forth as edits land. */
         const size_t target=w==0?1300u+text_area_cache_random(&seed)%200u:w==1?1380u+text_area_cache_random(&seed)%60u:600u+text_area_cache_random(&seed)%900u;
         size_t length=text_area_cache_random_bytes(&seed,doc,target);doc[length]=0;
+        /* The widest pass keeps paragraphs about 700 bytes long, so finding a
+         * paragraph start reaches past the byte-by-byte look-back. */
+        const int long_paragraphs=w==5;
+        if(long_paragraphs) { for(size_t i=0;i<length;i++) if(doc[i]=='\n') doc[i]=' '; for(size_t i=699;i<length;i+=700) doc[i]='\n'; }
         TEXT_AREA_CACHE_CHECK(text_area_cache_parity(ctx,cache,doc,1,width)&&cache->rebuilds==1);
         for(unsigned step=0;step<500;step++) {
             memcpy(previous,doc,length+1);
@@ -123,6 +144,7 @@ static void text_area_cache_relayout_oracle(RgGuiContext* ctx,RgGuiTextAreaLayou
             if(remove>length-at)remove=length-at;
             if(length-remove+add>=sizeof(doc)-1u)add=0;
             text_area_cache_random_bytes(&seed,insert,add);
+            if(long_paragraphs) for(size_t i=0;i<add;i++) if(insert[i]=='\n') insert[i]=' ';
             memmove(doc+at+add,doc+at+remove,length-at-remove);memcpy(doc+at,insert,add);
             length=length-remove+add;doc[length]=0;
             const u64 rebuilds=cache->rebuilds;
@@ -366,7 +388,22 @@ static int test_text_area_cache(void)
     /* A layout at the cap may be cut short, so edits to it rebuild. */
     long_text[5]='A';before=cache.rebuilds;
     TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,long_text,0,24)&&cache.rebuilds==before+1);
+    /* Edits whose result lands exactly on the cap: a line added in front of
+     * 1,023 lines keeps 1,022 of them and relayouts to a complete 1,024; a
+     * newline appended to 1,023 empty lines fills the wrapped region's
+     * capacity instead, so it cannot tell the result is complete and rebuilds. */
+    for(unsigned i=0;i<1022;i++){long_text[2*i]='A';long_text[2*i+1]='\n';}long_text[2044]='\0';
+    TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,long_text,0,24)&&cache.count==RG_GUI_TEXT_AREA_VISUAL_LINE_MAX-1u);
+    memmove(long_text+2,long_text,2045);long_text[0]='B';long_text[1]='\n';before=cache.relayouts;
+    text_area_cache_edit_step(&ctx,&cache,long_text+2,long_text,0,24);
+    TEXT_AREA_CACHE_CHECK(cache.count==RG_GUI_TEXT_AREA_VISUAL_LINE_MAX&&cache.relayouts==before+1);
+    memset(long_text,'\n',1022);long_text[1022]='\0';
+    TEXT_AREA_CACHE_CHECK(text_area_cache_parity(&ctx,&cache,long_text,0,24)&&cache.count==RG_GUI_TEXT_AREA_VISUAL_LINE_MAX-1u);
+    long_text[1022]='\n';long_text[1023]='\0';before=cache.rebuilds;
+    text_area_cache_edit_step(&ctx,&cache,"",long_text,0,24);
+    TEXT_AREA_CACHE_CHECK(cache.count==RG_GUI_TEXT_AREA_VISUAL_LINE_MAX&&cache.rebuilds==before+1);
     text_area_cache_relayout_edges(&ctx,&cache);
+    text_area_cache_paragraph_start_oracle();
     text_area_cache_relayout_oracle(&ctx,&cache);
     /* Independent editor caches cannot overwrite one another's line metadata. */
     RgGuiTextAreaLayoutCache other;char other_text[256];RgGuiTextAreaVisualLine other_lines[128];

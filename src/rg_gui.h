@@ -8852,6 +8852,35 @@ RGINLINE int rg_gui_text_area_cache_storage_usable(const RgGuiContext* ctx,
            !rg_gui_text_area_cache_overlaps(cache->lines, line_bytes, ctx->text_buffer, ctx->text_buffer_capacity);
 }
 
+/* The paragraph holding `position` starts after the last newline before it.
+ * Paragraphs are usually short, so look back a little byte by byte before
+ * switching to memchr over chunks. */
+RGINLINE size_t rg_gui_text_area_paragraph_start(const char* text, size_t position)
+{
+    size_t p = position;
+    const size_t stop = position > 64u ? position - 64u : 0u;
+    while (p > stop)
+    {
+        if (text[p - 1u] == '\n') return p;
+        p--;
+    }
+    while (p > 0u)
+    {
+        const size_t chunk = p > 256u ? 256u : p;
+        const char* begin = text + p - chunk;
+        const char* found = (const char*)memchr(begin, '\n', chunk);
+        if (found)
+        {
+            const char* end = begin + chunk;
+            const char* next;
+            while ((next = (const char*)memchr(found + 1, '\n', (size_t)(end - found - 1))) != NULL) found = next;
+            return (size_t)(found - text) + 1u;
+        }
+        p -= chunk;
+    }
+    return 0u;
+}
+
 /* Wrap again only the paragraphs an edit touched. The cache holds the previous
  * text with its complete layout for the same key, and a paragraph's wrapping
  * depends on nothing but its own bytes. Lines of paragraphs before the first
@@ -8884,16 +8913,28 @@ static RG_NOINLINE u32 rg_gui_text_area_relayout(const RgGuiContext* ctx,
      * byte to the newline at or after the last one. Both texts share every
      * byte outside the change, so that end sits at the same distance from
      * both texts' ends. */
-    size_t para_start = prefix;
-    while (para_start > 0u && buffer[para_start - 1u] != '\n') para_start--;
-    size_t old_end = old_length - suffix;
-    while (old_end < old_length && old[old_end] != '\n') old_end++;
+    const size_t para_start = rg_gui_text_area_paragraph_start(buffer, prefix);
+    const char* newline = (const char*)memchr(old + old_length - suffix, '\n', suffix);
+    const size_t old_end = newline ? (size_t)(newline - old) : old_length;
     const size_t new_end = length - (old_length - old_end);
 
+    /* Lines are in text order, so starts and ends never decrease: bisect to
+     * the first line that reaches the first changed paragraph, and to the
+     * first line that begins after the last one. */
     u32 front = 0u;
-    while (front < old_count && old_lines[front].end < para_start) front++;
-    u32 back = old_count;
-    while (back > front && old_lines[back - 1u].start > old_end) back--;
+    for (u32 high = old_count; front < high;)
+    {
+        const u32 middle = front + (high - front) / 2u;
+        if (old_lines[middle].end < para_start) front = middle + 1u;
+        else high = middle;
+    }
+    u32 back = front;
+    for (u32 high = old_count; back < high;)
+    {
+        const u32 middle = back + (high - back) / 2u;
+        if (old_lines[middle].start > old_end) high = middle;
+        else back = middle + 1u;
+    }
     const u32 back_count = old_count - back;
 
     memcpy(lines, old_lines, sizeof(*lines) * front);
@@ -8901,7 +8942,7 @@ static RG_NOINLINE u32 rg_gui_text_area_relayout(const RgGuiContext* ctx,
     const u32 middle = rg_gui_text_area_build_visual_lines(
         ctx, buffer + para_start, new_end - para_start, wrap_width, lines + front, middle_capacity);
     if (middle >= middle_capacity || back_count > middle_capacity - middle) return 0u;
-    for (u32 i = front; i < front + middle; i++)
+    for (u32 i = front; para_start && i < front + middle; i++)
     {
         lines[i].start += para_start;
         lines[i].end += para_start;

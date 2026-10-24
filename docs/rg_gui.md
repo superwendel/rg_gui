@@ -700,8 +700,11 @@ without reducing its line capacity.
 When the text changes under the same font, scale, and width, only the
 paragraphs between the first and last changed bytes are wrapped again: a
 paragraph's wrapping depends on nothing but its own bytes, so earlier lines are
-kept and later lines move by the length change. A keystroke therefore costs a
-few microseconds whatever the document size. `hits`, `relayouts`, and `rebuilds`
+kept and later lines move by the length change. A keystroke costs the wrapping
+of its own paragraphs plus one pass over the document's bytes to find the
+change and refresh the snapshot: a few microseconds in an 8 KiB document of
+short paragraphs, but a document that is one long paragraph still wraps in
+full. `hits`, `relayouts`, and `rebuilds`
 count the frames that reused the layout, re-wrapped the edited paragraphs, or
 rebuilt everything (after a key change, an invalidation, or when either layout
 reached `RG_GUI_TEXT_AREA_VISUAL_LINE_MAX`, where a layout may be cut short).
