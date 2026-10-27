@@ -938,12 +938,11 @@ static int test_backdrop_lift(void)
 		u32 color = 0u;
 		const int lifted = rg_gui_backdrop_lifted(&gui, &color);
 		const RgGuiDrawList* list = rg_gui_draw_list(&gui);
-		/* The emptied backdrop is either still first or already dropped by the
-		 * culling pass, which makes the list shorter than the kept one. */
-		const int emptied = list->count < keep.draw_list.count ||
-		                    (list->count && list->cmds[0].data.rect.rect.w == 0.0f);
+		/* The lifted backdrop leaves the list at once: the rest follows as pushed. */
+		const int removed = list->count + 1u == keep.draw_list.count &&
+		                    !memcmp(list->cmds, keep.draw_list.cmds + 1, sizeof(RgGuiDrawCmd) * list->count);
 		if (lifted != cases[c].lifted || (lifted && color != keep.draw_list.cmds[0].color) ||
-		    (lifted && !emptied) ||
+		    (lifted && !removed) ||
 		    (!lifted && memcmp(list->cmds, keep.draw_list.cmds, sizeof(RgGuiDrawCmd) * keep.draw_list.count)))
 		{
 			fprintf(stderr, "backdrop lift: case %u lifted %d (expected %d)\n", c, lifted, cases[c].lifted);
@@ -959,7 +958,29 @@ static int test_backdrop_lift(void)
 			goto done;
 		}
 	}
-	printf("Backdrop lift: 7 frames, 2 lifted, pixels identical to the full lists\n");
+	/* Static content lifted every frame must give the same list every frame,
+	 * whether or not the paced culling pass runs, or a signature-based frame
+	 * skip would present needlessly. */
+	static RgGuiDrawCmd first_frame[64];
+	u32 first_count = 0u;
+	for (u32 frame = 0u; frame < 20u; frame++)
+	{
+		lift_test_frame(&gui, &input, 0, &viewport);
+		const RgGuiDrawList* list = rg_gui_draw_list(&gui);
+		if (frame == 0u)
+		{
+			first_count = list->count;
+			memcpy(first_frame, list->cmds, sizeof(RgGuiDrawCmd) * list->count);
+			continue;
+		}
+		if (list->count != first_count || memcmp(first_frame, list->cmds, sizeof(RgGuiDrawCmd) * first_count) ||
+		    gui.overlay_start != first_count)
+		{
+			fprintf(stderr, "backdrop lift: static frame %u differs from frame 0 (%u vs %u commands)\n", frame, list->count, first_count);
+			goto done;
+		}
+	}
+	printf("Backdrop lift: 7 frames, 2 lifted, pixels identical to the full lists; 20 static frames identical\n");
 	passed = 1;
 done:
 	free(memory);

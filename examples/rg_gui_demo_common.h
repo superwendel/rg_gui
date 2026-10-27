@@ -693,11 +693,14 @@ RGINLINE int demo_tile_target_ensure(SDL_GPUDevice* device, DemoTileTarget* targ
 	return 1;
 }
 
-/* Signature and swapchain size of the last presented frame. When a newly
- * prepared frame reproduces both, drawing it again cannot change the window
- * contents, so staging, encoding, drawing, and presenting are skipped. The
- * atlas and image textures used by these demos never change after startup;
- * an application that updates such textures must also reset `valid`. */
+/* Identity and swapchain size of the last presented frame. The identity is
+ * the prepared draw list's signature mixed with the clear color the pass will
+ * use, since a lifted backdrop (rg_gui_lift_backdrop) leaves the list and
+ * changes the clear instead. When a newly prepared frame reproduces both,
+ * drawing it again cannot change the window contents, so staging, encoding,
+ * drawing, and presenting are skipped. The atlas and image textures used by
+ * these demos never change after startup; an application that updates such
+ * textures must also reset `valid`. */
 typedef struct DemoFrameSkip
 {
 	u64 signature;
@@ -707,6 +710,17 @@ typedef struct DemoFrameSkip
 	int enabled;
 	u32 skipped_frames;
 } DemoFrameSkip;
+
+/* The frame identity the skip compares: the draw-list signature and the
+ * effective clear color. */
+RGINLINE u64 demo_frame_identity(u64 signature, SDL_FColor clear)
+{
+	u32 bits[4];
+	memcpy(bits, &clear, sizeof(bits));
+	u64 identity = signature ^ 0x9e3779b97f4a7c15ull;
+	for (u32 i = 0u; i < 4u; i++) identity = (identity ^ bits[i]) * 0x100000001b3ull;
+	return identity;
+}
 
 /* `clear_color` is the lifted backdrop when the frame has one (see
  * rg_gui_lift_backdrop); NULL clears to the demo's default. */
@@ -742,7 +756,8 @@ static int demo_render_draw_list_skippable(SDL_GPUDevice* device, SDL_Window* wi
 		goto done;
 	}
 
-	u64 signature = rg_gui_gpu_frame_signature(gpu);
+	const SDL_FColor effective_clear = clear_color ? *clear_color : (SDL_FColor){DEMO_CLEAR_R, DEMO_CLEAR_G, DEMO_CLEAR_B, 1.0f};
+	u64 signature = demo_frame_identity(rg_gui_gpu_frame_signature(gpu), effective_clear);
 	if (skip && skip->enabled && skip->valid && skip->signature == signature)
 	{
 		int pixel_width = 0;
@@ -827,7 +842,7 @@ static int demo_render_draw_list_skippable(SDL_GPUDevice* device, SDL_Window* wi
 	{
 		SDL_GPUColorTargetInfo target = {0};
 		target.texture = swapchain;
-		target.clear_color = clear_color ? *clear_color : (SDL_FColor){DEMO_CLEAR_R, DEMO_CLEAR_G, DEMO_CLEAR_B, 1.0f};
+		target.clear_color = effective_clear;
 		target.load_op = SDL_GPU_LOADOP_CLEAR;
 		target.store_op = SDL_GPU_STOREOP_STORE;
 		SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(command_buffer, &target, 1u, NULL);

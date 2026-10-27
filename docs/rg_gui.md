@@ -525,17 +525,24 @@ included in `rg_gui_memory_required`.
 
 Most interfaces begin the frame by painting an opaque rectangle over the whole
 window, and most render passes begin by clearing the target. The two paint the
-same pixels. Call `rg_gui_lift_backdrop(&gui, viewport)` before
-`rg_gui_end_frame` with the viewport the list will be drawn into, in list
-coordinates; if the frame's first command is an opaque rectangle covering that
-viewport, `rg_gui_end_frame` empties the rectangle and records its color, and
-`rg_gui_backdrop_lifted(&gui, &color)` returns 1 with the packed color for the
-render pass clear. The request applies to one frame; nothing is lifted without
-it, for a rectangle smaller than the viewport, a translucent one, or any other
-first command. The emptied command stays in the list until the culling pass
-drops it, so tools that read the list see the same command count.
+same pixels. Call `rg_gui_lift_backdrop(&gui, target)` before
+`rg_gui_end_frame` with the whole render target the list will be drawn into,
+in list coordinates; if the frame's first command is an opaque rectangle
+covering that target, `rg_gui_end_frame` removes the rectangle from the list
+and records its color, and `rg_gui_backdrop_lifted(&gui, &color)` returns 1
+with the packed color for the render pass clear. The request applies to one
+frame; nothing is lifted without it, for a rectangle smaller than the target,
+a translucent one, or any other first command. The rectangle leaves the list
+at once rather than waiting for the culling pass, so the list, and a frame
+signature taken from it, is the same on every frame of unchanged content.
 
-Clearing is cheaper than a full-viewport quad on a fill-bound GPU: in the full
+Two rules follow from the clear filling the whole target. The rectangle passed
+must be the entire surface the pass clears, never a smaller viewport, or the
+clear recolors pixels outside it. And a frame skip keyed on the draw-list
+signature must also key on the clear color, as the demos' skip does, because a
+backdrop color change now reaches the target through the clear alone.
+
+Clearing is cheaper than a full-target quad on a fill-bound GPU: in the full
 showcase under Immediate presentation the lift saves about a tenth of the frame.
 Do not lift a frame that repaints only dirty rectangles over a kept target, as
 the demo's tile cache does; there the backdrop must be painted, and the demo

@@ -697,21 +697,22 @@ rotating rounds of 900 frames under Immediate presentation:
 | blending disabled in every pipeline | 1,379 us | 1,161 us | 1,544 us |
 | both | 1,246 us | 1,044 us | 1,526 us |
 
-Disabling blending changed nothing measurable, so opaque rectangles do not pay
-for their destination read on this GPU, and no separate opaque pipeline was
-built. Leaving out the backdrop rectangle saved about a tenth of the idle
+Disabling blending changed nothing measurable in these scenarios on this GPU:
+whatever the destination read costs here is hidden behind the rest of the
+fill, so no separate opaque pipeline was built. That is one GPU and two
+scenarios, not a general result, and a depth-tested opaque pass, which would
+also skip hidden fragments, was not tried. Leaving out the backdrop rectangle saved about a tenth of the idle
 frame, more than its culled remainder (two margin pieces, 0.29 Mpx) would
 suggest at 240 us per megapixel, because the render pass already clears the
 target to the same color: the rectangle was repainting the clear.
 
 The frame's first command is almost always that rectangle, and the render pass
 almost always clears, so the two are now merged. `rg_gui_lift_backdrop(ctx,
-viewport)`, called before `rg_gui_end_frame`, asks the frame to lift its
-backdrop: if the first command is an opaque rectangle covering the viewport
-(in list coordinates), `rg_gui_end_frame` records its color and empties the
-rectangle, and `rg_gui_backdrop_lifted` hands the color to the caller for the
-clear. The emptied command stays in the list, so tools see the same count, and
-the culling pass drops it when it runs. The request is per frame, because the
+target)`, called before `rg_gui_end_frame`, asks the frame to lift its
+backdrop: if the first command is an opaque rectangle covering the whole
+render target (in list coordinates), `rg_gui_end_frame` records its color and
+removes the rectangle from the list, and `rg_gui_backdrop_lifted` hands the
+color to the caller for the clear. The request is per frame, because the
 decision belongs to the render path: the demo's direct path lifts, and its
 tile cache does not, since a dirty rectangle repainted over a kept target
 needs the backdrop painted. Nothing is lifted for a smaller or translucent
@@ -719,6 +720,17 @@ first rectangle or any other first command. A context-level test drives seven
 frames through those cases against a context that does not lift and checks
 that clearing to the lifted color and drawing the rest paints the same pixels
 as the full list.
+
+A review of the first version found three interactions, all fixed before the
+change was pushed. The rectangle must be the entire target the pass clears,
+since the clear recolors everything, so the contract now says so (a lift for
+a sub-viewport changed 3,072 pixels outside it in the reviewer's readback).
+The emptied rectangle had been left in the list for the culling pass to drop,
+which made the list, and the demos' frame signature, alternate on static
+content as the paced pass ran or not; the rectangle now leaves the list at
+once. And the demos' unchanged-frame skip keyed on the draw-list signature
+alone, so a backdrop color change, which now reaches the target through the
+clear, was skipped; the skip identity includes the effective clear color.
 
 With the lift in the demo (`--keep-backdrop` turns it off), four alternating
 rounds of 900 frames:
@@ -732,7 +744,8 @@ rounds of 900 frames:
 | docks (20 panels): frame work | 1,543 us | 1,547 us |
 | docks: render total | 1,315 us | 1,328 us |
 
-Idle and edit gain 10 to 11 percent. Docks gains nothing: its dockspace
+The raw per-frame CSVs of both tables are kept under
+`out/fill-experiments-2026-10-27/`. Idle and edit gain 10 to 11 percent. Docks gains nothing: its dockspace
 covers the backdrop up to a 10-pixel frame, so culling had already reduced
 the rectangle to that frame, and the lift removes only the frame. UI build
 time falls about 6 us in every scenario because the culling pass no longer
@@ -1033,7 +1046,7 @@ hidden tab.
    the showcase from 3.3 to 1.5 layers per pixel and its frame work down 24 to
    26 percent, and on 2026-10-27 (change 13) the backdrop lift merges the
    first full-viewport rectangle with the render pass clear for another tenth
-   of the idle and edit frames. Blending was measured and costs nothing here.
+   of the idle and edit frames. Disabling blending measured no change here.
    What remains per frame is the visible fill, the fixed per-submit cost, and
    the present path; not presenting unchanged frames is the remaining lever,
    and both mechanisms for it already ship.

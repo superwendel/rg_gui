@@ -3465,16 +3465,19 @@ RGINLINE const RgGuiDrawList* rg_gui_draw_list(const RgGuiContext* ctx);
 /**
  * @brief Lift this frame's backdrop into the render pass clear.
  *
- * Call before rg_gui_end_frame with the viewport the list will be drawn into,
- * in list coordinates. If the frame's first command is an opaque rectangle
- * covering that viewport, rg_gui_end_frame empties the rectangle and records
- * its color; rg_gui_backdrop_lifted then returns 1 with the color, and the
- * caller clears the target to it instead of having a full-viewport quad
- * painted. The request applies to one frame. Do not lift a frame that will
- * repaint only dirty rectangles over a kept target: there the backdrop must be
- * painted.
+ * Call before rg_gui_end_frame with the whole render target the list will be
+ * drawn into, in list coordinates. If the frame's first command is an opaque
+ * rectangle covering that target, rg_gui_end_frame removes the rectangle from
+ * the list and records its color; rg_gui_backdrop_lifted then returns 1 with
+ * the color, and the caller clears the target to it instead of having a
+ * full-target quad painted. The request applies to one frame.
+ *
+ * `target` must be the entire surface the render pass clears: a clear fills
+ * the whole target, so a lift for a smaller viewport would recolor the pixels
+ * outside it. Do not lift a frame that will repaint only dirty rectangles over
+ * a kept target either; there the backdrop must be painted.
  */
-RGINLINE void rg_gui_lift_backdrop(RgGuiContext* ctx, RgGuiRect viewport);
+RGINLINE void rg_gui_lift_backdrop(RgGuiContext* ctx, RgGuiRect target);
 
 /**
  * @brief Whether the last frame lifted its backdrop
@@ -11504,8 +11507,9 @@ RGINLINE void rg_gui_end_frame(RgGuiContext* ctx)
 		}
 	}
 	/* Backdrop lift: when asked, the first command, if an opaque rectangle
-	 * covering the caller's viewport, becomes the clear color and an empty
-	 * rectangle; the culling pass drops the empty command when it runs. */
+	 * covering the caller's render target, becomes the clear color and leaves
+	 * the list at once, so the list, and any signature taken from it, is the
+	 * same on every frame whether or not the culling pass runs. */
 	ctx->backdrop_lifted = 0;
 	if (ctx->lift_backdrop)
 	{
@@ -11520,8 +11524,9 @@ RGINLINE void rg_gui_end_frame(RgGuiContext* ctx)
 		{
 			ctx->backdrop_lifted = 1;
 			ctx->backdrop_color = first->color;
-			first->data.rect.rect.w = 0.0f;
-			first->data.rect.rect.h = 0.0f;
+			memmove(first, first + 1, sizeof(*first) * (ctx->draw_list.count - 1u));
+			ctx->draw_list.count--;
+			if (ctx->overlay_start) ctx->overlay_start--;
 		}
 	}
 	rg_gui_draw_list_cull_hidden(ctx, &ctx->draw_list, &ctx->overlay_start, &ctx->overlay_list, &ctx->cull_pace);
@@ -34064,11 +34069,11 @@ RGINLINE int rg_gui_dropdown(RgGuiContext* ctx, const char* const* items, u32 co
 	return changed;
 }
 
-RGINLINE void rg_gui_lift_backdrop(RgGuiContext* ctx, RgGuiRect viewport)
+RGINLINE void rg_gui_lift_backdrop(RgGuiContext* ctx, RgGuiRect target)
 {
 	if (!ctx) return;
 	ctx->lift_backdrop = 1;
-	ctx->backdrop_viewport = viewport;
+	ctx->backdrop_viewport = target;
 }
 
 RGINLINE int rg_gui_backdrop_lifted(const RgGuiContext* ctx, u32* color)
