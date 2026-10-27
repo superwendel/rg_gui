@@ -64,13 +64,19 @@ def run(args):
  binary=args.binary.resolve();meta_path=binary.with_suffix('.build.json')
  meta=json.loads(meta_path.read_text())
  if meta['executable_sha256']!=digest(binary):raise RuntimeError('Executable does not match build metadata')
- # The rg_gui adapter loads shaders/Compiled/SPIRV at run time; they must be the ones the build recorded.
- shaders={p:h for p,h in meta['source_hashes'].items() if p.endswith('.spv')}
- stale=[p for p,h in shaders.items() if not Path(p).exists() or digest(p)!=h]
+ # The child runs in ROOT and the rg_gui adapter loads shaders/Compiled/SPIRV from there, so hash the
+ # files it will load, not the build-time paths, and require them to match what the build recorded.
+ recorded={Path(p).name:h for p,h in meta['source_hashes'].items() if p.endswith('.spv')}
+ loaded_dir=ROOT/'shaders/Compiled/SPIRV'
+ shaders={str(loaded_dir/name):(digest(loaded_dir/name) if (loaded_dir/name).exists() else None) for name in sorted(recorded)}
+ stale=[p for p,h in shaders.items() if h!=recorded[Path(p).name]]
  if not shaders or stale:raise RuntimeError(f'Compiled shaders differ from the build record: {stale or "none recorded"}')
  if args.command=='measure':
+  # Timing needs a complete verification of this executable with these shaders; a shader-only rebuild
+  # leaves the executable unchanged, so the shader hashes are compared too.
   proof=json.loads((args.validation/'manifest.json').read_text())
   if proof.get('status')!='complete' or proof['build']['executable_sha256']!=digest(binary) or set(args.case or CASES)-set(proof['cases']):raise RuntimeError('A complete matching verification run is required before timing')
+  if proof.get('shader_hashes')!=shaders:raise RuntimeError('The verification run used different compiled shaders; verify again before timing')
  output=args.output.resolve();output.mkdir(parents=True,exist_ok=False)
  snapshot=output/'harness';snapshot.mkdir()
  for p in HERE.iterdir():

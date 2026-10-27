@@ -505,7 +505,7 @@ The same sweep placed the changing-label penalty: with identical geometry the
 dynamic case had the same slope as the static one (125.2 against 125.7) but a
 fixed cost of 55 us against 25. That difference is not isolated to the GPU: the
 CPU staging of the upload is part of it (23 against 9 us of upload time), and
-the GPU copy and its barrier the rest. An upload-statistics dump in the harness
+the remainder was not attributed. An upload-statistics dump in the harness
 adapter showed each changing frame uploading 98,304 bytes of glyph quads in
 one range: 128 labels of 26 glyphs padded to 32-quad pages at 24 bytes per
 quad. A 16-byte quad (pixel-snapped 16-bit position and size) would cut that

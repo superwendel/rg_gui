@@ -72,14 +72,16 @@ into the Windows table or call them an exact rerun of that private harness.
 
 Three experiment hooks are outside the measured protocol. `--replicate N`
 encodes the prepared frame N times into one render pass, so a line fitted
-through frame time against N separates per-content GPU cost (slope) from fixed
-per-frame cost (intercept); the runner never passes it. `RG_BENCH_SHADER_ROOT`
+through frame time against N separates the per-replica frame cost (slope) from
+the fixed per-frame cost (intercept); the runner never passes it. `RG_BENCH_SHADER_ROOT`
 points the rg_gui adapter at another directory holding `Compiled/SPIRV`, for
 A/B tests of shader variants. `RG_BENCH_UPLOAD_STATS` prints the rg_gui
 adapter's per-frame upload sizes and text-cache counters to stderr. The runner
 strips every `RG_BENCH_` variable from the environment of verify and measure
-runs, records which it cleared, and refuses to run if the compiled shaders on
-disk differ from the ones the build recorded.
+runs, records which it cleared, and refuses to run if the compiled shaders the
+child will load from this checkout differ from the ones the build recorded.
+Timing also requires that the verification run loaded the same shader files,
+since rebuilding shaders leaves the executable unchanged.
 
 `ui` includes native widget submission plus CPU renderer preparation. `frame`
 includes CPU submission and GPU-fence queue waits. These are CPU wall-time
