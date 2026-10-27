@@ -64,6 +64,10 @@ def run(args):
  binary=args.binary.resolve();meta_path=binary.with_suffix('.build.json')
  meta=json.loads(meta_path.read_text())
  if meta['executable_sha256']!=digest(binary):raise RuntimeError('Executable does not match build metadata')
+ # The rg_gui adapter loads shaders/Compiled/SPIRV at run time; they must be the ones the build recorded.
+ shaders={p:h for p,h in meta['source_hashes'].items() if p.endswith('.spv')}
+ stale=[p for p,h in shaders.items() if not Path(p).exists() or digest(p)!=h]
+ if not shaders or stale:raise RuntimeError(f'Compiled shaders differ from the build record: {stale or "none recorded"}')
  if args.command=='measure':
   proof=json.loads((args.validation/'manifest.json').read_text())
   if proof.get('status')!='complete' or proof['build']['executable_sha256']!=digest(binary) or set(args.case or CASES)-set(proof['cases']):raise RuntimeError('A complete matching verification run is required before timing')
@@ -72,7 +76,11 @@ def run(args):
  for p in HERE.iterdir():
   if p.suffix in ['.c','.cpp','.h','.py','.md']:shutil.copy2(p,snapshot/p.name)
  manifest={'status':'incomplete','started_utc':datetime.now(timezone.utc).isoformat(),'platform':platform.platform(),'cpu':cpu_pin(),'build':meta,'configuration':{'target':[1280,800],'backend':'Vulkan','presentation':'none/offscreen','font':'shared prebaked Inter16 bitmaps and advances; kerning disabled','native_shape_antialiasing':False,'rounding':0,'framebuffer_flights':[1,2],'queue':'per-slot fences; one flight waits after submission, two flights throttle before slot reuse','frame_metric':'CPU frame-loop wall time including queue fences; excludes shared fixture generation, initialization, file output, validation; not GPU timestamps or display FPS','ui_metric':'native widget submission and CPU renderer preparation','imgui_branch':'docking for all workloads','editor':'short hard-newline8KiB paragraphs; native soft-wrap enabled; alternating actual text insert/backspace','skip_present_or_tiles':False},'frames':args.frames,'warmup':args.warmup,'rounds':args.rounds,'cases':args.case or CASES,'load_average_start':os.getloadavg(),'runner_sha256':digest(__file__),'environment':{k:os.environ.get(k)for k in ['SDL_VIDEODRIVER','SDL_GPU_DRIVER','DISPLAY','WAYLAND_DISPLAY']}}
- env=dict(os.environ,SDL_VIDEODRIVER=os.environ.get('SDL_VIDEODRIVER','x11'),SDL_GPU_DRIVER='vulkan')
+ # Experiment hooks must not reach timed or verified runs; the runner clears them and records that.
+ hooks=sorted(k for k in os.environ if k.startswith('RG_BENCH_'))
+ env={k:v for k,v in os.environ.items() if not k.startswith('RG_BENCH_')}
+ env.update(SDL_VIDEODRIVER=os.environ.get('SDL_VIDEODRIVER','x11'),SDL_GPU_DRIVER='vulkan')
+ manifest['shader_hashes']=shaders;manifest['cleared_environment']=hooks
  save(output/'manifest.json',manifest);records=[];kind='verify'if args.command=='verify'else'measure'
  for trial in range(args.rounds):
   names=args.case or CASES;rotated=names[trial%len(names):]+names[:trial%len(names)]

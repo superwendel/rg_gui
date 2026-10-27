@@ -83,11 +83,13 @@ The median p95 favors `rg_gui` in all 16 cells, but p99 and maxima do not unifor
 
 ## Rerun after the fragment-slot change
 
-The frame-time losses above were GPU-side: every two-flight cell shows a
-non-zero fence wait for both libraries, so the frame column is GPU time per
-frame and the CPU lead cannot appear in it. A replication sweep (`--replicate`)
-and shader variants traced rg_gui's higher per-content GPU cost to a third
-fragment input slot in the indexed shader; change 11 in the
+The frame-time losses above were on the GPU side of the loop: every two-flight
+cell shows a fence wait of tens of microseconds for both libraries, so both
+were paced by the GPU queue and the CPU lead cannot appear in the frame column.
+That column is frame time including submission and fence waits, not a hardware
+GPU timer. A replication sweep (`--replicate`) and shader variants traced
+rg_gui's higher per-replica frame cost to a third fragment input slot in the
+indexed shader; change 11 in the
 [performance audit](../docs/performance-audit-2026-10.md) has the sweep. With
 the flag packed into the `uv` slot, the same protocol (six alternating pairs,
 2,048 measured frames after 512 warmup, pinned to CPU 0) gives, at two flights:
@@ -124,5 +126,6 @@ The same eight workload categories are represented, but the implementation is a 
 - [Machine, build, source hashes and protocol manifest](../out/third-party-linux-2026-10-26/measurements/manifest.json).
 - [Verification manifest and independent validation](../out/third-party-linux-2026-10-26/verification-final/manifest.json).
 - [Independent measurement audit](../out/third-party-linux-2026-10-26/audit/measurement-audit.txt).
+- Rerun after the fragment-slot change: [raw data and summary](../out/third-party-linux-2026-10-26/rerun-f41e8b6/measurements/summary.md), [manifest](../out/third-party-linux-2026-10-26/rerun-f41e8b6/measurements/manifest.json), [verification](../out/third-party-linux-2026-10-26/rerun-f41e8b6/verification/manifest.json), and the [replication and shader-variant sweeps](../out/third-party-linux-2026-10-26/rerun-f41e8b6/sweeps/).
 
 The first run above used `rg_gui` af2462a unchanged; the rerun section used the fragment-slot change that followed from it.

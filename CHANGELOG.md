@@ -49,7 +49,7 @@ between 0.x releases.
 - The indexed fragment shader reads two input slots instead of three: the
   sampled-or-solid flag now rides in the `uv` slot's third component, and the
   shader samples unconditionally and selects. On an Intel UHD G1 the third
-  slot cost about 15 percent of the GPU pass whether it was flat or
+  slot cost about 15 percent of the frame's GPU-paced cost whether it was flat or
   interpolated, branched or selected; without it the pass costs the same as
   Dear ImGui's for the same content, and the comparison in
   `benchmarks/LINUX_IMGUI_2026-10-26.md` has rg_gui lower in every cell. The

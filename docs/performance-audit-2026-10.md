@@ -421,22 +421,28 @@ A Linux/Vulkan comparison with Dear ImGui (`benchmarks/third_party`,
 2026-10-26) rendered both libraries offscreen with the same glyph bitmaps and
 two frames in flight. rg_gui used less CPU in every workload, 1.3 to 11x, but
 its frame time lost the inspector workloads by 5 to 8 percent. Every cell showed
-a non-zero fence wait for both libraries, so both were GPU-bound and the frame
-column was GPU time per frame.
+a fence wait of tens of microseconds for both libraries, so both loops were paced
+by the GPU queue rather than by their CPU work, and the frame column is the
+per-frame cost of that queue: render pass, upload, and submission together.
+SDL_GPU exposes no timestamp queries, so none of what follows is a hardware
+GPU time.
 
 A `--replicate N` flag was added to the harness: it encodes the prepared frame
 N times into one render pass, and a line fitted through N = 1, 8, 16 separates
-per-content GPU cost (the slope) from fixed per-frame cost (the intercept).
+the per-replica frame cost (the slope) from the fixed per-frame cost (the
+intercept). A replica adds one draw's worth of GPU work and its CPU encoding;
+the CPU side grew from 56 to 149 us at N = 16 against a 1,480 us frame, so the
+slope is almost all queue time, but it is a frame-time slope, not a GPU timer.
 Three alternating rounds of 1,024 frames each, two flights, microseconds:
 
-| Case | Library or shader variant | Per-content (slope) | Fixed (intercept) |
+| Case | Library or shader variant | Per-replica (slope) | Fixed (intercept) |
 | --- | --- | ---: | ---: |
 | Inspector | rg_gui, shipping shader | 90.9 | 29.8 |
 | Inspector | Dear ImGui | 75.1 | 42.4 |
 | Static labels | rg_gui, shipping shader | 126.1 | 25.2 |
 | Static labels | Dear ImGui | 113.2 | 44.5 |
 
-rg_gui's fixed cost was lower in every case and its per-content cost 11 to 22
+rg_gui's fixed cost was lower in every case and its per-replica cost 11 to 22
 percent higher, in text and in widgets alike. Variants of the indexed shaders,
 compiled with shadercross and selected through an environment variable in the
 harness, located the difference. Slopes are the median-of-rounds fits; the
@@ -497,7 +503,9 @@ present path, which the slot change does not touch.
 
 The same sweep placed the changing-label penalty: with identical geometry the
 dynamic case had the same slope as the static one (125.2 against 125.7) but a
-fixed cost of 55 us against 25. An upload-statistics dump in the harness
+fixed cost of 55 us against 25. That difference is not isolated to the GPU: the
+CPU staging of the upload is part of it (23 against 9 us of upload time), and
+the GPU copy and its barrier the rest. An upload-statistics dump in the harness
 adapter showed each changing frame uploading 98,304 bytes of glyph quads in
 one range: 128 labels of 26 glyphs padded to 32-quad pages at 24 bytes per
 quad. A 16-byte quad (pixel-snapped 16-bit position and size) would cut that
@@ -787,11 +795,12 @@ hidden tab.
    in place would about halve it, a microsecond or two.
 3. **Smaller cached glyph quads.** A changing-label frame uploads 98,304 bytes
    of 24-byte quads padded to 32-quad pages, which the replication sweep put at
-   about 30 us of fixed GPU time per frame on this iGPU. Pixel-snapped 16-bit
+   about 30 us of fixed per-frame cost on this iGPU, CPU staging included.
+   Pixel-snapped 16-bit
    position and size would make a 16-byte quad, and 16-quad pages would halve
    the padding for short labels.
-4. **GPU time is now the frame.** With change 11 the render pass costs the
-   same as Dear ImGui's for the same content and rg_gui's CPU is a fraction of
+4. **The GPU queue is now the frame.** With change 11 a frame's queue cost
+   matches Dear ImGui's for the same content and rg_gui's CPU is a fraction of
    its frame; what remains per frame is fill and the fixed per-submit cost.
    Overdraw under opaque panels and not presenting unchanged frames are the
    levers, both outside the shader.
