@@ -79,7 +79,9 @@ between 0.x releases.
   removes one kind of command from the finished list, for attribution runs.
   Offscreen frames count as submitted, not presented. On the audit's laptop
   the idle showcase runs at 347 us per frame offscreen and 1,273 us when
-  presenting through X11.
+  presenting through X11. `benchmarks/profile/` holds headers that time every
+  SDL GPU call and renderer stage in a scratch build of the showcase; see the
+  profiling guide.
 - The indexed fragment shader reads two input slots instead of three: the
   sampled-or-solid flag now rides in the `uv` slot's third component, and the
   shader samples unconditionally and selects. On an Intel UHD G1 the third

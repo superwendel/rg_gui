@@ -284,6 +284,21 @@ finished list so the frame can be attributed by content. See
 [change 13](../docs/performance-audit-2026-10.md#13-backdrop-lift), and
 [change 14](../docs/performance-audit-2026-10.md#14-where-the-remaining-frame-goes).
 
+### Per-call profile of the CPU stages
+
+`perf` is unavailable on the audit's laptop, so the fixed per-frame CPU cost
+is split by wrapping calls. Copy `src/` and `examples/` to a scratch
+directory, add `#include "prof_core.h"` as the first include of
+`rg_gui_demo_full.c` and `#include "prof_lib.h"` after the last include of
+`rg_gui_demo_common.h`, call `prof_frame_end()` once per loop iteration and
+`atexit(prof_report)` at the top of `main`, and build with the demo's flags
+plus `-I benchmarks/profile`. The report on stderr lists each SDL GPU call
+and each renderer stage with its per-frame median, p90, and calls per frame;
+a stage's total minus the SDL calls inside it is the library's own time. Run
+it with `--offscreen` so presentation does not pace the loop, and record the
+load average: the numbers are wall times. See
+[change 15](../docs/performance-audit-2026-10.md#15-per-call-profile-of-the-fixed-cpu-cost).
+
 ```sh
 out/linux/rg_gui_demo_full --scenario idle --present immediate --coverage \
     --frames 160 --profile-warmup 120 --profile out/coverage.csv

@@ -821,6 +821,56 @@ Wayland session was available on this desktop). Declaring the rendering at
 its floor would need a fixed-content size sweep and a GPU timer, neither of
 which this experiment has.
 
+### 15. Per-call profile of the fixed CPU cost
+
+With `perf` unavailable, the CPU stages of change 14 were split on
+2026-10-27 by wrapping every SDL GPU call and every renderer entry point in a
+timer (`benchmarks/profile/`, method in the profiling guide), running the
+idle showcase offscreen at 1280x800 pinned to one core. The desktop was
+busy with other work during these runs, load average 5.6 to 7.0 on four
+logical CPUs, so the frame was 450 us rather than the 347 us of change 14
+and every number below is inflated by roughly a third; read the shares, and
+rerun on a quiet machine before quoting the absolutes. Per-frame medians:
+
+| Call or stage | per frame | note |
+| --- | ---: | --- |
+| `SDL_SubmitGPUCommandBufferAndAcquireFence` | 60 to 77 us | one call |
+| `SDL_UploadToGPUBuffer` | 24 to 31 us | 1.9 calls: the frame data, and the text cache page the clock changes |
+| `SDL_BeginGPURenderPass` | 24 to 31 us | one call |
+| `SDL_DrawGPUIndexedPrimitives` | 17 to 22 us | the frame's single draw call |
+| `SDL_AcquireGPUCommandBuffer` | 12 to 16 us | one call |
+| `SDL_BindGPUGraphicsPipeline` | 4.5 to 6 us | one call |
+| other SDL calls (binds, pushes, scissor, map, end) | about 8 us | twelve calls |
+| `rg_gui_gpu_prepare` | 31 us | no SDL calls inside: packing 673 commands |
+| `rg_gui_gpu_stage_upload` | 12 us | of which map and unmap 2 us |
+| `rg_gui_gpu_encode_upload` | 32 us | all of it the two uploads above |
+| `rg_gui_gpu_draw` | 35 us | all of it SDL: the draw, the pipeline bind, the small binds |
+| `rg_gui_end_frame` | 18 to 24 us | culling, overlay merge, bookkeeping |
+| UI build (widgets, inside which `rg_gui_end_frame`) | 60 to 88 us | |
+
+Two readings. First, the fixed cost is mostly SDL_GPU's per-call overhead on
+Vulkan, not rg_gui's code. One acquire, one copy pass with two uploads, one
+render pass, one draw, and one submit cost about 185 us of CPU under this
+load (about 140 us by the quiet frame's scale): more than all of the
+library's own frame work, which is the widget build, `rg_gui_end_frame`,
+preparation, and staging, about 130 us under the same load. rg_gui already
+issues the minimum: one draw call per frame, one render pass, one copy pass.
+The only call it could still save is the second upload, the text cache page,
+by giving the cache and the frame data one GPU buffer, which the frame
+buffer's cycling makes non-trivial for about 12 us. Second, within the
+library, preparation is the largest single stage at 31 us, 46 ns per
+command for 673 commands; the full showcase does not enable the frame
+signature, so that is vertex and item packing alone, and it and the widget
+build are where rg_gui's own CPU work is left to find.
+
+The strategic reading is the one worth recording: a direct Vulkan backend,
+recording the same frame without SDL_GPU's per-call bookkeeping, would
+recover most of those 140 us, which is the largest fixed cost left that an
+application sees. It is also a large project, and the comparison harness
+runs both libraries on the same SDL_GPU backend, where Dear ImGui's per-draw
+binds and scissors make its share of this overhead larger; that share was
+not measured here.
+
 ## Measured effect of the changes
 
 Extended CPU suite, `benchmarks/run.py compare`, five alternating process
@@ -1115,6 +1165,10 @@ hidden tab.
    26 percent, and on 2026-10-27 (change 13) the backdrop lift merges the
    first full-viewport rectangle with the render pass clear for another tenth
    of the idle and edit frames. Disabling blending measured no change here.
+   The per-call profile (change 15) then showed the fixed per-frame CPU cost
+   to be mostly SDL_GPU's own call overhead, about 140 us for the minimum
+   set of calls a frame needs; a direct Vulkan backend is the remaining
+   large lever on the application-visible frame.
    What remains per frame is the visible fill, the fixed per-submit cost, and
    the present path; not presenting unchanged frames is the remaining lever,
    and both mechanisms for it already ship.
