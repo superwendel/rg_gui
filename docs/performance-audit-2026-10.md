@@ -753,6 +753,57 @@ has to split the backdrop. Relative to the frame before change 12, the idle
 showcase has gone from 1,749 to about 1,240 us under Immediate presentation
 with pixels unchanged.
 
+### 14. Where the remaining frame goes
+
+After changes 12 and 13 the idle showcase's frame was about 1,250 us under
+Immediate presentation, of which culling and the lift accounted for the fill
+they removed, but the fill that remained, about one layer at 240 us per
+megapixel, explained only a quarter of what was left. The rest was attributed
+on 2026-10-27 with two new showcase options: `--offscreen` draws into a
+persistent texture of the window's size and paces on a fence two frames back
+instead of acquiring and presenting a swapchain image, and `--drop KIND`
+removes one kind of command (`text`, `translucent`, `rects`, `images`, `all`)
+from the finished list. Idle scenario, three rotating rounds of 900 frames,
+medians in microseconds:
+
+| Configuration | frame work | fence or acquire wait | UI build |
+| --- | ---: | ---: | ---: |
+| present, full list | 1,273 | 764 | 105 |
+| present, empty list | 664 | 400 | 97 |
+| offscreen, full list | 347 | 88 | 62 |
+| offscreen, no text | 314 | 54 | 74 |
+| offscreen, no translucent rectangles | 347 | 52 | 74 |
+| offscreen, no rectangles | 120 | 8 | 41 |
+| offscreen, no images | 351 | 65 | 79 |
+| offscreen, empty list | 97 | 7 | 50 |
+| offscreen, full list, 905x566 | 237 | 82 | 37 |
+| offscreen, full list, 640x400 | 147 | 15 | 32 |
+
+Three conclusions. First, presentation is the frame. The GUI's own work,
+CPU and GPU, is 347 us per frame at 1280x800; presenting the same frame
+through X11 and Mesa costs another 900 us, and presenting an empty frame
+costs 570 us. Nothing in the library touches that: it is the platform's
+copy of a 4 MB image, and Dear ImGui in the same window pays the same. The
+comparison harness renders offscreen, which is why its numbers are a third
+of the showcase's. Second, the fill that remains is at the floor. Rectangles
+cost 227 us, one opaque layer over 1.02 Mpx, which at this GPU's memory
+bandwidth is simply the cost of writing the frame once; the slope of the
+size sweep is 262 us per megapixel with an 80 us intercept. Text costs 33 us
+for 620 glyphs, translucent rectangles and images nothing measurable. The
+only way below one layer is not writing unchanged pixels, which the tile
+cache and the present skip already do. Third, the fixed cost is now CPU. The
+offscreen frame breaks into UI build 59, prepare 20, staging 10, encode 45,
+and submit 54 us, about 190 us of CPU against 350 us of GPU; at 640x400 the
+loop is CPU-bound. The UI build itself drops from 105 to 59 us when the GPU
+is not saturated, because the CPU clocks down while the GPU is busy on this
+part. The raw per-frame CSVs are kept under `out/attribution-2026-10-27/`.
+
+The levers this leaves, in order: the per-frame fixed CPU cost (submit and
+encode first), which also moves every cell of the comparison harness; the
+glyph quad size for the text-heavy workloads; and the present path, which is
+the platform's and can only be avoided by presenting less (the present skip)
+or measured elsewhere (no Wayland session was available on this desktop).
+
 ## Measured effect of the changes
 
 Extended CPU suite, `benchmarks/run.py compare`, five alternating process

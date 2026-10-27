@@ -711,6 +711,34 @@ typedef struct DemoFrameSkip
 	u32 skipped_frames;
 } DemoFrameSkip;
 
+/* Offscreen rendering for attribution: when set, the direct path draws into a
+ * persistent texture of the window's size, submits with a fence, and waits
+ * for the frame submitted two frames earlier instead of acquiring and
+ * presenting a swapchain image. Frame time is then the GUI's own CPU and GPU
+ * cost, without the platform's presentation. The texture and fences are
+ * released by demo_render_offscreen_release. */
+static int demo_render_offscreen = 0;
+static SDL_GPUTexture* demo_offscreen_texture = NULL;
+static u32 demo_offscreen_width = 0u, demo_offscreen_height = 0u;
+static SDL_GPUFence* demo_offscreen_fences[2] = {NULL, NULL};
+static u32 demo_offscreen_slot = 0u;
+
+RGINLINE void demo_render_offscreen_release(SDL_GPUDevice* device)
+{
+	for (u32 i = 0u; i < 2u; i++)
+	{
+		if (demo_offscreen_fences[i])
+		{
+			SDL_WaitForGPUFences(device, true, &demo_offscreen_fences[i], 1u);
+			SDL_ReleaseGPUFence(device, demo_offscreen_fences[i]);
+			demo_offscreen_fences[i] = NULL;
+		}
+	}
+	if (demo_offscreen_texture) SDL_ReleaseGPUTexture(device, demo_offscreen_texture);
+	demo_offscreen_texture = NULL;
+	demo_offscreen_width = demo_offscreen_height = 0u;
+}
+
 /* The frame identity the skip compares: the draw-list signature and the
  * effective clear color. */
 RGINLINE u64 demo_frame_identity(u64 signature, SDL_FColor clear)
@@ -825,8 +853,41 @@ static int demo_render_draw_list_skippable(SDL_GPUDevice* device, SDL_Window* wi
 	SDL_GPUTexture* swapchain = NULL;
 	u32 width = 0u;
 	u32 height = 0u;
-	int acquired = SDL_WaitAndAcquireGPUSwapchainTexture(command_buffer, window, &swapchain,
-	                                                     &width, &height);
+	int acquired = 0;
+	if (demo_render_offscreen)
+	{
+		int pixel_width = 0, pixel_height = 0;
+		SDL_GetWindowSizeInPixels(window, &pixel_width, &pixel_height);
+		width = (u32)pixel_width;
+		height = (u32)pixel_height;
+		if (!demo_offscreen_texture || demo_offscreen_width != width || demo_offscreen_height != height)
+		{
+			if (demo_offscreen_texture) SDL_ReleaseGPUTexture(device, demo_offscreen_texture);
+			SDL_GPUTextureCreateInfo info = {0};
+			info.type = SDL_GPU_TEXTURETYPE_2D;
+			info.format = SDL_GetGPUSwapchainTextureFormat(device, window);
+			info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+			info.width = width;
+			info.height = height;
+			info.layer_count_or_depth = 1u;
+			info.num_levels = 1u;
+			info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+			demo_offscreen_texture = SDL_CreateGPUTexture(device, &info);
+			demo_offscreen_width = width;
+			demo_offscreen_height = height;
+		}
+		/* Two frames in flight: wait for the frame submitted two frames ago. */
+		if (demo_offscreen_fences[demo_offscreen_slot])
+		{
+			SDL_WaitForGPUFences(device, true, &demo_offscreen_fences[demo_offscreen_slot], 1u);
+			SDL_ReleaseGPUFence(device, demo_offscreen_fences[demo_offscreen_slot]);
+			demo_offscreen_fences[demo_offscreen_slot] = NULL;
+		}
+		swapchain = demo_offscreen_texture;
+		acquired = swapchain != NULL;
+	}
+	else
+		acquired = SDL_WaitAndAcquireGPUSwapchainTexture(command_buffer, window, &swapchain, &width, &height);
 	if (metrics)
 	{
 		u64 now = SDL_GetTicksNS();
@@ -891,7 +952,15 @@ static int demo_render_draw_list_skippable(SDL_GPUDevice* device, SDL_Window* wi
 		metrics->draw_encode_ms = (double)(now - stage_start) / 1000000.0;
 		stage_start = now;
 	}
-	int submitted = SDL_SubmitGPUCommandBuffer(command_buffer) ? 1 : 0;
+	int submitted;
+	if (demo_render_offscreen)
+	{
+		SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(command_buffer);
+		submitted = fence != NULL;
+		demo_offscreen_fences[demo_offscreen_slot] = fence;
+		demo_offscreen_slot ^= 1u;
+	}
+	else submitted = SDL_SubmitGPUCommandBuffer(command_buffer) ? 1 : 0;
 	if (submitted) rg_gui_gpu_upload_commit(gpu, &upload);
 	if (metrics)
 	{

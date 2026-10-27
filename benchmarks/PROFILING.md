@@ -273,9 +273,15 @@ later opaque rectangle. `--keep-hidden-draws` turns off the end-of-frame
 hidden-draw culling for an A/B of its effect, `--keep-backdrop` paints the
 backdrop rectangle instead of lifting it into the render pass clear, and
 `--dump-commands PATH` writes that frame's raw draw commands for offline
-analysis, such as timing the culling pass in a tight loop. See
-[change 12](../docs/performance-audit-2026-10.md#12-hidden-draw-culling) and
-[change 13](../docs/performance-audit-2026-10.md#13-backdrop-lift).
+analysis, such as timing the culling pass in a tight loop. `--offscreen` draws
+into a persistent texture of the window's size and paces on a fence two frames
+back instead of acquiring and presenting, which separates the GUI's own cost
+from the platform's presentation, and `--drop KIND` removes `text`,
+`translucent` rectangles, all `rects`, `images`, or `all` commands from the
+finished list so the frame can be attributed by content. See
+[change 12](../docs/performance-audit-2026-10.md#12-hidden-draw-culling),
+[change 13](../docs/performance-audit-2026-10.md#13-backdrop-lift), and
+[change 14](../docs/performance-audit-2026-10.md#14-where-the-remaining-frame-goes).
 
 ```sh
 out/linux/rg_gui_demo_full --scenario idle --present immediate --coverage \

@@ -74,6 +74,11 @@ between 0.x releases.
   draw-list signature; `--keep-backdrop` turns the lift off in the full
   showcase. Idle and edit frame work under Immediate presentation fall another
   10 to 11 percent.
+- The full showcase gains `--offscreen`, which renders without presenting to
+  separate the GUI's cost from the platform's, and `--drop KIND`, which
+  removes one kind of command from the finished list, for attribution runs.
+  On the audit's laptop the GUI's own frame is 347 us at 1280x800 and X11
+  presentation adds 900 us.
 - The indexed fragment shader reads two input slots instead of three: the
   sampled-or-solid flag now rides in the `uv` slot's third component, and the
   shader samples unconditionally and selects. On an Intel UHD G1 the third

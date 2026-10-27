@@ -656,6 +656,31 @@ static void full_draw_dock_panels(RgGuiContext* gui, FullDemoState* state, u32 w
 	}
 }
 
+/* Attribution: remove one kind of command from the finished list so the
+ * frame's cost can be split by content (`--drop`). The overlay start moves
+ * with the list. */
+static void full_drop_commands(RgGuiContext* gui, const char* kind)
+{
+	RgGuiDrawList* list = &gui->draw_list;
+	const u32 overlay = gui->overlay_start;
+	u32 written = 0u, new_overlay = overlay;
+	for (u32 i = 0u; i < list->count; i++)
+	{
+		const RgGuiDrawCmd* cmd = &list->cmds[i];
+		int drop = 0;
+		if (strcmp(kind, "text") == 0) drop = cmd->type == RG_GUI_CMD_TEXT;
+		else if (strcmp(kind, "translucent") == 0) drop = cmd->type == RG_GUI_CMD_RECT && (cmd->color >> 24u) != 255u;
+		else if (strcmp(kind, "rects") == 0) drop = cmd->type == RG_GUI_CMD_RECT;
+		else if (strcmp(kind, "images") == 0) drop = cmd->type == RG_GUI_CMD_IMAGE;
+		else drop = 1;
+		if (i == overlay) new_overlay = written;
+		if (!drop) list->cmds[written++] = *cmd;
+	}
+	if (overlay >= list->count) new_overlay = written;
+	list->count = written;
+	gui->overlay_start = new_overlay;
+}
+
 static void full_build_ui(RgGuiContext* gui, FullDemoState* state, int width, int height)
 {
 	/* Paint the backdrop so every pixel belongs to a command; dirty-rectangle
@@ -957,6 +982,7 @@ int main(int argc, char** argv)
 	int coverage = 0;
 	int keep_hidden_draws = 0;
 	int keep_backdrop = 0;
+	const char* drop_kind = NULL;
 	const char* dump_commands = NULL;
 	int window_width = 1280, window_height = 800;
 	int frame_limit = 0;
@@ -998,6 +1024,17 @@ int main(int argc, char** argv)
 		else if (strcmp(argv[i], "--coverage") == 0) coverage = 1;
 		else if (strcmp(argv[i], "--keep-hidden-draws") == 0) keep_hidden_draws = 1;
 		else if (strcmp(argv[i], "--keep-backdrop") == 0) keep_backdrop = 1;
+		else if (strcmp(argv[i], "--offscreen") == 0) demo_render_offscreen = 1;
+		else if (strcmp(argv[i], "--drop") == 0 && i + 1 < argc)
+		{
+			drop_kind = argv[++i];
+			if (strcmp(drop_kind, "text") && strcmp(drop_kind, "translucent") && strcmp(drop_kind, "rects") &&
+			    strcmp(drop_kind, "images") && strcmp(drop_kind, "all"))
+			{
+				fprintf(stderr, "--drop takes text, translucent, rects, images, or all\n");
+				return 1;
+			}
+		}
 		else if (strcmp(argv[i], "--dump-commands") == 0 && i + 1 < argc) dump_commands = argv[++i];
 		else if (strcmp(argv[i], "--size") == 0 && i + 1 < argc)
 		{
@@ -1255,6 +1292,7 @@ int main(int argc, char** argv)
 		if (!tile_cache && !keep_backdrop)
 			rg_gui_lift_backdrop(&gui, rg_gui_make_rect(0.0f, 0.0f, (f32)width, (f32)height));
 		rg_gui_end_frame(&gui);
+		if (drop_kind) full_drop_commands(&gui, drop_kind);
 		sample.ui_ms = demo_profile_elapsed_ms(ui_start);
 		sample.diagnostic_flags = (u32)gui.diagnostics.flags;
 		observed_edits += previous_note_length != strlen(state.notes);
@@ -1367,6 +1405,7 @@ cleanup:
 	demo_profile_capture_destroy(&profile_capture);
 	demo_font_destroy(&demo_font);
 	demo_platform_destroy(&platform_state, &input);
+	if (device) demo_render_offscreen_release(device);
 	if (window_claimed) SDL_ReleaseWindowFromGPUDevice(device, window);
 	if (device) rg_gpu_device_destroy(device);
 	if (window) SDL_DestroyWindow(window);
