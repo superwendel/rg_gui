@@ -12,23 +12,53 @@
 #include <stdlib.h>
 #include <string.h>
 enum { PROF_SLOTS = 64, PROF_FRAMES = 4096 };
-typedef struct ProfSlot { const char* name; double frame_ns; unsigned frame_calls; double samples[PROF_FRAMES]; unsigned calls[PROF_FRAMES]; } ProfSlot;
+/* Inclusive time is the wrapped call's wall time; exclusive time subtracts the
+ * wrapped calls nested inside it on the same frame, so a renderer stage's
+ * exclusive time is the library's own work and its inclusive time includes
+ * the SDL calls it made. */
+typedef struct ProfSlot { const char* name; double incl_ns, excl_ns; unsigned frame_calls; double incl[PROF_FRAMES], excl[PROF_FRAMES]; unsigned calls[PROF_FRAMES]; } ProfSlot;
 static ProfSlot prof_slots[PROF_SLOTS];
 static unsigned prof_slot_count = 0, prof_frame = 0;
+static double prof_child_ns[64];
+static unsigned prof_depth = 0;
+static double prof_overhead_ns = 0;
 static int prof_slot(const char* name) { for (unsigned i = 0; i < prof_slot_count; i++) if (prof_slots[i].name == name) return (int)i; if (prof_slot_count >= PROF_SLOTS) return -1; prof_slots[prof_slot_count].name = name; return (int)prof_slot_count++; }
-static void prof_add(const char* name, Uint64 start) { int s = prof_slot(name); if (s < 0) return; prof_slots[s].frame_ns += (double)(SDL_GetTicksNS() - start); prof_slots[s].frame_calls++; }
-static void prof_frame_end(void) { if (prof_frame < PROF_FRAMES) { for (unsigned i = 0; i < prof_slot_count; i++) { prof_slots[i].samples[prof_frame] = prof_slots[i].frame_ns; prof_slots[i].calls[prof_frame] = prof_slots[i].frame_calls; } } for (unsigned i = 0; i < prof_slot_count; i++) { prof_slots[i].frame_ns = 0; prof_slots[i].frame_calls = 0; } prof_frame++; }
+static Uint64 prof_begin(void) { if (prof_depth < 64) prof_child_ns[prof_depth] = 0; prof_depth++; return SDL_GetTicksNS(); }
+static void prof_end(const char* name, Uint64 start) {
+	double incl = (double)(SDL_GetTicksNS() - start);
+	prof_depth--;
+	double child = prof_depth < 64 ? prof_child_ns[prof_depth] : 0;
+	int s = prof_slot(name);
+	if (s >= 0) { prof_slots[s].incl_ns += incl; prof_slots[s].excl_ns += incl - child; prof_slots[s].frame_calls++; }
+	if (prof_depth > 0 && prof_depth - 1 < 64) prof_child_ns[prof_depth - 1] += incl;
+}
+static void prof_frame_end(void) {
+	if (prof_frame < PROF_FRAMES) for (unsigned i = 0; i < prof_slot_count; i++) { prof_slots[i].incl[prof_frame] = prof_slots[i].incl_ns; prof_slots[i].excl[prof_frame] = prof_slots[i].excl_ns; prof_slots[i].calls[prof_frame] = prof_slots[i].frame_calls; }
+	for (unsigned i = 0; i < prof_slot_count; i++) { prof_slots[i].incl_ns = 0; prof_slots[i].excl_ns = 0; prof_slots[i].frame_calls = 0; }
+	prof_frame++;
+}
 static int prof_cmp(const void* a, const void* b) { double x = *(const double*)a, y = *(const double*)b; return (x > y) - (x < y); }
+static double prof_median(const double* values, unsigned n, unsigned skip, double* p90) { static double tmp[PROF_FRAMES]; unsigned m = 0; for (unsigned f = skip; f < n; f++) tmp[m++] = values[f]; if (!m) { *p90 = 0; return 0; } qsort(tmp, m, sizeof(double), prof_cmp); *p90 = tmp[m * 9 / 10]; return tmp[m / 2]; }
 static void prof_report(void) {
 	unsigned n = prof_frame < PROF_FRAMES ? prof_frame : PROF_FRAMES, skip = n > 100 ? 100 : 0;
-	fprintf(stderr, "PROF %u frames (first %u skipped); per-frame medians in us, calls per frame\n", n, skip);
+	/* The wrapper's own cost: a timed empty call, repeated. */
+	Uint64 t0 = SDL_GetTicksNS();
+	for (unsigned i = 0; i < 100000; i++) { Uint64 s = prof_begin(); prof_end("overhead probe", s); }
+	prof_overhead_ns = (double)(SDL_GetTicksNS() - t0) / 100000.0;
+	fprintf(stderr, "PROF %u frames (first %u skipped); per-frame medians in us: inclusive, exclusive of nested wrapped calls, p90 inclusive, calls per frame; wrapper overhead %.0f ns per wrapped call\n", n, skip, prof_overhead_ns);
 	double order[PROF_SLOTS]; unsigned idx[PROF_SLOTS];
-	for (unsigned i = 0; i < prof_slot_count; i++) { static double tmp[PROF_FRAMES]; unsigned m = 0; for (unsigned f = skip; f < n; f++) tmp[m++] = prof_slots[i].samples[f]; qsort(tmp, m, sizeof(double), prof_cmp); order[i] = m ? tmp[m / 2] : 0; idx[i] = i; }
+	for (unsigned i = 0; i < prof_slot_count; i++) { double p90; order[i] = prof_median(prof_slots[i].incl, n, skip, &p90); idx[i] = i; }
 	for (unsigned i = 0; i < prof_slot_count; i++) for (unsigned j = i + 1; j < prof_slot_count; j++) if (order[idx[j]] > order[idx[i]]) { unsigned t = idx[i]; idx[i] = idx[j]; idx[j] = t; }
-	for (unsigned k = 0; k < prof_slot_count; k++) { unsigned i = idx[k]; static double tmp[PROF_FRAMES]; unsigned m = 0; double callsum = 0; for (unsigned f = skip; f < n; f++) { tmp[m++] = prof_slots[i].samples[f]; callsum += prof_slots[i].calls[f]; } qsort(tmp, m, sizeof(double), prof_cmp); fprintf(stderr, "PROF  %-40s %8.1f us  p90 %8.1f  calls %.1f\n", prof_slots[i].name, tmp[m / 2] / 1000.0, tmp[m * 9 / 10] / 1000.0, m ? callsum / m : 0); }
+	for (unsigned k = 0; k < prof_slot_count; k++) {
+		unsigned i = idx[k]; double p90, p90e, callsum = 0;
+		if (prof_slots[i].name[0] == 'o' && strcmp(prof_slots[i].name, "overhead probe") == 0) continue;
+		for (unsigned f = skip; f < n; f++) callsum += prof_slots[i].calls[f];
+		double incl = prof_median(prof_slots[i].incl, n, skip, &p90), excl = prof_median(prof_slots[i].excl, n, skip, &p90e);
+		fprintf(stderr, "PROF  %-42s incl %8.1f  excl %8.1f  p90 %8.1f  calls %.1f\n", prof_slots[i].name, incl / 1000.0, excl / 1000.0, p90 / 1000.0, n > skip ? callsum / (n - skip) : 0);
+	}
 }
-#define PROF_CALL(name, expr) ({ Uint64 prof_t0__ = SDL_GetTicksNS(); __typeof__(expr) prof_r__ = (expr); prof_add(name, prof_t0__); prof_r__; })
-#define PROF_VOID(name, expr) do { Uint64 prof_t0__ = SDL_GetTicksNS(); (expr); prof_add(name, prof_t0__); } while (0)
+#define PROF_CALL(name, expr) ({ Uint64 prof_t0__ = prof_begin(); __typeof__(expr) prof_r__ = (expr); prof_end(name, prof_t0__); prof_r__; })
+#define PROF_VOID(name, expr) do { Uint64 prof_t0__ = prof_begin(); (expr); prof_end(name, prof_t0__); } while (0)
 /* SDL GPU calls */
 #define SDL_AcquireGPUCommandBuffer(...) PROF_CALL("SDL_AcquireGPUCommandBuffer", (SDL_AcquireGPUCommandBuffer)(__VA_ARGS__))
 #define SDL_BeginGPUCopyPass(...) PROF_CALL("SDL_BeginGPUCopyPass", (SDL_BeginGPUCopyPass)(__VA_ARGS__))

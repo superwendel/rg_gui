@@ -826,50 +826,65 @@ which this experiment has.
 With `perf` unavailable, the CPU stages of change 14 were split on
 2026-10-27 by wrapping every SDL GPU call and every renderer entry point in a
 timer (`benchmarks/profile/`, method in the profiling guide), running the
-idle showcase offscreen at 1280x800 pinned to one core. The desktop was
-busy with other work during these runs, load average 5.6 to 7.0 on four
-logical CPUs, so the frame was 450 us rather than the 347 us of change 14
-and every number below is inflated by roughly a third; read the shares, and
-rerun on a quiet machine before quoting the absolutes. Per-frame medians:
+idle showcase offscreen at 1280x800 pinned to one core. The timers nest:
+a renderer stage's inclusive time contains the SDL calls it makes, and its
+exclusive time subtracts them frame by frame before the median is taken, so
+the exclusive time is the library's own work. The wrapper itself costs 190
+to 300 ns per wrapped call, about 5 us per frame over the 22 calls, and is
+included in the inclusive numbers. The desktop was busy with other work
+during these runs, load average near 7 on four logical CPUs, and the frame
+was 408 to 410 us rather than the 347 us of change 14. Load does not
+inflate every stage alike, so these numbers are the busy desktop's, not a
+scaled quiet frame; two runs agreed within 2 us on every line. Per-frame
+medians, two runs:
 
-| Call or stage | per frame | note |
-| --- | ---: | --- |
-| `SDL_SubmitGPUCommandBufferAndAcquireFence` | 60 to 77 us | one call |
-| `SDL_UploadToGPUBuffer` | 24 to 31 us | 1.9 calls: the frame data, and the text cache page the clock changes |
-| `SDL_BeginGPURenderPass` | 24 to 31 us | one call |
-| `SDL_DrawGPUIndexedPrimitives` | 17 to 22 us | the frame's single draw call |
-| `SDL_AcquireGPUCommandBuffer` | 12 to 16 us | one call |
-| `SDL_BindGPUGraphicsPipeline` | 4.5 to 6 us | one call |
-| other SDL calls (binds, pushes, scissor, map, end) | about 8 us | twelve calls |
-| `rg_gui_gpu_prepare` | 31 us | no SDL calls inside: packing 673 commands |
-| `rg_gui_gpu_stage_upload` | 12 us | of which map and unmap 2 us |
-| `rg_gui_gpu_encode_upload` | 32 us | all of it the two uploads above |
-| `rg_gui_gpu_draw` | 35 us | all of it SDL: the draw, the pipeline bind, the small binds |
-| `rg_gui_end_frame` | 18 to 24 us | culling, overlay merge, bookkeeping |
-| UI build (widgets, inside which `rg_gui_end_frame`) | 60 to 88 us | |
+| Call or stage | inclusive | exclusive | note |
+| --- | ---: | ---: | --- |
+| `SDL_SubmitGPUCommandBufferAndAcquireFence` | 67 to 68 us | same | one call |
+| `SDL_UploadToGPUBuffer` | 25 to 26 us | same | two calls: the frame data, and the text cache page the clock changes |
+| `SDL_BeginGPURenderPass` | 24 to 26 us | same | one call |
+| `SDL_DrawGPUIndexedPrimitives` | 19 us | same | the frame's single draw call |
+| `SDL_AcquireGPUCommandBuffer` | 13 us | same | one call |
+| `SDL_BindGPUGraphicsPipeline` | 5 us | same | one call |
+| other SDL calls (binds, pushes, scissor, map, unmap, end) | about 8 us | same | twelve calls |
+| `rg_gui_gpu_prepare` | 27 us | 27 us | no SDL calls inside: packing 673 commands |
+| `rg_gui_gpu_stage_upload` | 10 to 11 us | 10 to 11 us | map and unmap are 1.7 us of it |
+| `rg_gui_gpu_encode_upload` | 26 us | 0.6 us | the two uploads |
+| `rg_gui_gpu_draw` | 29 us | 1.6 us | the draw, the pipeline bind, the small binds |
+| `rg_gui_end_frame` | 21 to 23 us | same | culling, overlay merge, bookkeeping |
+| `SDL_WaitForGPUFences` | 21 us | same | pacing, two frames in flight; p90 above 1 ms under this load |
 
-Two readings. First, the fixed cost is mostly SDL_GPU's per-call overhead on
-Vulkan, not rg_gui's code. One acquire, one copy pass with two uploads, one
-render pass, one draw, and one submit cost about 185 us of CPU under this
-load (about 140 us by the quiet frame's scale): more than all of the
-library's own frame work, which is the widget build, `rg_gui_end_frame`,
-preparation, and staging, about 130 us under the same load. rg_gui already
-issues the minimum: one draw call per frame, one render pass, one copy pass.
-The only call it could still save is the second upload, the text cache page,
-by giving the cache and the frame data one GPU buffer, which the frame
-buffer's cycling makes non-trivial for about 12 us. Second, within the
-library, preparation is the largest single stage at 31 us, 46 ns per
-command for 673 commands; the full showcase does not enable the frame
-signature, so that is vertex and item packing alone, and it and the widget
-build are where rg_gui's own CPU work is left to find.
+Two readings. First, the time inside SDL entry points is the larger share.
+Acquire, the two uploads, begin and end of the render pass, the pipeline
+bind, the draw, and the submit come to about 165 us of the frame's wall time
+under this load, against about 60 us exclusive in the renderer's own stages
+(preparation 27, staging 10, end of frame 22, and under 3 us inside draw and
+upload encoding) plus the widget build. rg_gui already issues the minimum
+set of calls: one draw per frame, one render pass, one copy pass. The one
+call it could still save is the second upload, the text cache page, by
+giving the cache and the frame data one GPU buffer, which the frame buffer's
+cycling makes non-trivial, for about 12 us. Second, within the library,
+preparation is the largest single stage at 27 us, 40 ns per command for 673
+commands; the full showcase does not enable the frame signature, so that is
+vertex and item packing alone, and it and the widget build are where
+rg_gui's own CPU work is left to find.
 
-The strategic reading is the one worth recording: a direct Vulkan backend,
-recording the same frame without SDL_GPU's per-call bookkeeping, would
-recover most of those 140 us, which is the largest fixed cost left that an
-application sees. It is also a large project, and the comparison harness
-runs both libraries on the same SDL_GPU backend, where Dear ImGui's per-draw
-binds and scissors make its share of this overhead larger; that share was
-not measured here.
+What the SDL time is made of was not separated. It contains the Vulkan
+recording, barriers, descriptor updates, and queue submission that any
+backend must do, plus whatever SDL_GPU does around them, and the profiler
+cannot tell the two apart. The hypothesis worth testing is that most of it
+is the latter: a single indexed draw costing 19 us and a render pass begin
+24 us are each an order of magnitude above what those operations cost when
+recorded directly on this class of driver, and the submit at 67 us includes
+SDL's fence creation and its sweep of completed command buffers. A direct
+Vulkan backend might recover much of the 165 us, which would be the largest
+fixed cost left that an application sees from rg_gui, but that is a
+prediction, not a measurement. The test is a small matched prototype that
+records the same frame (one upload, one pass, one draw, one submit) on raw
+Vulkan and is timed the same way; it should come before any decision about
+a backend. The comparison harness runs both libraries on the same SDL_GPU
+backend, where Dear ImGui's per-draw binds and scissors make its share of
+this overhead larger; that share was not measured here either.
 
 ## Measured effect of the changes
 
@@ -1165,10 +1180,11 @@ hidden tab.
    26 percent, and on 2026-10-27 (change 13) the backdrop lift merges the
    first full-viewport rectangle with the render pass clear for another tenth
    of the idle and edit frames. Disabling blending measured no change here.
-   The per-call profile (change 15) then showed the fixed per-frame CPU cost
-   to be mostly SDL_GPU's own call overhead, about 140 us for the minimum
-   set of calls a frame needs; a direct Vulkan backend is the remaining
-   large lever on the application-visible frame.
+   The per-call profile (change 15) then showed most of the fixed per-frame
+   CPU cost inside SDL GPU entry points, about 165 us on a busy desktop for
+   the minimum set of calls a frame needs, against about 60 us in the
+   renderer's own stages. How much of that a direct Vulkan backend would
+   recover is untested; a small matched prototype is the way to find out.
    What remains per frame is the visible fill, the fixed per-submit cost, and
    the present path; not presenting unchanged frames is the remaining lever,
    and both mechanisms for it already ship.
