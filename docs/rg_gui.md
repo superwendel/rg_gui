@@ -505,11 +505,20 @@ What a renderer or tool sees is the culled list: fewer rectangles, some of them
 split, with `rg_gui_draw_list_overlay_start` moved to the same boundary. The
 tile cache and the frame signature consume that list and need no change. Set
 `RgGuiInitDesc.keep_hidden_draws` to keep every pushed command instead, or flip
-`gui.cull_hidden_draws` at run time; `rg_gui_diagnostics` counts the dropped
-and split rectangles in `culled_draw_commands` and `split_draw_commands`. The
-pass costs about 8 us of CPU per frame for the showcase's 735 commands at
-3.4 GHz, and about 6 us for 128 non-overlapping opaque rectangles that have
-nothing to cull, and needs 16 bytes of context memory per draw command,
+`gui.cull_hidden_draws` at run time; `rg_gui_diagnostics` reports the frame's
+dropped and split rectangles in `culled_draw_commands` and
+`split_draw_commands`, and whether the pass ran in `cull_passes`.
+
+The pass paces itself by what it saves. After a run that removed at least
+32,768 pixels of paint it runs on the next frame too; after one that removed
+less, it waits eight frames, or a change in the command count, which is how
+layering usually arrives, before running again. A layered interface is
+therefore culled every frame, and a flat one pays for the pass on one frame in
+eight; the frames it skips are drawn as pushed, so pixels are the same either
+way. The pass costs about 8 us of CPU per frame for the showcase's 735
+commands at 3.4 GHz. On 128 non-overlapping opaque rectangles, which have
+nothing to cull, it costs about 6 us on the frames it runs and under 1 us per
+frame on average. It needs 16 bytes of context memory per draw command,
 included in `rg_gui_memory_required`.
 
 ### Skipping unchanged frames
@@ -625,7 +634,8 @@ above. Capacity exhaustion has layer-specific behavior:
   continues the frame. Inspect `rg_gui_diagnostics(&gui)` after the frame;
   `flags`, dropped counts, and high-water values identify which capacity needs
   adjustment. `culled_draw_commands` and `split_draw_commands` count the
-  rectangles hidden-draw culling removed or replaced; they are not drops.
+  rectangles hidden-draw culling removed or replaced that frame, and
+  `cull_passes` whether it ran; they are not drops.
 - The persistent text renderer may drop only the affected text runs and
   continue preparing other runs. Inspect `rg_gui_renderer_stats` for
   `diagnostic_flags`, `frame_dropped_runs`, `frame_dropped_glyphs`, and cache and

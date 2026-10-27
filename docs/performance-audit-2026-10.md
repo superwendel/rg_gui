@@ -639,6 +639,33 @@ The absolute times are higher than the first table's because the desktop was
 busier; the reductions, 19 to 29 percent of frame work and 13 to 31 percent of
 the render total, match it.
 
+The review's remaining objection was the default: an interface with nothing to
+cull paid about 6 us per frame for nothing. The pass now paces itself. Each
+run reports the paint it removed (the visible area of dropped rectangles plus
+the area the splits gave up); when that is at least 32,768 px, about the
+pass's own cost in fill on this GPU, the pass runs on the next frame too, and
+when it is less, it waits eight frames or a change in the command count, which
+is how a window opening or a popup arriving shows up. The frames it skips are
+drawn as pushed, so pixels are the same on every frame; a context-level test
+drives 40 frames of flat, layered, and flat again content, checks that the
+pass ran on exactly the 19 frames the rule predicts, and compares every
+frame's pixels with a context that keeps hidden draws. Per-frame UI build
+times on one pinned core, 4,096 frames each, pass paced, forced every frame,
+and off:
+
+| Workload | off | paced, mean | paced, p50 / p90 | every frame, p50 |
+| --- | ---: | ---: | ---: | ---: |
+| 128 non-overlapping 64x64 rectangles | 0.51 us | 1.28 us | 0.44 / 6.05 us | 6.35 us |
+| layered, 164 commands, 1.2 Mpx saved | 1.00 us | 2.60 us | 2.24 / 3.35 us | 2.83 us |
+
+The flat workload runs the pass on one frame in eight, which is the p90
+spike, and the layered one on every frame. Switching from flat to layered
+content is culled on the first layered frame, since the count changes; the
+reviewer's own control (five alternating pinned pairs) moved from 0.63 to 1.48
+us for 128 rectangles and 2.41 to 2.83 us for 512. Content that layers only
+on frames the pacing skips, without changing the command count, is the case
+the rule misses; it is drawn as pushed until the next sampled frame.
+
 The Dear ImGui comparison's workloads have no layered backgrounds, so culling
 removes nothing there and its only effect is the pass's own 1 to 3 us of CPU;
 a rerun on 2026-10-26 with culling on moved no cell beyond its noise. A

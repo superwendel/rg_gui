@@ -55,9 +55,12 @@ between 0.x releases.
   percent of its rectangle paint hidden; it now paints 1.5 times, and its frame
   work under Immediate presentation falls about a quarter in the idle and edit
   scenarios and 13 percent with 20 docked panels, for about 8 us more CPU per
-  frame at full clock. `RgGuiInitDesc.keep_hidden_draws` or the context's
-  `cull_hidden_draws` switch it off; `rg_gui_diagnostics` counts
-  `culled_draw_commands` and `split_draw_commands`. Context memory grows by 16
+  frame at full clock. The pass paces itself: when a run saves less than
+  32,768 pixels of paint it waits eight frames, or a change in the command
+  count, before running again, so an interface with nothing to cull pays under
+  1 us per frame on average. `RgGuiInitDesc.keep_hidden_draws` or the context's
+  `cull_hidden_draws` switch it off; `rg_gui_diagnostics` reports the frame's
+  `culled_draw_commands`, `split_draw_commands`, and `cull_passes`. Context memory grows by 16
   bytes per draw command. The CPU benchmarks keep hidden draws so their output
   signatures stay comparable across versions; the pass has its own extended
   case, `cull_hidden`.

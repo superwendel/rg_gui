@@ -783,6 +783,95 @@ static int test_hidden_draw_culling(void)
 	return 1;
 }
 
+/* Pacing. A flat frame of 128 non-overlapping rectangles runs the pass on
+ * the first frame and then every eighth; a layered frame runs it at once,
+ * since the command count changed, and on every frame after while it keeps
+ * saving paint; back to flat, it runs once more and paces again. Every frame
+ * must paint the same pixels as a context that keeps hidden draws. */
+static void cull_pace_frame(RgGuiContext* gui, const RgInputState* input, int layered)
+{
+	rg_gui_begin_frame(gui, input, 1.0f / 60.0f);
+	if (!layered)
+	{
+		for (u32 i = 0u; i < 128u; i++)
+			rg_gui_push_rect(gui, rg_gui_make_rect(8.0f + (f32)(i % 16u) * 72.0f, 8.0f + (f32)(i / 16u) * 72.0f, 64.0f, 64.0f),
+			                 rg_gui_color(0.5f, 0.5f, 0.5f, 1.0f));
+	}
+	else
+	{
+		rg_gui_push_rect(gui, rg_gui_make_rect(0.0f, 0.0f, 1200.0f, 600.0f), rg_gui_color(0.1f, 0.1f, 0.1f, 1.0f));
+		for (u32 i = 0u; i < 24u; i++)
+			rg_gui_push_rect(gui, rg_gui_make_rect(20.0f + (f32)(i % 8u) * 48.0f, 20.0f + (f32)(i / 8u) * 48.0f, 40.0f, 40.0f),
+			                 rg_gui_color(0.9f, 0.2f, 0.2f, 1.0f));
+		rg_gui_push_rect(gui, rg_gui_make_rect(10.0f, 10.0f, 400.0f, 300.0f), rg_gui_color(0.3f, 0.3f, 0.3f, 1.0f));
+		rg_gui_push_rect(gui, rg_gui_make_rect(420.0f, 10.0f, 400.0f, 580.0f), rg_gui_color(0.3f, 0.3f, 0.35f, 1.0f));
+		for (u32 i = 0u; i < 16u; i++)
+			rg_gui_push_rect(gui, rg_gui_make_rect(30.0f + (f32)(i % 4u) * 60.0f, 30.0f + (f32)(i / 4u) * 60.0f, 50.0f, 50.0f),
+			                 rg_gui_color(0.2f, 0.6f, 0.9f, 0.5f));
+	}
+	rg_gui_end_frame(gui);
+}
+
+static int test_hidden_draw_pacing(void)
+{
+	RgTextFont font;
+	RgTextGlyph glyphs[3];
+	make_font(&font, glyphs);
+	RgGuiInitDesc desc = {0};
+	desc.font = &font;
+	desc.max_draw_cmds = 512u;
+	desc.text_buffer_size = KB(4);
+	RgGuiInitDesc keep_desc = desc;
+	keep_desc.keep_hidden_draws = 1;
+	static u8 expected[CULL_TEST_SIZE * CULL_TEST_SIZE * 4u], actual[CULL_TEST_SIZE * CULL_TEST_SIZE * 4u];
+	void* memory = malloc(MB(4));
+	void* keep_memory = malloc(MB(4));
+	if (!memory || !keep_memory) { free(memory); free(keep_memory); return 0; }
+	RgArena arena = {(char*)memory, MB(4), 0u, MB(4)};
+	RgArena keep_arena = {(char*)keep_memory, MB(4), 0u, MB(4)};
+	RgGuiContext gui, keep;
+	int passed = 0;
+	if (!rg_gui_init(&gui, &arena, &desc) || !rg_gui_init(&keep, &keep_arena, &keep_desc)) goto done;
+	RgInputState input;
+	rg_input_init(&input);
+	/* Runs on frames 0 and 8 (flat), 16 to 31 (layered, every frame), and 32
+	 * (flat again, the count changed): 19 in all. Diagnostics are per frame. */
+	static const u32 expected_passes[40] = {1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
+	                                        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+	                                        1, 0, 0, 0, 0, 0, 0, 0};
+	for (u32 frame = 0u; frame < 40u; frame++)
+	{
+		const int layered = frame >= 16u && frame < 32u;
+		cull_pace_frame(&gui, &input, layered);
+		cull_pace_frame(&keep, &input, layered);
+		const RgGuiDiagnostics* diag = rg_gui_diagnostics(&gui);
+		if (diag->cull_passes != expected_passes[frame] || diag->flags || rg_gui_diagnostics(&keep)->cull_passes)
+		{
+			fprintf(stderr, "hidden-draw pacing: frame %u ran the pass %u times (expected %u; flags %u)\n",
+			        frame, diag->cull_passes, expected_passes[frame], diag->flags);
+			goto done;
+		}
+		cull_test_raster(rg_gui_draw_list(&keep), keep.overlay_start, 0.0f, 0.0f, expected);
+		cull_test_raster(rg_gui_draw_list(&gui), gui.overlay_start, 0.0f, 0.0f, actual);
+		if (memcmp(expected, actual, sizeof(expected)))
+		{
+			fprintf(stderr, "hidden-draw pacing: frame %u painted differently from the kept list\n", frame);
+			goto done;
+		}
+		if (layered && (rg_gui_draw_list(&gui)->count >= rg_gui_draw_list(&keep)->count || !diag->culled_draw_commands))
+		{
+			fprintf(stderr, "hidden-draw pacing: layered frame %u was not culled\n", frame);
+			goto done;
+		}
+	}
+	printf("Hidden-draw pacing: 40 frames, 19 passes, every frame identical to the kept list\n");
+	passed = 1;
+done:
+	free(memory);
+	free(keep_memory);
+	return passed;
+}
+
 static int test_unpack_color(void)
 {
 	for (u32 channel = 0u; channel < 4u; channel++)
@@ -1591,6 +1680,7 @@ int main(void)
 	    !test_pack_color() ||
 	    !test_unpack_color() ||
 	    !test_hidden_draw_culling() ||
+	    !test_hidden_draw_pacing() ||
 	    !test_node_graph_bundle_validation() ||
 	    !test_integer_widget_boundaries(&gui) ||
 	    !test_viewport_and_input_router(&gui) || !test_viewport_storage(&font) ||

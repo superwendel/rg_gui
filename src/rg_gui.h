@@ -747,11 +747,13 @@ typedef struct RgGuiDiagnostics
 	size_t draw_command_high_water;
 	size_t text_buffer_high_water;
 	u32 recovered_active_ids;
-	/* Cumulative counts from hidden-draw culling: rectangles dropped because a
-	 * later opaque rectangle covered them, and rectangles replaced by their
-	 * visible parts. */
+	/* This frame's hidden-draw culling: rectangles dropped because a later
+	 * opaque rectangle covered them, rectangles replaced by their visible
+	 * parts, and whether the pass ran (it paces itself when it finds nothing
+	 * worth its cost). */
 	u32 culled_draw_commands;
 	u32 split_draw_commands;
+	u32 cull_passes;
 } RgGuiDiagnostics;
 
 typedef struct RgGuiLayout
@@ -1481,6 +1483,15 @@ typedef struct RgGuiPlatformOutput
 	int ime_caret_valid;
 } RgGuiPlatformOutput;
 
+/* Pacing of the hidden-draw culling pass on one draw list; see
+ * rg_gui_draw_list_cull_hidden. */
+typedef struct RgGuiCullPace
+{
+	u32 frames_since_run;
+	u32 last_count;
+	int productive;
+} RgGuiCullPace;
+
 #if defined(RG_GUI_ENABLE_VIEWPORTS)
 typedef struct RgGuiViewport
 {
@@ -1507,6 +1518,7 @@ typedef struct RgGuiViewport
 	RgGuiPlatformOutput platform_output;
 	int window_focused;
 	int active;
+	RgGuiCullPace cull_pace;
 } RgGuiViewport;
 
 typedef struct RgGuiViewportStackEntry
@@ -1576,6 +1588,7 @@ typedef struct RgGuiContext
 	 * and the runtime switch, 1 unless RgGuiInitDesc.keep_hidden_draws. */
 	RgGuiRect* cull_clips;
 	int cull_hidden_draws;
+	RgGuiCullPace cull_pace;
 	u32 overlay_start;
 #if defined(RG_GUI_ENABLE_VIEWPORTS)
 	RgGuiViewport* viewports;
@@ -11051,10 +11064,20 @@ RGINLINE void rg_gui_diagnostics_finish_stacks(RgGuiContext* ctx)
  * culled one. A fragment is also only emitted when its position plus size,
  * which is how the renderers rebuild its far edge, lands exactly on the shared
  * edge. The decisions are made in one backward pass, then the list is written
- * into a scratch array the size of the list and copied back. */
+ * into a scratch array the size of the list and copied back.
+ *
+ * The pass paces itself: when a run saves less than RG_GUI_CULL_MIN_SAVED_AREA
+ * pixels of paint, the next runs wait RG_GUI_CULL_PACE_FRAMES frames or a
+ * change in the command count, so a list with nothing to cull pays for one
+ * run in eight frames; see rg_gui_draw_list_cull_hidden. */
 #define RG_GUI_CULL_OCCLUDER_MAX 16u
 #define RG_GUI_CULL_FRAGMENT_MAX 8u
 #define RG_GUI_CULL_SPLIT_MAX 32u
+/* Pacing: after a run that saved less than RG_GUI_CULL_MIN_SAVED_AREA pixels
+ * of paint, the pass waits RG_GUI_CULL_PACE_FRAMES frames, or a change in the
+ * command count, before running again. */
+#define RG_GUI_CULL_PACE_FRAMES 8u
+#define RG_GUI_CULL_MIN_SAVED_AREA 32768.0f
 #define RG_GUI_CULL_CLIP_STACK_MAX 64u
 #define RG_GUI_CULL_MIN_OCCLUDEE_AREA 1024.0f
 #define RG_GUI_CULL_MIN_OCCLUDER_AREA 4096.0f
@@ -11119,13 +11142,14 @@ typedef struct RgGuiCullSplit
  * overlay commands begin and the renderers reset their clip stacks, is moved
  * to the same boundary in the culled list. Returns the dropped and split
  * counts. */
-static RG_NOINLINE void rg_gui_draw_list_cull_hidden_ex(RgGuiDrawList* list, u32* overlay_start,
-                                                       RgGuiRect* clips, RgGuiDrawCmd* scratch,
-                                                       u32 scratch_capacity, u32* out_culled,
-                                                       u32* out_split)
+static RG_NOINLINE void rg_gui_draw_list_cull_hidden_measured(RgGuiDrawList* list, u32* overlay_start,
+                                                             RgGuiRect* clips, RgGuiDrawCmd* scratch,
+                                                             u32 scratch_capacity, u32* out_culled,
+                                                             u32* out_split, f32* out_saved)
 {
 	if (out_culled) *out_culled = 0u;
 	if (out_split) *out_split = 0u;
+	if (out_saved) *out_saved = 0.0f;
 	if (!list || !list->cmds || !clips || !scratch || !overlay_start || list->count < 2u ||
 	    list->count > list->capacity || scratch_capacity < list->count)
 		return;
@@ -11188,6 +11212,7 @@ static RG_NOINLINE void rg_gui_draw_list_cull_hidden_ex(RgGuiDrawList* list, u32
 	u32 occluder_count = 0u;
 	RgGuiCullSplit splits[RG_GUI_CULL_SPLIT_MAX];
 	u32 split_count = 0u, culled = 0u;
+	f32 saved = 0.0f;
 	for (u32 n = count; n-- > 0u;)
 	{
 		const RgGuiDrawCmd* cmd = &cmds[n];
@@ -11266,6 +11291,7 @@ static RG_NOINLINE void rg_gui_draw_list_cull_hidden_ex(RgGuiDrawList* list, u32
 				if (fragment_count == 0u)
 				{
 					culled++;
+					saved += area;
 					clips[n].w = RG_GUI_CULL_DROPPED;
 					continue;
 				}
@@ -11337,6 +11363,8 @@ static RG_NOINLINE void rg_gui_draw_list_cull_hidden_ex(RgGuiDrawList* list, u32
 		splits[worst].fragment_count = 0u;
 		active--;
 	}
+	for (u32 s = 0u; s < split_count; s++)
+		if (splits[s].fragment_count) saved += splits[s].saved;
 
 	/* Forward: write the decided list into the scratch array and copy it back. */
 	u32 written = 0u, overlay_written = 0u;
@@ -11369,21 +11397,53 @@ static RG_NOINLINE void rg_gui_draw_list_cull_hidden_ex(RgGuiDrawList* list, u32
 	*overlay_start = overlay_written;
 	if (out_culled) *out_culled = culled;
 	if (out_split) *out_split = active;
+	if (out_saved) *out_saved = saved;
+}
+
+/* The pass without the saved-paint measure; tests and benchmarks call this. */
+RGINLINE void rg_gui_draw_list_cull_hidden_ex(RgGuiDrawList* list, u32* overlay_start,
+                                              RgGuiRect* clips, RgGuiDrawCmd* scratch,
+                                              u32 scratch_capacity, u32* out_culled,
+                                              u32* out_split)
+{
+	rg_gui_draw_list_cull_hidden_measured(list, overlay_start, clips, scratch, scratch_capacity,
+	                                      out_culled, out_split, NULL);
 }
 
 /* Cull a finished list with the context's scratch storage; the overlay list's
- * command array is free once its commands have been merged into `list`. */
+ * command array is free once its commands have been merged into `list`.
+ *
+ * The pass paces itself by what it saves. After a run that removed at least
+ * RG_GUI_CULL_MIN_SAVED_AREA pixels of paint it runs on the next frame too;
+ * after one that removed less, it waits RG_GUI_CULL_PACE_FRAMES frames, or a
+ * change in the command count, which is how layering usually arrives. A list
+ * with nothing to cull therefore pays for the pass on one frame in eight, and
+ * a layered one is culled every frame. Pixels are the same either way: a frame
+ * the pass skips is drawn as pushed. */
 RGINLINE void rg_gui_draw_list_cull_hidden(RgGuiContext* ctx, RgGuiDrawList* list,
-                                           u32* overlay_start, RgGuiDrawList* scratch)
+                                           u32* overlay_start, RgGuiDrawList* scratch,
+                                           RgGuiCullPace* pace)
 {
 	if (!ctx || !ctx->cull_hidden_draws || !ctx->cull_clips || !list || !overlay_start || !scratch ||
 	    !scratch->cmds || list->count > scratch->capacity || list->count > ctx->draw_list.capacity)
 		return;
+	if (pace)
+	{
+		pace->frames_since_run++;
+		if (!pace->productive && pace->frames_since_run < RG_GUI_CULL_PACE_FRAMES &&
+		    list->count == pace->last_count)
+			return;
+		pace->frames_since_run = 0u;
+		pace->last_count = list->count;
+	}
 	u32 culled = 0u, split = 0u;
-	rg_gui_draw_list_cull_hidden_ex(list, overlay_start, ctx->cull_clips, scratch->cmds,
-	                                scratch->capacity, &culled, &split);
+	f32 saved = 0.0f;
+	rg_gui_draw_list_cull_hidden_measured(list, overlay_start, ctx->cull_clips, scratch->cmds,
+	                                      scratch->capacity, &culled, &split, &saved);
+	if (pace) pace->productive = saved >= RG_GUI_CULL_MIN_SAVED_AREA;
 	ctx->diagnostics.culled_draw_commands += culled;
 	ctx->diagnostics.split_draw_commands += split;
+	ctx->diagnostics.cull_passes++;
 }
 
 RGINLINE void rg_gui_end_frame(RgGuiContext* ctx)
@@ -11417,7 +11477,7 @@ RGINLINE void rg_gui_end_frame(RgGuiContext* ctx)
 			ctx->draw_list.count += copy_count;
 		}
 	}
-	rg_gui_draw_list_cull_hidden(ctx, &ctx->draw_list, &ctx->overlay_start, &ctx->overlay_list);
+	rg_gui_draw_list_cull_hidden(ctx, &ctx->draw_list, &ctx->overlay_start, &ctx->overlay_list, &ctx->cull_pace);
 
 	if (ctx->text_buffer_used > ctx->diagnostics.text_buffer_high_water)
 	{
@@ -16052,7 +16112,8 @@ RGINLINE void rg_gui_viewport_end(RgGuiContext* ctx, RgGuiViewport* viewport)
 			viewport->draw_list.count += copy_count;
 		}
 	}
-	rg_gui_draw_list_cull_hidden(ctx, &viewport->draw_list, &viewport->overlay_start, &viewport->overlay_list);
+	rg_gui_draw_list_cull_hidden(ctx, &viewport->draw_list, &viewport->overlay_start, &viewport->overlay_list,
+	                             &viewport->cull_pace);
 
 	RgGuiViewportStackEntry* entry = &ctx->viewport_stack[--ctx->viewport_stack_top];
 	ctx->draw_target = entry->prev_draw_target ? entry->prev_draw_target : &ctx->draw_list;
