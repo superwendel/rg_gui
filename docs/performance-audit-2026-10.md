@@ -415,6 +415,94 @@ traffic proportional to the document: the prefix and suffix comparison and the
 copy of the text and lines into the cache. Relayout in place in the cache would
 roughly halve that traffic and is left for later.
 
+### 11. Two fragment input slots in the indexed shader
+
+A Linux/Vulkan comparison with Dear ImGui (`benchmarks/third_party`,
+2026-10-26) rendered both libraries offscreen with the same glyph bitmaps and
+two frames in flight. rg_gui used less CPU in every workload, 1.3 to 11x, but
+its frame time lost the inspector workloads by 5 to 8 percent. Every cell showed
+a non-zero fence wait for both libraries, so both were GPU-bound and the frame
+column was GPU time per frame.
+
+A `--replicate N` flag was added to the harness: it encodes the prepared frame
+N times into one render pass, and a line fitted through N = 1, 8, 16 separates
+per-content GPU cost (the slope) from fixed per-frame cost (the intercept).
+Three alternating rounds of 1,024 frames each, two flights, microseconds:
+
+| Case | Library or shader variant | Per-content (slope) | Fixed (intercept) |
+| --- | --- | ---: | ---: |
+| Inspector | rg_gui, shipping shader | 90.9 | 29.8 |
+| Inspector | Dear ImGui | 75.1 | 42.4 |
+| Static labels | rg_gui, shipping shader | 126.1 | 25.2 |
+| Static labels | Dear ImGui | 113.2 | 44.5 |
+
+rg_gui's fixed cost was lower in every case and its per-content cost 11 to 22
+percent higher, in text and in widgets alike. Variants of the indexed shaders,
+compiled with shadercross and selected through an environment variable in the
+harness, located the difference. Slopes are the median-of-rounds fits; the
+shipping shader measured 89.8 to 93.2 (inspector) and 125.2 to 126.5 (labels)
+across the five sweeps.
+
+| Variant | Inspector slope | Labels slope |
+| --- | ---: | ---: |
+| shipping: `nointerpolation uint sampled`, branch in the fragment shader | 90.9 | 126.1 |
+| no clip distances, no clip-table load | 90.0 | 126.2 |
+| branch replaced by a select on the flag | 90.0 | 126.3 |
+| flag as an interpolated float, lerp | 91.8 | 126.8 |
+| flag as an interpolated float, select | 92.6 | 127.8 |
+| flag exported but not read by the fragment shader | 76.8 | 109.7 |
+| fragment shader always samples (no flag) | 76.7 | 110.8 |
+| flag packed into `uv.z`, select (adopted) | 77.4 | 110.8 |
+| flag encoded as negative `uv`, select | 77.2 | 110.7 |
+| Dear ImGui | 75.1 | 113.2 |
+
+Neither the clip distances nor the branch cost anything measurable. What cost
+about 15 percent of the pass was a third fragment input slot being read, flat
+or interpolated, integer or float, branched or selected. The adopted shader
+widens `uv` to a float4 whose z is 1 for sampled geometry and 0 for solid,
+samples unconditionally, and selects; solid geometry carries uv (0, 0), so its
+discarded texel is one cached fetch. The device test's readback checks, 389
+pixel probes and 20,480 clip-rule pixels covering materials, alpha, mutable
+text, and the clip distances, pass unchanged, and the
+comparison harness's verification found the label captures byte-identical to
+Dear ImGui's after the change as before it.
+
+With the adopted shader the comparison was rerun under its full protocol (six
+alternating pairs, 2,048 measured frames, two flights), microseconds per frame,
+with the pairs in which rg_gui's median was the lower:
+
+| Workload | rg_gui before | rg_gui after | Dear ImGui | Pairs |
+| --- | ---: | ---: | ---: | ---: |
+| Static labels | 152.1 | 131.2 | 175.3 | 6/6 |
+| Changing labels | 182.7 | 168.3 | 179.6 | 5/6 |
+| Inspector | 124.2 | 108.3 | 125.7 | 6/6 |
+| Virtualized list | 61.2 | 56.0 | 77.1 | 5/6 |
+| Mixed inspector | 125.4 | 114.8 | 115.9 | 5/6 |
+| Asset browser | 64.0 | 58.7 | 81.9 | 6/6 |
+| Text editor | 356.8 | 357.5 | 388.7 | 6/6 |
+| Docked workspace | 469.3 | 436.1 | 732.3 | 6/6 |
+
+rg_gui now has the lower frame-time median in all 16 cells at both queue
+depths, and the lower CPU time in all 16 as before. The machine was loaded
+during this run (load average 4.3 falling to 2.5), which moved Dear ImGui's
+numbers between runs; rg_gui's before and after columns moved by what the
+slopes predicted.
+
+In the full showcase under Immediate presentation, three alternating rounds of
+1,200 frames with the old and new indexed shaders swapped in place, frame work
+went from 1,810 to 1,749 us in the idle scenario and from 1,751 to 1,677 us in
+the edit scenario, 3 to 4 percent; one idle round with the new shader overlapped
+the old range. The showcase's frame is mostly the whole-window fill and the
+present path, which the slot change does not touch.
+
+The same sweep placed the changing-label penalty: with identical geometry the
+dynamic case had the same slope as the static one (125.2 against 125.7) but a
+fixed cost of 55 us against 25. An upload-statistics dump in the harness
+adapter showed each changing frame uploading 98,304 bytes of glyph quads in
+one range: 128 labels of 26 glyphs padded to 32-quad pages at 24 bytes per
+quad. A 16-byte quad (pixel-snapped 16-bit position and size) would cut that
+by a third; it is left for later.
+
 ## Measured effect of the changes
 
 Extended CPU suite, `benchmarks/run.py compare`, five alternating process
@@ -697,6 +785,16 @@ hidden tab.
    The remaining per-keystroke cost is the memory traffic of comparing the
    text with the snapshot and copying text and lines into the cache; relayout
    in place would about halve it, a microsecond or two.
+3. **Smaller cached glyph quads.** A changing-label frame uploads 98,304 bytes
+   of 24-byte quads padded to 32-quad pages, which the replication sweep put at
+   about 30 us of fixed GPU time per frame on this iGPU. Pixel-snapped 16-bit
+   position and size would make a 16-byte quad, and 16-quad pages would halve
+   the padding for short labels.
+4. **GPU time is now the frame.** With change 11 the render pass costs the
+   same as Dear ImGui's for the same content and rg_gui's CPU is a fraction of
+   its frame; what remains per frame is fill and the fixed per-submit cost.
+   Overdraw under opaque panels and not presenting unchanged frames are the
+   levers, both outside the shader.
 ## Verified and left alone
 
 - Text length in the draw command, tried on 2026-10-23 and not adopted.

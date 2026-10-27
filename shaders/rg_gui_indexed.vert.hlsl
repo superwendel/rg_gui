@@ -13,8 +13,10 @@ struct Output
 {
 	float4 position : SV_Position;
 	float4 color : TEXCOORD0;
-	float2 uv : TEXCOORD1;
-	nointerpolation uint sampled : TEXCOORD2;
+	// xy: atlas coordinates; z: 1 when the fragment samples the texture, 0 for
+	// solid geometry. The flag rides in the uv slot because a third fragment
+	// input slot cost about 15% of the GPU pass on Intel (see the audit).
+	float4 uv : TEXCOORD1;
 	// Distances to the four edges of the primitive's clip rectangle. The
 	// rasterizer drops pixels where any is negative, so clipping needs no
 	// scissor change and one draw call can span many clips.
@@ -43,10 +45,9 @@ Output main(uint vertex : SV_VertexID)
 		color = run.z;
 		clip = run.w;
 		uint2 uv = cached_quads.Load2(quad + 16);
-		result.uv = lerp(float2(uv.x & 65535, uv.x >> 16),
-		                 float2(uv.y & 65535, uv.y >> 16), corner) *
-		            atlas_inv_size;
-		result.sampled = 1;
+		result.uv = float4(lerp(float2(uv.x & 65535, uv.x >> 16),
+		                        float2(uv.y & 65535, uv.y >> 16), corner) *
+		                   atlas_inv_size, 1.0, 0.0);
 	}
 	else
 	{
@@ -59,8 +60,7 @@ Output main(uint vertex : SV_VertexID)
 		pixel = asfloat(frame.Load2(raw)) + draw_offset;
 		color = frame.Load(raw + 8);
 		clip = (ref.y >> 1) & 0x1fffffff;
-		result.uv = asfloat(frame.Load2(raw + 12));
-		result.sampled = kind == 2;
+		result.uv = float4(asfloat(frame.Load2(raw + 12)), kind == 2 ? 1.0 : 0.0, 0.0);
 	}
 	// Round the clip like the CPU scissor did: floor the near edges and ceil
 	// the far edges after adding the draw offset.

@@ -46,6 +46,15 @@ between 0.x releases.
 
 ### Changed
 
+- The indexed fragment shader reads two input slots instead of three: the
+  sampled-or-solid flag now rides in the `uv` slot's third component, and the
+  shader samples unconditionally and selects. On an Intel UHD G1 the third
+  slot cost about 15 percent of the GPU pass whether it was flat or
+  interpolated, branched or selected; without it the pass costs the same as
+  Dear ImGui's for the same content, and the comparison in
+  `benchmarks/LINUX_IMGUI_2026-10-26.md` has rg_gui lower in every cell. The
+  full showcase's frame work under Immediate presentation fell 3 to 4 percent.
+  Shader sources only; rebuild the compiled shaders.
 - An edit in a text area with a layout cache wraps only the paragraphs it
   touched; lines before them are kept and lines after them move by the length
   change. A keystroke in an 8 KiB document of short paragraphs costs about 3 us
