@@ -761,7 +761,9 @@ they removed, but the fill that remained, about one layer at 240 us per
 megapixel, explained only a quarter of what was left. The rest was attributed
 on 2026-10-27 with two new showcase options: `--offscreen` draws into a
 persistent texture of the window's size and paces on a fence two frames back
-instead of acquiring and presenting a swapchain image, and `--drop KIND`
+instead of acquiring and presenting a swapchain image (such frames count as
+submitted, not presented, and the option refuses the tile cache and the smoke
+test, which present), and `--drop KIND`
 removes one kind of command (`text`, `translucent`, `rects`, `images`, `all`)
 from the finished list. Idle scenario, three rotating rounds of 900 frames,
 medians in microseconds:
@@ -779,30 +781,45 @@ medians in microseconds:
 | offscreen, full list, 905x566 | 237 | 82 | 37 |
 | offscreen, full list, 640x400 | 147 | 15 | 32 |
 
-Three conclusions. First, presentation is the frame. The GUI's own work,
-CPU and GPU, is 347 us per frame at 1280x800; presenting the same frame
-through X11 and Mesa costs another 900 us, and presenting an empty frame
-costs 570 us. Nothing in the library touches that: it is the platform's
-copy of a 4 MB image, and Dear ImGui in the same window pays the same. The
-comparison harness renders offscreen, which is why its numbers are a third
-of the showcase's. Second, the fill that remains is at the floor. Rectangles
-cost 227 us, one opaque layer over 1.02 Mpx, which at this GPU's memory
-bandwidth is simply the cost of writing the frame once; the slope of the
-size sweep is 262 us per megapixel with an 80 us intercept. Text costs 33 us
-for 620 glyphs, translucent rectangles and images nothing measurable. The
-only way below one layer is not writing unchanged pixels, which the tile
-cache and the present skip already do. Third, the fixed cost is now CPU. The
-offscreen frame breaks into UI build 59, prepare 20, staging 10, encode 45,
-and submit 54 us, about 190 us of CPU against 350 us of GPU; at 640x400 the
-loop is CPU-bound. The UI build itself drops from 105 to 59 us when the GPU
-is not saturated, because the CPU clocks down while the GPU is busy on this
-part. The raw per-frame CSVs are kept under `out/attribution-2026-10-27/`.
+These are frame-time throughputs with two frames in flight, not GPU
+timings: SDL_GPU exposes no timestamp queries, so CPU and GPU work overlap
+inside each number and the GPU's own share is not measured. With that
+caveat, three readings. First, the presenting loop is the frame. The same
+list runs at 347 us per frame offscreen and 1,273 us when each frame is
+acquired from and presented to the X11 swapchain, and an empty list runs at
+97 us against 664 us. The difference is the presentation path in this
+configuration: acquire, present, and whatever synchronization and copying
+Mesa's X11 path does, which this experiment does not look inside. Any
+renderer presenting through the same window goes through the same path; its
+cost for Dear ImGui was not measured. The comparison harness renders
+offscreen, which is why its frame times are a third of the showcase's.
+Second, rectangles are most of what remains. Dropping them takes the
+offscreen frame from 347 to 120 us; dropping text takes it to 314 us for
+620 glyphs. The idle list contains no images and almost no translucent
+rectangles, so those two controls only confirm that. The 227 us the
+rectangles cost is consistent with writing one opaque layer over 1.02 Mpx at
+this GPU's memory bandwidth, and the size sweep's slope of 262 us per
+megapixel points the same way, but the sweep is not a fixed-content sweep
+(the showcase lays out fewer commands in a smaller window, 730 to 508) and
+the GPU time is not measured, so the floor is inferred, not established. The
+`--drop` filter itself adds a pass over the list, a microsecond or two.
+Third, the fixed cost is CPU. The offscreen frame's recorded stages are
+events 25, UI build 59, prepare 20, staging 10, upload encode 31, draw
+encode 45, and submit 54 us, about 240 us of wall time per frame; these are
+wall times and can include driver waits inside the calls. At 640x400 the
+loop is CPU-bound. The UI build itself drops from 105 to 59 us when the loop
+is not waiting on presentation, because the CPU clocks down while the GPU is
+busy on this part. The raw per-frame CSVs are kept under
+`out/attribution-2026-10-27/`.
 
 The levers this leaves, in order: the per-frame fixed CPU cost (submit and
-encode first), which also moves every cell of the comparison harness; the
-glyph quad size for the text-heavy workloads; and the present path, which is
-the platform's and can only be avoided by presenting less (the present skip)
-or measured elsewhere (no Wayland session was available on this desktop).
+the two encodes first), profiled stage by stage, which also moves every cell
+of the comparison harness; the glyph quad size for the text-heavy
+workloads; and the present path, which is the platform's and can only be
+avoided by presenting less (the present skip) or measured elsewhere (no
+Wayland session was available on this desktop). Declaring the rendering at
+its floor would need a fixed-content size sweep and a GPU timer, neither of
+which this experiment has.
 
 ## Measured effect of the changes
 

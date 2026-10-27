@@ -275,8 +275,9 @@ backdrop rectangle instead of lifting it into the render pass clear, and
 `--dump-commands PATH` writes that frame's raw draw commands for offline
 analysis, such as timing the culling pass in a tight loop. `--offscreen` draws
 into a persistent texture of the window's size and paces on a fence two frames
-back instead of acquiring and presenting, which separates the GUI's own cost
-from the platform's presentation, and `--drop KIND` removes `text`,
+back instead of acquiring and presenting, which separates the GUI's own
+frame time from the platform's presentation path (frame times, not GPU
+timings: CPU and GPU overlap inside them), and `--drop KIND` removes `text`,
 `translucent` rectangles, all `rects`, `images`, or `all` commands from the
 finished list so the frame can be attributed by content. See
 [change 12](../docs/performance-audit-2026-10.md#12-hidden-draw-culling),

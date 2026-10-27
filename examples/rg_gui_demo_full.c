@@ -1075,6 +1075,11 @@ int main(int argc, char** argv)
 		return 1;
 	}
 	if (profile_options.path && frame_limit == 0) frame_limit = (int)profile_options.warmup + 1200;
+	if (demo_render_offscreen && (tile_cache || smoke_test))
+	{
+		fprintf(stderr, "--offscreen renders without presenting and cannot be combined with the tile cache or --smoke-test\n");
+		return 1;
+	}
 	if (smoke_test)
 	{
 		hidden = 0;

@@ -968,8 +968,10 @@ static int demo_render_draw_list_skippable(SDL_GPUDevice* device, SDL_Window* wi
 		metrics->submitted = submitted;
 	}
 	if (!submitted) goto done;
-	if (out_presented) *out_presented = swapchain != NULL;
-	if (metrics) metrics->presented = swapchain != NULL;
+	/* An offscreen frame is submitted but never presented. */
+	const int presented = swapchain != NULL && !demo_render_offscreen;
+	if (out_presented) *out_presented = presented;
+	if (metrics) metrics->presented = presented;
 	if (skip && swapchain)
 	{
 		skip->signature = signature;
