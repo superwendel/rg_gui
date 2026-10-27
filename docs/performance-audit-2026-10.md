@@ -872,19 +872,26 @@ rg_gui's own CPU work is left to find.
 What the SDL time is made of was not separated. It contains the Vulkan
 recording, barriers, descriptor updates, and queue submission that any
 backend must do, plus whatever SDL_GPU does around them, and the profiler
-cannot tell the two apart. The hypothesis worth testing is that most of it
-is the latter: a single indexed draw costing 19 us and a render pass begin
-24 us are each an order of magnitude above what those operations cost when
-recorded directly on this class of driver, and the submit at 67 us includes
-SDL's fence creation and its sweep of completed command buffers. A direct
-Vulkan backend might recover much of the 165 us, which would be the largest
-fixed cost left that an application sees from rg_gui, but that is a
-prediction, not a measurement. The test is a small matched prototype that
-records the same frame (one upload, one pass, one draw, one submit) on raw
-Vulkan and is timed the same way; it should come before any decision about
-a backend. The comparison harness runs both libraries on the same SDL_GPU
-backend, where Dear ImGui's per-draw binds and scissors make its share of
-this overhead larger; that share was not measured here either.
+cannot tell the two apart. The largest line, the submit at 67 us, is
+probably mostly the former: on this offscreen path SDL 3.4.18's submit
+takes its fence from a pool and performs no cleanup sweep (that runs inside
+the fence wait, timed separately), so what it does is end the command
+buffer and call `vkQueueSubmit`, which a native backend does too. The
+hypothesis worth testing concerns the other lines: a single indexed draw
+costing 19 us, a render pass begin 24 us, two buffer uploads 25 us, and a
+command buffer acquire 13 us, about 80 us together, are each well above
+what those operations cost when recorded directly on this class of driver,
+and most of that difference would be SDL_GPU's descriptor, barrier, and
+pool bookkeeping. A direct Vulkan backend might recover a good part of
+those 80 us, but that is a prediction, not a measurement. The test is a
+small matched prototype that records the same frame on raw Vulkan, with the
+same two buffer updates, bytes, layouts, and synchronization, one render
+pass, one draw, and one submit, timed the same way; upload consolidation,
+if tried, is a separate measurement. That prototype should come before any
+decision about a backend. The comparison harness runs both libraries on the
+same SDL_GPU backend, where Dear ImGui's per-draw binds and scissors make
+its share of this overhead larger; that share was not measured here
+either.
 
 ## Measured effect of the changes
 
@@ -1183,8 +1190,9 @@ hidden tab.
    The per-call profile (change 15) then showed most of the fixed per-frame
    CPU cost inside SDL GPU entry points, about 165 us on a busy desktop for
    the minimum set of calls a frame needs, against about 60 us in the
-   renderer's own stages. How much of that a direct Vulkan backend would
-   recover is untested; a small matched prototype is the way to find out.
+   renderer's own stages, of which the submit is probably driver work any
+   backend pays. How much of the rest a direct Vulkan backend would recover
+   is untested; a small matched prototype is the way to find out.
    What remains per frame is the visible fill, the fixed per-submit cost, and
    the present path; not presenting unchanged frames is the remaining lever,
    and both mechanisms for it already ship.
