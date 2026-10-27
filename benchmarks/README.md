@@ -7,7 +7,8 @@ Checks use explicit error exits, so `/DNDEBUG` does not disable validation.
 For real-window frame measurements and presentation modes, see
 [Profiling the demos and Unicode](PROFILING.md).
 For measured comparisons with another GUI library, see
-[Performance against Dear ImGui](PERFORMANCE.md).
+[Performance against Dear ImGui](PERFORMANCE.md). The [Linux/Vulkan results](LINUX_IMGUI_2026-10-26.md)
+and [reproducible comparison harness](third_party/README.md) cover a newer local run.
 
 ## Requirements
 
