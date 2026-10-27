@@ -956,6 +956,7 @@ int main(int argc, char** argv)
 	int hidden = 0;
 	int coverage = 0;
 	int keep_hidden_draws = 0;
+	int keep_backdrop = 0;
 	const char* dump_commands = NULL;
 	int window_width = 1280, window_height = 800;
 	int frame_limit = 0;
@@ -996,6 +997,7 @@ int main(int argc, char** argv)
 		}
 		else if (strcmp(argv[i], "--coverage") == 0) coverage = 1;
 		else if (strcmp(argv[i], "--keep-hidden-draws") == 0) keep_hidden_draws = 1;
+		else if (strcmp(argv[i], "--keep-backdrop") == 0) keep_backdrop = 1;
 		else if (strcmp(argv[i], "--dump-commands") == 0 && i + 1 < argc) dump_commands = argv[++i];
 		else if (strcmp(argv[i], "--size") == 0 && i + 1 < argc)
 		{
@@ -1248,6 +1250,10 @@ int main(int argc, char** argv)
 		full_build_ui(&gui, &state, width, height);
 		if (profile_atlas) full_profile_images(&gui, width, height, atlas, profile_atlas,
 		                                         profile_scenario == FULL_PROFILE_IMAGES_GROUPED);
+		/* The direct path clears to the backdrop instead of painting it; dirty-tile
+		 * repaints need it painted, so the tile cache keeps it. */
+		if (!tile_cache && !keep_backdrop)
+			rg_gui_lift_backdrop(&gui, rg_gui_make_rect(0.0f, 0.0f, (f32)width, (f32)height));
 		rg_gui_end_frame(&gui);
 		sample.ui_ms = demo_profile_elapsed_ms(ui_start);
 		sample.diagnostic_flags = (u32)gui.diagnostics.flags;

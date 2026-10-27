@@ -64,6 +64,13 @@ between 0.x releases.
   bytes per draw command. The CPU benchmarks keep hidden draws so their output
   signatures stay comparable across versions; the pass has its own extended
   case, `cull_hidden`.
+- `rg_gui_lift_backdrop` merges a frame's opaque full-viewport first
+  rectangle with the render pass clear: `rg_gui_end_frame` empties the
+  rectangle and `rg_gui_backdrop_lifted` hands its color to the caller for the
+  clear. The request is per frame and the demos' direct path uses it (their
+  tile cache does not, since dirty-rectangle repaints need the backdrop
+  painted); `--keep-backdrop` turns it off in the full showcase. Idle and edit
+  frame work under Immediate presentation fall another 10 to 11 percent.
 - The indexed fragment shader reads two input slots instead of three: the
   sampled-or-solid flag now rides in the `uv` slot's third component, and the
   shader samples unconditionally and selects. On an Intel UHD G1 the third

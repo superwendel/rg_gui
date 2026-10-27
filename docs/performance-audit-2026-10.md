@@ -678,9 +678,67 @@ pass in its own extended case, `cull_hidden`, over a synthetic layered list of
 28 widget rows, a dialog, and an overlay tooltip): 12.3 us per frame before
 the review's fixes and 9.0 us after (five alternating process pairs), with a
 deterministic output signature that the runner records but, unlike the other
-cases', does not compare across versions, since it is the pass's own output. What remains hidden, 0.52 Mpx, is
-in rectangles below the thresholds or covered by more than eight pieces' worth
-of occluders. VSync pacing is unchanged at 16.67 ms.
+cases', does not compare across versions, since it is the pass's own output.
+What remains hidden, 0.52 Mpx, is in rectangles below the thresholds or
+covered by more than eight pieces' worth of occluders. VSync pacing is
+unchanged at 16.67 ms.
+
+### 13. Backdrop lift
+
+After culling, the showcase's frame is still fill: one full layer of visible
+paint plus the translucent widgets. Two fill-side ideas were measured on
+2026-10-27 with scratch builds of the demo, idle and docks scenarios, four
+rotating rounds of 900 frames under Immediate presentation:
+
+| Variant | idle frame work | idle render total | docks frame work |
+| --- | ---: | ---: | ---: |
+| baseline | 1,370 us | 1,162 us | 1,636 us |
+| no backdrop rectangle | 1,232 us | 1,035 us | 1,522 us |
+| blending disabled in every pipeline | 1,379 us | 1,161 us | 1,544 us |
+| both | 1,246 us | 1,044 us | 1,526 us |
+
+Disabling blending changed nothing measurable, so opaque rectangles do not pay
+for their destination read on this GPU, and no separate opaque pipeline was
+built. Leaving out the backdrop rectangle saved about a tenth of the idle
+frame, more than its culled remainder (two margin pieces, 0.29 Mpx) would
+suggest at 240 us per megapixel, because the render pass already clears the
+target to the same color: the rectangle was repainting the clear.
+
+The frame's first command is almost always that rectangle, and the render pass
+almost always clears, so the two are now merged. `rg_gui_lift_backdrop(ctx,
+viewport)`, called before `rg_gui_end_frame`, asks the frame to lift its
+backdrop: if the first command is an opaque rectangle covering the viewport
+(in list coordinates), `rg_gui_end_frame` records its color and empties the
+rectangle, and `rg_gui_backdrop_lifted` hands the color to the caller for the
+clear. The emptied command stays in the list, so tools see the same count, and
+the culling pass drops it when it runs. The request is per frame, because the
+decision belongs to the render path: the demo's direct path lifts, and its
+tile cache does not, since a dirty rectangle repainted over a kept target
+needs the backdrop painted. Nothing is lifted for a smaller or translucent
+first rectangle or any other first command. A context-level test drives seven
+frames through those cases against a context that does not lift and checks
+that clearing to the lifted color and drawing the rest paints the same pixels
+as the full list.
+
+With the lift in the demo (`--keep-backdrop` turns it off), four alternating
+rounds of 900 frames:
+
+| Showcase scenario, Immediate | backdrop painted | backdrop lifted |
+| --- | ---: | ---: |
+| idle: frame work | 1,391 us | 1,237 us |
+| idle: render total | 1,192 us | 1,057 us |
+| edit: frame work | 1,339 us | 1,199 us |
+| edit: render total | 1,110 us | 1,008 us |
+| docks (20 panels): frame work | 1,543 us | 1,547 us |
+| docks: render total | 1,315 us | 1,328 us |
+
+Idle and edit gain 10 to 11 percent. Docks gains nothing: its dockspace
+covers the backdrop up to a 10-pixel frame, so culling had already reduced
+the rectangle to that frame, and the lift removes only the frame. UI build
+time falls about 6 us in every scenario because the culling pass no longer
+has to split the backdrop. Relative to the frame before change 12, the idle
+showcase has gone from 1,749 to about 1,240 us under Immediate presentation
+with pixels unchanged.
 
 ## Measured effect of the changes
 
@@ -973,9 +1031,12 @@ hidden tab.
 4. **Overdraw under opaque panels.** Done on 2026-10-26 (change 12): hidden-draw
    culling drops and splits rectangles under later opaque rectangles, taking
    the showcase from 3.3 to 1.5 layers per pixel and its frame work down 24 to
-   26 percent. What remains per frame is the visible fill, the fixed per-submit
-   cost, and the present path; not presenting unchanged frames is the
-   remaining lever, and both mechanisms for it already ship.
+   26 percent, and on 2026-10-27 (change 13) the backdrop lift merges the
+   first full-viewport rectangle with the render pass clear for another tenth
+   of the idle and edit frames. Blending was measured and costs nothing here.
+   What remains per frame is the visible fill, the fixed per-submit cost, and
+   the present path; not presenting unchanged frames is the remaining lever,
+   and both mechanisms for it already ship.
 ## Verified and left alone
 
 - Text length in the draw command, tried on 2026-10-23 and not adopted.

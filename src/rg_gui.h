@@ -1589,6 +1589,11 @@ typedef struct RgGuiContext
 	RgGuiRect* cull_clips;
 	int cull_hidden_draws;
 	RgGuiCullPace cull_pace;
+	/* Backdrop lift; see rg_gui_lift_backdrop. */
+	RgGuiRect backdrop_viewport;
+	int lift_backdrop;
+	int backdrop_lifted;
+	u32 backdrop_color;
 	u32 overlay_start;
 #if defined(RG_GUI_ENABLE_VIEWPORTS)
 	RgGuiViewport* viewports;
@@ -3456,6 +3461,27 @@ RGINLINE int rg_gui_dropdown(RgGuiContext* ctx, const char* const* items, u32 co
  * @brief Access draw list for rendering
  */
 RGINLINE const RgGuiDrawList* rg_gui_draw_list(const RgGuiContext* ctx);
+
+/**
+ * @brief Lift this frame's backdrop into the render pass clear.
+ *
+ * Call before rg_gui_end_frame with the viewport the list will be drawn into,
+ * in list coordinates. If the frame's first command is an opaque rectangle
+ * covering that viewport, rg_gui_end_frame empties the rectangle and records
+ * its color; rg_gui_backdrop_lifted then returns 1 with the color, and the
+ * caller clears the target to it instead of having a full-viewport quad
+ * painted. The request applies to one frame. Do not lift a frame that will
+ * repaint only dirty rectangles over a kept target: there the backdrop must be
+ * painted.
+ */
+RGINLINE void rg_gui_lift_backdrop(RgGuiContext* ctx, RgGuiRect viewport);
+
+/**
+ * @brief Whether the last frame lifted its backdrop
+ * @param color Receives the packed backdrop color when it did; may be NULL
+ * @return 1 if the clear should use the backdrop color
+ */
+RGINLINE int rg_gui_backdrop_lifted(const RgGuiContext* ctx, u32* color);
 
 /**
  * @brief Access diagnostics for the current or most recently completed frame
@@ -11475,6 +11501,27 @@ RGINLINE void rg_gui_end_frame(RgGuiContext* ctx)
 			       ctx->overlay_list.cmds,
 			       sizeof(RgGuiDrawCmd) * copy_count);
 			ctx->draw_list.count += copy_count;
+		}
+	}
+	/* Backdrop lift: when asked, the first command, if an opaque rectangle
+	 * covering the caller's viewport, becomes the clear color and an empty
+	 * rectangle; the culling pass drops the empty command when it runs. */
+	ctx->backdrop_lifted = 0;
+	if (ctx->lift_backdrop)
+	{
+		ctx->lift_backdrop = 0;
+		RgGuiDrawCmd* first = ctx->draw_list.count ? &ctx->draw_list.cmds[0] : NULL;
+		const RgGuiRect v = ctx->backdrop_viewport;
+		if (first && first->type == RG_GUI_CMD_RECT && (first->color >> 24u) == 255u &&
+		    first->data.rect.rect.w >= 0.0f && first->data.rect.rect.h >= 0.0f &&
+		    first->data.rect.rect.x <= v.x && first->data.rect.rect.y <= v.y &&
+		    first->data.rect.rect.x + first->data.rect.rect.w >= v.x + v.w &&
+		    first->data.rect.rect.y + first->data.rect.rect.h >= v.y + v.h)
+		{
+			ctx->backdrop_lifted = 1;
+			ctx->backdrop_color = first->color;
+			first->data.rect.rect.w = 0.0f;
+			first->data.rect.rect.h = 0.0f;
 		}
 	}
 	rg_gui_draw_list_cull_hidden(ctx, &ctx->draw_list, &ctx->overlay_start, &ctx->overlay_list, &ctx->cull_pace);
@@ -34015,6 +34062,20 @@ RGINLINE int rg_gui_dropdown(RgGuiContext* ctx, const char* const* items, u32 co
 		rg_gui_input_capture_end(ctx, open_state);
 	}
 	return changed;
+}
+
+RGINLINE void rg_gui_lift_backdrop(RgGuiContext* ctx, RgGuiRect viewport)
+{
+	if (!ctx) return;
+	ctx->lift_backdrop = 1;
+	ctx->backdrop_viewport = viewport;
+}
+
+RGINLINE int rg_gui_backdrop_lifted(const RgGuiContext* ctx, u32* color)
+{
+	if (!ctx || !ctx->backdrop_lifted) return 0;
+	if (color) *color = ctx->backdrop_color;
+	return 1;
 }
 
 RGINLINE const RgGuiDrawList* rg_gui_draw_list(const RgGuiContext* ctx)

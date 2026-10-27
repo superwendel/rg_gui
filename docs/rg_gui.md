@@ -521,6 +521,26 @@ nothing to cull, it costs about 6 us on the frames it runs and under 1 us per
 frame on average. It needs 16 bytes of context memory per draw command,
 included in `rg_gui_memory_required`.
 
+### Backdrop lift
+
+Most interfaces begin the frame by painting an opaque rectangle over the whole
+window, and most render passes begin by clearing the target. The two paint the
+same pixels. Call `rg_gui_lift_backdrop(&gui, viewport)` before
+`rg_gui_end_frame` with the viewport the list will be drawn into, in list
+coordinates; if the frame's first command is an opaque rectangle covering that
+viewport, `rg_gui_end_frame` empties the rectangle and records its color, and
+`rg_gui_backdrop_lifted(&gui, &color)` returns 1 with the packed color for the
+render pass clear. The request applies to one frame; nothing is lifted without
+it, for a rectangle smaller than the viewport, a translucent one, or any other
+first command. The emptied command stays in the list until the culling pass
+drops it, so tools that read the list see the same command count.
+
+Clearing is cheaper than a full-viewport quad on a fill-bound GPU: in the full
+showcase under Immediate presentation the lift saves about a tenth of the frame.
+Do not lift a frame that repaints only dirty rectangles over a kept target, as
+the demo's tile cache does; there the backdrop must be painted, and the demo
+keeps it. `--keep-backdrop` turns the lift off in the full showcase for an A/B.
+
 ### Skipping unchanged frames
 
 An immediate-mode application rebuilds its draw list every frame, but it does

@@ -543,9 +543,8 @@ static int cull_test_span(f32 low, f32 high, int* first, int* last)
  * clip in effect is the intersection of the pushed clips, rounded outwards to
  * whole pixels after the offset is added, and a top-level clip is used as
  * pushed, negative size and all. */
-static void cull_test_raster(const RgGuiDrawList* list, u32 overlay_start, f32 ox, f32 oy, u8* rgba)
+static void cull_test_raster_over(const RgGuiDrawList* list, u32 overlay_start, f32 ox, f32 oy, u8* rgba)
 {
-	memset(rgba, 0, (size_t)CULL_TEST_SIZE * CULL_TEST_SIZE * 4u);
 	RgGuiRect stack[64];
 	u32 depth = 0u;
 	for (u32 i = 0u; i < list->count; i++)
@@ -591,6 +590,24 @@ static void cull_test_raster(const RgGuiDrawList* list, u32 overlay_start, f32 o
 				for (u32 c = 0u; c < 3u; c++) dst[c] = (u8)((src[c] * a + dst[c] * (255u - a) + 127u) / 255u);
 				dst[3] = (u8)((255u * a + dst[3] * (255u - a) + 127u) / 255u);
 			}
+	}
+}
+
+static void cull_test_raster(const RgGuiDrawList* list, u32 overlay_start, f32 ox, f32 oy, u8* rgba)
+{
+	memset(rgba, 0, (size_t)CULL_TEST_SIZE * CULL_TEST_SIZE * 4u);
+	cull_test_raster_over(list, overlay_start, ox, oy, rgba);
+}
+
+/* Fill the canvas with a packed color, as a render pass clear would. */
+static void cull_test_clear(u8* rgba, u32 color)
+{
+	for (size_t i = 0u; i < (size_t)CULL_TEST_SIZE * CULL_TEST_SIZE; i++)
+	{
+		rgba[i * 4u] = (u8)(color & 255u);
+		rgba[i * 4u + 1u] = (u8)((color >> 8u) & 255u);
+		rgba[i * 4u + 2u] = (u8)((color >> 16u) & 255u);
+		rgba[i * 4u + 3u] = (u8)(color >> 24u);
 	}
 }
 
@@ -865,6 +882,84 @@ static int test_hidden_draw_pacing(void)
 		}
 	}
 	printf("Hidden-draw pacing: 40 frames, 19 passes, every frame identical to the kept list\n");
+	passed = 1;
+done:
+	free(memory);
+	free(keep_memory);
+	return passed;
+}
+
+/* Backdrop lift. With the lift requested, a frame whose first command is an
+ * opaque rectangle covering the viewport reports that color and empties the
+ * rectangle; clearing to the color and drawing the rest paints the same pixels
+ * as the full list. Nothing is lifted without the request, for a rectangle
+ * smaller than the viewport, a translucent one, or a triangle first. */
+static void lift_test_frame(RgGuiContext* gui, const RgInputState* input, int first, const RgGuiRect* viewport)
+{
+	rg_gui_begin_frame(gui, input, 1.0f / 60.0f);
+	if (first == 0) rg_gui_push_rect(gui, rg_gui_make_rect(-4.0f, -4.0f, 300.0f, 300.0f), rg_gui_color(0.1f, 0.2f, 0.3f, 1.0f));
+	else if (first == 1) rg_gui_push_rect(gui, rg_gui_make_rect(0.0f, 0.0f, 200.0f, 300.0f), rg_gui_color(0.1f, 0.2f, 0.3f, 1.0f));
+	else if (first == 2) rg_gui_push_rect(gui, rg_gui_make_rect(-4.0f, -4.0f, 300.0f, 300.0f), rg_gui_color(0.1f, 0.2f, 0.3f, 0.5f));
+	else rg_gui_push_triangle(gui, rg_vec2(0, 0), rg_vec2(300, 0), rg_vec2(0, 300), rg_gui_color(0.1f, 0.2f, 0.3f, 1.0f));
+	rg_gui_push_rect(gui, rg_gui_make_rect(20.0f, 20.0f, 100.0f, 80.0f), rg_gui_color(0.8f, 0.3f, 0.2f, 1.0f));
+	rg_gui_push_rect(gui, rg_gui_make_rect(60.0f, 60.0f, 120.0f, 120.0f), rg_gui_color(0.2f, 0.8f, 0.3f, 0.5f));
+	if (viewport) rg_gui_lift_backdrop(gui, *viewport);
+	rg_gui_end_frame(gui);
+}
+
+static int test_backdrop_lift(void)
+{
+	RgTextFont font;
+	RgTextGlyph glyphs[3];
+	make_font(&font, glyphs);
+	RgGuiInitDesc desc = {0};
+	desc.font = &font;
+	desc.max_draw_cmds = 64u;
+	desc.text_buffer_size = KB(4);
+	static u8 expected[CULL_TEST_SIZE * CULL_TEST_SIZE * 4u], actual[CULL_TEST_SIZE * CULL_TEST_SIZE * 4u];
+	void* memory = malloc(MB(2));
+	void* keep_memory = malloc(MB(2));
+	int passed = 0;
+	if (!memory || !keep_memory) { free(memory); free(keep_memory); return 0; }
+	RgArena arena = {(char*)memory, MB(2), 0u, MB(2)};
+	RgArena keep_arena = {(char*)keep_memory, MB(2), 0u, MB(2)};
+	RgGuiContext gui, keep;
+	if (!rg_gui_init(&gui, &arena, &desc) || !rg_gui_init(&keep, &keep_arena, &desc)) goto done;
+	RgInputState input;
+	rg_input_init(&input);
+	const RgGuiRect viewport = rg_gui_make_rect(0.0f, 0.0f, 256.0f, 256.0f);
+	const RgGuiRect wide = rg_gui_make_rect(0.0f, 0.0f, 400.0f, 256.0f);
+	struct Case { int first; const RgGuiRect* viewport; int lifted; } cases[] = {
+	    {0, &viewport, 1}, {0, NULL, 0}, {0, &wide, 0}, {1, &viewport, 0}, {2, &viewport, 0}, {3, &viewport, 0}, {0, &viewport, 1}};
+	for (u32 c = 0u; c < sizeof(cases) / sizeof(cases[0]); c++)
+	{
+		lift_test_frame(&gui, &input, cases[c].first, cases[c].viewport);
+		lift_test_frame(&keep, &input, cases[c].first, NULL);
+		u32 color = 0u;
+		const int lifted = rg_gui_backdrop_lifted(&gui, &color);
+		const RgGuiDrawList* list = rg_gui_draw_list(&gui);
+		/* The emptied backdrop is either still first or already dropped by the
+		 * culling pass, which makes the list shorter than the kept one. */
+		const int emptied = list->count < keep.draw_list.count ||
+		                    (list->count && list->cmds[0].data.rect.rect.w == 0.0f);
+		if (lifted != cases[c].lifted || (lifted && color != keep.draw_list.cmds[0].color) ||
+		    (lifted && !emptied) ||
+		    (!lifted && memcmp(list->cmds, keep.draw_list.cmds, sizeof(RgGuiDrawCmd) * keep.draw_list.count)))
+		{
+			fprintf(stderr, "backdrop lift: case %u lifted %d (expected %d)\n", c, lifted, cases[c].lifted);
+			goto done;
+		}
+		cull_test_raster(rg_gui_draw_list(&keep), keep.overlay_start, 0.0f, 0.0f, expected);
+		if (lifted) cull_test_clear(actual, color);
+		else memset(actual, 0, sizeof(actual));
+		cull_test_raster_over(list, gui.overlay_start, 0.0f, 0.0f, actual);
+		if (memcmp(expected, actual, sizeof(expected)))
+		{
+			fprintf(stderr, "backdrop lift: case %u painted differently\n", c);
+			goto done;
+		}
+	}
+	printf("Backdrop lift: 7 frames, 2 lifted, pixels identical to the full lists\n");
 	passed = 1;
 done:
 	free(memory);
@@ -1681,6 +1776,7 @@ int main(void)
 	    !test_unpack_color() ||
 	    !test_hidden_draw_culling() ||
 	    !test_hidden_draw_pacing() ||
+	    !test_backdrop_lift() ||
 	    !test_node_graph_bundle_validation() ||
 	    !test_integer_widget_boundaries(&gui) ||
 	    !test_viewport_and_input_router(&gui) || !test_viewport_storage(&font) ||

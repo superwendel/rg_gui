@@ -270,10 +270,12 @@ the frame is fill-bound (on the audit's laptop it was 114 + 1,568 us per
 megapixel). `--coverage` rasterizes the first measured frame's rectangles on
 the CPU and prints the layers painted per pixel and how much paint lies under a
 later opaque rectangle. `--keep-hidden-draws` turns off the end-of-frame
-hidden-draw culling for an A/B of its effect, and `--dump-commands PATH` writes
-that frame's raw draw commands for offline analysis, such as timing the culling
-pass in a tight loop. See
-[change 12](../docs/performance-audit-2026-10.md#12-hidden-draw-culling).
+hidden-draw culling for an A/B of its effect, `--keep-backdrop` paints the
+backdrop rectangle instead of lifting it into the render pass clear, and
+`--dump-commands PATH` writes that frame's raw draw commands for offline
+analysis, such as timing the culling pass in a tight loop. See
+[change 12](../docs/performance-audit-2026-10.md#12-hidden-draw-culling) and
+[change 13](../docs/performance-audit-2026-10.md#13-backdrop-lift).
 
 ```sh
 out/linux/rg_gui_demo_full --scenario idle --present immediate --coverage \

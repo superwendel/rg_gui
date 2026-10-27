@@ -1124,7 +1124,7 @@ int main(int argc, char** argv)
 			                                    &upload_ring,
 			                                    rg_gui_viewport_draw_list(built_native_viewport),
 			                                    rg_gui_viewport_overlay_start(built_native_viewport),
-			                                    &native_presented,
+			                                    NULL, &native_presented,
 			                                    profile_options.path ? &profile_frame.secondary : NULL))
 				goto cleanup;
 			native_presented_frames += native_presented;

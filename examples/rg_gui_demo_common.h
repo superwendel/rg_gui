@@ -708,11 +708,13 @@ typedef struct DemoFrameSkip
 	u32 skipped_frames;
 } DemoFrameSkip;
 
+/* `clear_color` is the lifted backdrop when the frame has one (see
+ * rg_gui_lift_backdrop); NULL clears to the demo's default. */
 static int demo_render_draw_list_skippable(SDL_GPUDevice* device, SDL_Window* window,
                                            RgGuiGpuRenderer* gpu, RgGuiRenderer* text_renderer,
                                            RgGpuUploadRing* upload_ring,
                                            const RgGuiDrawList* draw_list, u32 overlay_start,
-                                           DemoFrameSkip* skip,
+                                           const SDL_FColor* clear_color, DemoFrameSkip* skip,
                                            int* out_presented, DemoRenderMetrics* metrics)
 {
 	u64 render_start = metrics ? SDL_GetTicksNS() : 0u;
@@ -825,7 +827,7 @@ static int demo_render_draw_list_skippable(SDL_GPUDevice* device, SDL_Window* wi
 	{
 		SDL_GPUColorTargetInfo target = {0};
 		target.texture = swapchain;
-		target.clear_color = (SDL_FColor){DEMO_CLEAR_R, DEMO_CLEAR_G, DEMO_CLEAR_B, 1.0f};
+		target.clear_color = clear_color ? *clear_color : (SDL_FColor){DEMO_CLEAR_R, DEMO_CLEAR_G, DEMO_CLEAR_B, 1.0f};
 		target.load_op = SDL_GPU_LOADOP_CLEAR;
 		target.store_op = SDL_GPU_STOREOP_STORE;
 		SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(command_buffer, &target, 1u, NULL);
@@ -911,10 +913,21 @@ static int demo_render_draw_list_profiled(SDL_GPUDevice* device, SDL_Window* win
                                           RgGuiGpuRenderer* gpu, RgGuiRenderer* text_renderer,
                                           RgGpuUploadRing* upload_ring,
                                           const RgGuiDrawList* draw_list, u32 overlay_start,
+                                          const SDL_FColor* clear_color,
                                           int* out_presented, DemoRenderMetrics* metrics)
 {
 	return demo_render_draw_list_skippable(device, window, gpu, text_renderer, upload_ring,
-	                                       draw_list, overlay_start, NULL, out_presented, metrics);
+	                                       draw_list, overlay_start, clear_color, NULL, out_presented, metrics);
+}
+
+/* The clear color for a context's frame: its lifted backdrop, or NULL for the default. */
+RGINLINE const SDL_FColor* demo_frame_clear_color(const RgGuiContext* gui, SDL_FColor* storage)
+{
+	u32 packed = 0u;
+	if (!rg_gui_backdrop_lifted(gui, &packed)) return NULL;
+	rg_vec4 color = rg_gui_unpack_color(packed);
+	*storage = (SDL_FColor){color.x, color.y, color.z, color.w};
+	return storage;
 }
 
 /* Render through a persistent target, repainting only dirty tiles. Byte-identical
@@ -1271,9 +1284,11 @@ RGINLINE int demo_render_frame_skippable(SDL_GPUDevice* device, SDL_Window* wind
                                          DemoFrameSkip* skip, int* out_presented,
                                          DemoRenderMetrics* metrics)
 {
+	SDL_FColor clear;
 	return demo_render_draw_list_skippable(device, window, gpu, text_renderer, upload_ring,
 	                                       rg_gui_draw_list(gui),
-	                                       rg_gui_draw_list_overlay_start(gui), skip,
+	                                       rg_gui_draw_list_overlay_start(gui),
+	                                       demo_frame_clear_color(gui, &clear), skip,
 	                                       out_presented, metrics);
 }
 
@@ -1284,7 +1299,7 @@ RGINLINE int demo_render_draw_list(SDL_GPUDevice* device, SDL_Window* window,
                                  int* out_presented)
 {
 	return demo_render_draw_list_profiled(device, window, gpu, text_renderer, upload_ring,
-	                                      draw_list, overlay_start, out_presented, NULL);
+	                                      draw_list, overlay_start, NULL, out_presented, NULL);
 }
 
 RGINLINE int demo_render_frame_profiled(SDL_GPUDevice* device, SDL_Window* window,
@@ -1292,9 +1307,11 @@ RGINLINE int demo_render_frame_profiled(SDL_GPUDevice* device, SDL_Window* windo
                                       RgGpuUploadRing* upload_ring, RgGuiContext* gui,
                                       int* out_presented, DemoRenderMetrics* metrics)
 {
+	SDL_FColor clear;
 	return demo_render_draw_list_profiled(device, window, gpu, text_renderer, upload_ring,
 	                                      rg_gui_draw_list(gui),
-	                                      rg_gui_draw_list_overlay_start(gui), out_presented, metrics);
+	                                      rg_gui_draw_list_overlay_start(gui),
+	                                      demo_frame_clear_color(gui, &clear), out_presented, metrics);
 }
 
 RGINLINE int demo_render_frame(SDL_GPUDevice* device, SDL_Window* window,
