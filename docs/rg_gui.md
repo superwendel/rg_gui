@@ -487,9 +487,19 @@ rectangles are dropped or split, and only opaque rectangles occlude; text,
 images, and triangles are left exactly as pushed, in their original order. The
 pixels are unchanged: a dropped pixel would have been overwritten, and the
 pieces share their edges with the occluder, so each pixel center falls in
-exactly one of them. Clips are applied as the GPU path rounds them, an
-occludee's area overstated and an occluder's understated, so clipped geometry
-is culled only when it is certainly hidden.
+exactly one of them. Clips are applied as the GPU path applies them: the
+renderers round a clip to whole pixels after adding the draw offset, so an
+occludee's area is its rectangle inside its clip widened by one unit on each
+side, which overstates it whatever the offset, and an occluder's is its
+rectangle inside its unrounded clip, which understates it; clipped geometry is
+culled only when it is certainly hidden. A clip pushed with a negative size is
+treated as the empty clip the renderers draw.
+
+The culled list is never longer than the pushed one. A split spends the slots
+that dropped rectangles returned, the splits that save the most paint first,
+so vertex and index storage sized for the pushed list still holds the culled
+one; a piece is only emitted when its position plus size, which is how the
+renderers rebuild its far edge, lands exactly on the shared edge.
 
 What a renderer or tool sees is the culled list: fewer rectangles, some of them
 split, with `rg_gui_draw_list_overlay_start` moved to the same boundary. The
@@ -497,9 +507,10 @@ tile cache and the frame signature consume that list and need no change. Set
 `RgGuiInitDesc.keep_hidden_draws` to keep every pushed command instead, or flip
 `gui.cull_hidden_draws` at run time; `rg_gui_diagnostics` counts the dropped
 and split rectangles in `culled_draw_commands` and `split_draw_commands`. The
-pass costs about 10 us of CPU per frame for the showcase's 735 commands at
-3.4 GHz and needs 16 bytes of context memory per draw command, included in
-`rg_gui_memory_required`.
+pass costs about 8 us of CPU per frame for the showcase's 735 commands at
+3.4 GHz, and about 6 us for 128 non-overlapping opaque rectangles that have
+nothing to cull, and needs 16 bytes of context memory per draw command,
+included in `rg_gui_memory_required`.
 
 ### Skipping unchanged frames
 

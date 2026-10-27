@@ -223,7 +223,7 @@ def checked_rows(stdout, cases=CASES):
     for key in expected:
         sample = samples[key]
         values = sample["ns_per_frame"]
-        labels = 1 if key[1].startswith("textarea_") else 128
+        labels = 1 if key[1].startswith("textarea_") or key[1] == "cull_hidden" else 128
         if sample["labels"] != labels or len(values) != 7 or sample["frames_per_sample"] < 2:
             raise RuntimeError(f"Unexpected workload size: {key}")
         if key[1] == "frontend_measured_labels_dynamic" and sample["frames_per_sample"] % 16:
@@ -235,7 +235,12 @@ def checked_rows(stdout, cases=CASES):
             raise RuntimeError(f"Median does not match raw samples: {key}")
     signature = {
         "fonts": fonts,
-        "cases": {"/".join(key): {name: row[name] for name in SIGNATURE_FIELDS} for key, row in results.items()},
+        # The culling case's geometry checksum is the pass's own output, which
+        # changes whenever the pass does; it pins the output within a version
+        # and is recorded, but not compared across versions.
+        "cases": {"/".join(key): {name: row[name] for name in SIGNATURE_FIELDS
+                                  if not (key[1] == "cull_hidden" and name == "geometry_checksum")}
+                  for key, row in results.items()},
     }
     return list(results.values()), signature
 

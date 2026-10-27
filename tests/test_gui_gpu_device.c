@@ -264,6 +264,107 @@ static int test_gpu_render(SDL_GPUDevice* device, SDL_GPUTexture* target, SDL_GP
 	return test_gpu_render_sized(device, target, readback, gpu, text, ring, list, draw, pixels, clip_count, stats, 64u);
 }
 
+/* The cases an independent review found: a fractional draw offset, which the
+ * renderers add before rounding the clip; a thin rectangle under a fractional
+ * clip; a clip pushed with a negative width, which draws nothing; and
+ * coordinates so far left that a fragment's position plus size no longer lands
+ * on its edge. Each list is rendered as pushed and as culled and no pixel may
+ * change. */
+static int test_gpu_hidden_culling_edges(SDL_GPUDevice* device, RgGuiGpuRenderer* gpu, RgGuiRenderer* text,
+                                         RgGpuUploadRing* ring)
+{
+	enum { SIZE = 256, CAP = 8 };
+	int passed = 0;
+	SDL_GPUTextureCreateInfo info = {0};
+	info.type = SDL_GPU_TEXTURETYPE_2D;
+	info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+	info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+	info.width = info.height = SIZE;
+	info.layer_count_or_depth = 1u;
+	info.num_levels = 1u;
+	info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+	SDL_GPUTexture* target = SDL_CreateGPUTexture(device, &info);
+	SDL_GPUTransferBufferCreateInfo transfer = {0};
+	transfer.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+	transfer.size = SIZE * SIZE * 4u;
+	SDL_GPUTransferBuffer* readback = SDL_CreateGPUTransferBuffer(device, &transfer);
+	static u8 plain_pixels[SIZE * SIZE * 4u], culled_pixels[SIZE * SIZE * 4u];
+	if (!target || !readback) goto cleanup;
+	typedef struct Edge { u32 type; RgGuiRect rect; u32 color; } Edge;
+	static const Edge offset_case[] = {
+	    {RG_GUI_CMD_CLIP_PUSH, {0.2f, 0, 200, 200}, 0u},
+	    {RG_GUI_CMD_RECT, {-1, 0, 201, 200}, 0xff0000ffu},
+	    {RG_GUI_CMD_CLIP_POP, {0, 0, 0, 0}, 0u},
+	    {RG_GUI_CMD_RECT, {0, 0, 200, 200}, 0xffff0000u}};
+	static const Edge thin_case[] = {
+	    {RG_GUI_CMD_CLIP_PUSH, {0.1f, 0, 100, 100}, 0u},
+	    {RG_GUI_CMD_RECT, {-0.3f, 0, 0.25f, 100}, 0xff0000ffu},
+	    {RG_GUI_CMD_CLIP_POP, {0, 0, 0, 0}, 0u},
+	    {RG_GUI_CMD_RECT, {240, 240, 8, 8}, 0xff00ff00u}};
+	static const Edge negative_clip_case[] = {
+	    {RG_GUI_CMD_RECT, {0, 0, 128, 128}, 0xff0000ffu},
+	    {RG_GUI_CMD_CLIP_PUSH, {1, 0, -0.5f, 128}, 0u},
+	    {RG_GUI_CMD_RECT, {0, 0, 128, 128}, 0xffff0000u},
+	    {RG_GUI_CMD_CLIP_POP, {0, 0, 0, 0}, 0u}};
+	static const Edge far_case[] = {
+	    {RG_GUI_CMD_RECT, {-1600000.0f, 0, 1600200.5f, 200}, 0xff0000ffu},
+	    {RG_GUI_CMD_RECT, {-1600000.0f, 0, 551600.0625f, 200}, 0xffff0000u}};
+	const struct Case { const Edge* edges; u32 count; f32 offset_x; f32 offset_y; const char* name; } cases[] = {
+	    {offset_case, 4u, 0.75f, 0.0f, "fractional offset"},
+	    {thin_case, 4u, 0.6f, 0.0f, "thin rectangle under a fractional clip"},
+	    {negative_clip_case, 4u, 0.0f, 0.0f, "negative clip width"},
+	    {far_case, 2u, 0.0f, 0.0f, "far coordinates"}};
+	for (u32 c = 0u; c < sizeof(cases) / sizeof(cases[0]); c++)
+	{
+		RgGuiDrawCmd plain[CAP], culled[CAP], scratch[CAP];
+		RgGuiRect clips[CAP];
+		memset(plain, 0, sizeof(plain));
+		for (u32 i = 0u; i < cases[c].count; i++)
+		{
+			plain[i].type = cases[c].edges[i].type;
+			plain[i].color = cases[c].edges[i].color;
+			if (plain[i].type == RG_GUI_CMD_RECT) plain[i].data.rect.rect = cases[c].edges[i].rect;
+			else if (plain[i].type == RG_GUI_CMD_CLIP_PUSH) plain[i].data.clip.rect = cases[c].edges[i].rect;
+		}
+		memcpy(culled, plain, sizeof(plain));
+		RgGuiDrawList plain_list = {plain, cases[c].count, CAP};
+		RgGuiDrawList culled_list = {culled, cases[c].count, CAP};
+		u32 overlay = cases[c].count, dropped = 0u, split = 0u;
+		rg_gui_draw_list_cull_hidden_ex(&culled_list, &overlay, clips, scratch, CAP, &dropped, &split);
+		if (culled_list.count > cases[c].count || overlay != culled_list.count)
+		{
+			SDL_SetError("Hidden-draw culling (%s) produced %u commands from %u", cases[c].name, culled_list.count, cases[c].count);
+			goto cleanup;
+		}
+		RgGuiGpuDrawDesc draw = {0};
+		draw.output_width = draw.output_height = SIZE;
+		draw.viewport = (SDL_Rect){0, 0, SIZE, SIZE};
+		draw.offset_x = cases[c].offset_x;
+		draw.offset_y = cases[c].offset_y;
+		RgGuiGpuStats stats = {0};
+		u32 clip_count = 0u;
+		if (!test_gpu_render_sized(device, target, readback, gpu, text, ring, &plain_list, &draw, plain_pixels, &clip_count, &stats, SIZE) ||
+		    !test_gpu_render_sized(device, target, readback, gpu, text, ring, &culled_list, &draw, culled_pixels, &clip_count, &stats, SIZE))
+		{
+			SDL_SetError("Hidden-draw culling (%s) render failed", cases[c].name);
+			goto cleanup;
+		}
+		u32 differing = 0u;
+		for (u32 i = 0u; i < SIZE * SIZE; i++) differing += memcmp(plain_pixels + i * 4u, culled_pixels + i * 4u, 4u) != 0;
+		if (differing)
+		{
+			SDL_SetError("Hidden-draw culling (%s) changed %u pixels (dropped %u, split %u)", cases[c].name, differing, dropped, split);
+			goto cleanup;
+		}
+	}
+	printf("Hidden-draw culling: offset, thin, negative-clip and far-coordinate lists render identically culled\n");
+	passed = 1;
+cleanup:
+	if (readback) SDL_ReleaseGPUTransferBuffer(device, readback);
+	if (target) SDL_ReleaseGPUTexture(device, target);
+	return passed;
+}
+
 /* Hidden-draw culling claims to leave every pixel unchanged. Render a layered
  * list, a backdrop under a panel under widgets with clips and translucency, as
  * pushed and as culled, into a 256-pixel target and compare the readbacks byte
@@ -289,13 +390,24 @@ static int test_gpu_hidden_culling(SDL_GPUDevice* device, RgGuiGpuRenderer* gpu,
 	static u8 plain_pixels[SIZE * SIZE * 4u], culled_pixels[SIZE * SIZE * 4u];
 	if (!target || !readback) goto cleanup;
 	typedef struct Layer { u32 type; RgGuiRect rect; u32 color; } Layer;
-	/* 20 commands: clips stay balanced; the 1-pixel clip around the second panel
-	 * exercises the outward rounding of an occludee's clip. */
+	/* Clips stay balanced; the fractional clip around the window exercises the
+	 * widening of an occludee's clip, and the twelve rectangles under the
+	 * window return the slots the two splits spend. */
 	const Layer layers[] = {
 	    {RG_GUI_CMD_RECT, {0, 0, 256, 256}, 0xff303030u},             /* backdrop: split into margins */
 	    {RG_GUI_CMD_RECT, {12, 12, 232, 232}, 0xff505050u},           /* panel: mostly covered, split */
 	    {RG_GUI_CMD_RECT, {20, 20, 100, 100}, 0x80ff4000u},           /* translucent, partly visible: kept */
 	    {RG_GUI_CMD_RECT, {40, 40, 60, 60}, 0xff0080ffu},             /* under the window below: dropped */
+	    {RG_GUI_CMD_RECT, {120, 60, 40, 40}, 0xff40c0ffu},            /* under the window: dropped */
+	    {RG_GUI_CMD_RECT, {60, 140, 48, 30}, 0x60ffffffu},            /* translucent under the window: dropped */
+	    {RG_GUI_CMD_RECT, {180, 120, 40, 40}, 0xffc04040u},           /* under the window: dropped */
+	    {RG_GUI_CMD_RECT, {100, 190, 50, 30}, 0xff4040c0u},           /* under the window: dropped */
+	    {RG_GUI_CMD_RECT, {40, 110, 40, 40}, 0xff80a040u},            /* under the window: dropped */
+	    {RG_GUI_CMD_RECT, {90, 110, 40, 40}, 0x80ff8000u},            /* translucent under the window: dropped */
+	    {RG_GUI_CMD_RECT, {140, 60, 40, 30}, 0xff2060a0u},            /* under the window: dropped */
+	    {RG_GUI_CMD_RECT, {190, 60, 36, 36}, 0xffa02060u},            /* under the window: dropped */
+	    {RG_GUI_CMD_RECT, {150, 150, 40, 40}, 0xff60a020u},           /* under the window: dropped */
+	    {RG_GUI_CMD_RECT, {60, 200, 60, 24}, 0x40ffffffu},            /* translucent under the window: dropped */
 	    {RG_GUI_CMD_CLIP_PUSH, {30.5f, 30.25f, 200.0f, 200.5f}, 0u},
 	    {RG_GUI_CMD_RECT, {0, 0, 256, 256}, 0xff707070u},             /* window: clipped occluder */
 	    {RG_GUI_CMD_RECT, {35, 35, 40, 40}, 0x40ffffffu},             /* translucent under the toolbar: dropped */
@@ -323,10 +435,32 @@ static int test_gpu_hidden_culling(SDL_GPUDevice* device, RgGuiGpuRenderer* gpu,
 	RgGuiDrawList culled_list = {culled, LAYER_COUNT, LAYER_COUNT + 8u};
 	u32 overlay = LAYER_COUNT, dropped = 0u, split = 0u;
 	rg_gui_draw_list_cull_hidden_ex(&culled_list, &overlay, clips, scratch, LAYER_COUNT + 8u, &dropped, &split);
-	if (dropped < 2u || split < 2u || overlay != culled_list.count)
+	if (dropped < 12u || split < 2u || overlay != culled_list.count || culled_list.count > LAYER_COUNT)
 	{
-		SDL_SetError("Hidden-draw culling dropped %u and split %u commands (expected at least 2 each)", dropped, split);
+		SDL_SetError("Hidden-draw culling dropped %u and split %u commands into %u (expected at least 12 and 2, no longer than %u)",
+		             dropped, split, culled_list.count, (u32)LAYER_COUNT);
 		goto cleanup;
+	}
+	/* The culled list must fit the geometry the pushed list needed. */
+	{
+		rg_gui_renderer_begin_frame(text);
+		if (!rg_gui_gpu_prepare(gpu, text, &plain_list, plain_list.count))
+		{
+			SDL_SetError("Hidden-draw culling: the pushed list did not prepare");
+			goto cleanup;
+		}
+		const u32 vertex_capacity = gpu->vertex_capacity, item_capacity = gpu->item_capacity;
+		gpu->vertex_capacity = gpu->vertex_count;
+		gpu->item_capacity = gpu->item_count;
+		rg_gui_renderer_begin_frame(text);
+		const int fits = rg_gui_gpu_prepare(gpu, text, &culled_list, overlay);
+		gpu->vertex_capacity = vertex_capacity;
+		gpu->item_capacity = item_capacity;
+		if (!fits)
+		{
+			SDL_SetError("Hidden-draw culling: the culled list needs more geometry than the pushed list");
+			goto cleanup;
+		}
 	}
 	RgGuiGpuDrawDesc draw = {0};
 	draw.output_width = draw.output_height = SIZE;
@@ -856,6 +990,7 @@ int main(void)
 	if (!test_gpu_full_cache_ring(device, target_texture, readback, &renderer, &text_renderer, &ring)) goto cleanup;
 	if (!test_gpu_clip_distances(device, target_texture, readback, &renderer, &text_renderer, &ring)) goto cleanup;
 	if (!test_gpu_hidden_culling(device, &renderer, &text_renderer, &ring)) goto cleanup;
+	if (!test_gpu_hidden_culling_edges(device, &renderer, &text_renderer, &ring)) goto cleanup;
 	if (!test_gpu_mutable_value_text(device, 2u) || !test_gpu_mutable_value_text(device, 3u)) goto cleanup;
 
 	puts("rg_gui_gpu end-to-end SDL_GPU checks passed");

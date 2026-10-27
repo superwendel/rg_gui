@@ -49,11 +49,12 @@ between 0.x releases.
 - `rg_gui_end_frame` now culls hidden draws: a rectangle that lies under a later
   opaque rectangle is dropped, and a large one that an opaque rectangle mostly
   covers is replaced by its visible remainder. Text, images, and triangles are
-  untouched and keep their order, pixels are unchanged, and the overlay start
-  moves with the list. The full showcase painted every pixel 3.3 times with 70
+  untouched and keep their order, pixels are unchanged under any draw offset,
+  the overlay start moves with the list, and the culled list is never longer
+  than the pushed one. The full showcase painted every pixel 3.3 times with 70
   percent of its rectangle paint hidden; it now paints 1.5 times, and its frame
-  work under Immediate presentation falls 24 to 26 percent in the idle and edit
-  scenarios and 13 percent with 20 docked panels, for about 10 us more CPU per
+  work under Immediate presentation falls about a quarter in the idle and edit
+  scenarios and 13 percent with 20 docked panels, for about 8 us more CPU per
   frame at full clock. `RgGuiInitDesc.keep_hidden_draws` or the context's
   `cull_hidden_draws` switch it off; `rg_gui_diagnostics` counts
   `culled_draw_commands` and `split_draw_commands`. Context memory grows by 16

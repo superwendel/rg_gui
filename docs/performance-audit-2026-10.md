@@ -542,25 +542,38 @@ lies inside an occluder is dropped; one of at least 16,384 px that an occluder
 covers by a quarter or more is replaced by its remainder, up to eight pieces,
 subtracting further occluders from the pieces. Only rectangles are dropped or
 split and only opaque rectangles occlude. An occludee's area is its rectangle
-inside its clip rounded outwards as the shader rounds, which overstates it; an
+inside its clip widened by one unit on each side, which overstates it under
+any draw offset (the renderers round the clip to pixels after adding the
+offset, so the pixel edge lies within one unit of the clip edge); an
 occluder's is its rectangle inside its unrounded clip, which understates it.
+A clip pushed with a negative size is the empty clip the renderers draw.
 Pieces share their edges with the occluder, so each pixel center lands in
-exactly one under the rasterizer's rule. The output is written backwards into
-the overlay list's storage, free once merged, and copied back; the overlay
-start moves to the same boundary, since the renderers reset their clip stacks
-there. Capacity is respected by reserving one slot for every command still to
-be visited before a split may take the slack.
+exactly one under the rasterizer's rule, and a piece is only emitted when its
+position plus size, which is how the renderers rebuild its far edge, is that
+edge exactly. The decisions are made in one backward pass; then the list is
+written into the overlay list's storage, free once merged, and copied back,
+with the overlay start moved to the same boundary, since the renderers reset
+their clip stacks there. The culled list is never longer than the pushed one:
+a split spends the slots that dropped rectangles returned, the splits saving
+the most paint first, so geometry sized for the pushed list still fits.
 
 Verification: a reference rasterizer in the CPU suite paints 3,000 random lists
-of up to 60 rectangles, clips, and triangles at 256x256, with the GPU path's
-rules, and the culled list must match byte for byte, keep every non-rectangle
-command in order, and stay within capacity; 28,850 rectangles were culled and
-4,767 split across the run, and 211 lists ran at exact capacity. It found two
-defects before the pass shipped: the overlay start was not moved, and a split
-could take slots that later commands still needed. The device test renders a
-14-command layered list with clips and translucency as pushed and as culled
-into a 256x256 target and compares the readbacks: 65,536 pixels identical with
-2 commands dropped and 2 split.
+of up to 60 rectangles, clips, and triangles at 256x256 with the GPU path's
+rules, three lists in four under a random fractional draw offset, one clip in
+ten pushed with a negative size, and one list in eight with its x coordinates
+hundreds of thousands of units to the left on mixed float grids; the culled
+list must match byte for byte, keep every non-rectangle command in order, and
+never be longer than the pushed list. 29,100 rectangles were culled and 5,674
+split across the run, 2,040 of them in the far lists. It found two defects
+before the pass first shipped (the overlay start was not moved, and a split
+could take slots that later commands still needed), and a fixed far case from
+the review below is checked as well. The device test renders a 24-command
+layered list with clips and translucency as pushed and as culled into a
+256x256 target and compares the readbacks (65,536 pixels identical with 12
+commands dropped and 2 split), checks that the culled list prepares within the
+vertex and item counts the pushed list used, and renders the review's four
+cases (a 0.75 offset, a thin rectangle under a fractional clip at 0.6, a
+negative clip width, and far coordinates) with no pixel changed.
 
 | Showcase scenario, Immediate, 3 alternating rounds | kept | culled |
 | --- | ---: | ---: |
@@ -571,19 +584,60 @@ into a 256x256 target and compares the readbacks: 65,536 pixels identical with
 | idle: UI build (includes the pass) | 78 us | 102 us |
 | docks: UI build | 110 us | 139 us |
 
-The pass costs 10 to 29 us of UI time per frame at the demo's clocks (about
+The pass costs 20 to 30 us of UI time per frame at the demo's clocks (about
 1.27 GHz; see change 10), against 420 to 450 us of frame work saved in the
 idle and edit scenarios and 240 us in docks. Timed alone on the dumped lists
-(`--dump-commands`) in a tight loop at full clock, it is 10.0 us for the idle
-scenario's 735 commands and 12.6 us for the docks scenario's 942, of which the
-copy back is 1 us; it drops 7 and splits 3 rectangles in the idle list, which
-is all it takes to remove 1.85 Mpx of paint. Eight mutants of the pass were
-run against the oracle: seven that change pixels or overflow are caught (a
-one-pixel slack in containment, an occludee's clip left unrounded, a missing
-remainder strip, a wrong strip edge, translucent occluders, a misplaced overlay
-boundary, and the unreserved capacity); the eighth, rounding an occluder's clip
-outwards, is equivalent, since the shader paints that rounded area, and the
-shipping choice is merely the conservative one.
+(`--dump-commands`) in a tight loop at full clock, it is 8.0 us for the idle
+scenario's 735 commands and 10.3 us for the docks scenario's 942, of which the
+copy back is 1 us; it drops 7 and splits 2 rectangles in the idle list, which
+is all it takes to remove the backdrop's and the dockspace's hidden paint. On
+128 non-overlapping opaque 64x64 rectangles, which have nothing to cull, the
+UI build goes from 0.6 to about 6.6 us. Ten mutants of the pass are run
+against the oracle and all are caught: a one-unit slack in containment, an
+occludee's clip rounded instead of widened, a negative clip size kept, an
+inexact fragment edge emitted (caught only by the fixed far case), the budget
+ignored, the budget's priority reversed, a missing remainder strip, a wrong
+strip edge, translucent occluders, and a misplaced overlay boundary.
+
+An independent review of the first version (2026-10-27) found four defects,
+each reproduced on the GPU before it was fixed:
+
+- The occludee's clip was rounded to pixels at offset zero, while the
+  renderers round it after adding the draw offset; with an offset of 0.75 a
+  column of 200 visible pixels was culled. The clip is now widened by one unit
+  on each side instead, which bounds the pixel clip under any offset.
+- A clip pushed with a width in [-1, 0) read as the pass's "unclipped" marker,
+  so an opaque rectangle under an empty clip, which paints nothing, became an
+  occluder and hid 16,384 pixels. Negative sizes are now stored as zero.
+- A fragment's far edge is rebuilt by the renderers as position plus size,
+  which for coordinates around 1.6 million moved an edge from 200.5 to
+  200.5625 and painted 200 extra pixels. A split is now abandoned unless every
+  piece's position plus size is its edge exactly.
+- Splitting could lengthen the list (the idle showcase went from 735 to 736
+  commands), so geometry sized for the pushed list could fail to prepare. The
+  culled list is now never longer than the pushed one: the pass decides first,
+  then spends the slots dropped rectangles returned on the splits that save the
+  most paint, revoking the least valuable. In the idle list the revoked split
+  is a small one; the backdrop keeps its two pieces. The pass also skips
+  occluders that do not touch a fragment before testing containment, which is
+  where the 10.0 to 8.0 us came from.
+
+Re-measured after the fixes with the same executable, culling toggled at run
+time, four alternating rounds of 900 frames under Immediate presentation on a
+desktop with a load average near 2:
+
+| Showcase scenario | kept | culled |
+| --- | ---: | ---: |
+| idle: frame work | 1,946 us | 1,570 us |
+| idle: GPU render total | 1,767 us | 1,336 us |
+| edit: frame work | 2,053 us | 1,460 us |
+| edit: GPU render total | 1,828 us | 1,256 us |
+| docks (20 panels): frame work | 1,871 us | 1,633 us |
+| docks: GPU render total | 1,672 us | 1,407 us |
+
+The absolute times are higher than the first table's because the desktop was
+busier; the reductions, 19 to 29 percent of frame work and 13 to 31 percent of
+the render total, match it.
 
 The Dear ImGui comparison's workloads have no layered backgrounds, so culling
 removes nothing there and its only effect is the pass's own 1 to 3 us of CPU;
@@ -594,8 +648,10 @@ benchmark suite keeps hidden draws (`RgGuiInitDesc.keep_hidden_draws`) so
 that its draw-list signatures stay comparable across versions, and times the
 pass in its own extended case, `cull_hidden`, over a synthetic layered list of
 525 commands (backdrop, menu, dockspace, three windows with clipped panels of
-28 widget rows, a dialog, and an overlay tooltip): 12 us per frame, with a
-deterministic output signature. What remains hidden, 0.52 Mpx, is
+28 widget rows, a dialog, and an overlay tooltip): 12.3 us per frame before
+the review's fixes and 9.0 us after (five alternating process pairs), with a
+deterministic output signature that the runner records but, unlike the other
+cases', does not compare across versions, since it is the pass's own output. What remains hidden, 0.52 Mpx, is
 in rectangles below the thresholds or covered by more than eight pieces' worth
 of occluders. VSync pacing is unchanged at 16.67 ms.
 
