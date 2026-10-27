@@ -511,6 +511,94 @@ one range: 128 labels of 26 glyphs padded to 32-quad pages at 24 bytes per
 quad. A 16-byte quad (pixel-snapped 16-bit position and size) would cut that
 by a third; it is left for later.
 
+### 12. Hidden-draw culling
+
+With change 11 the comparison's render pass matched Dear ImGui's, but the
+showcase's own frame was still 1.75 ms, and the editor workload had not moved
+with the shader change while the label workloads had. The difference between
+them is a full-window background fill. Two measurements made on 2026-10-26
+located the frame:
+
+- A `--coverage` option in the full showcase rasterizes one frame's rectangles
+  into a layer-count buffer. The idle scenario drew 735 commands, 571 of them
+  rectangles covering 3.40 Mpx of a 1.02 Mpx window: 3.3 layers per pixel on
+  average, 61 percent of pixels painted exactly three times. Painting the list
+  back to front showed 2.37 Mpx of that, 70 percent, under a later opaque
+  rectangle, and 43 rectangles entirely hidden. The 20-panel docks scenario was
+  3.2 layers and 68 percent hidden.
+- A `--size` option runs the showcase at other window sizes. Frame work under
+  Immediate presentation at 640x400, 905x566, 1280x800, and 1568x980 fitted
+  frame = 114 + 1,568 us per megapixel of window: linear in pixels, with a
+  small fixed part. The frame is fill, and the fill is memory traffic on
+  blended full-window layers.
+- Skipping the two full-window fills in a scratch build (the backdrop and the
+  dockspace panel, 1.98 Mpx of hidden paint) took the idle frame from 1,757 to
+  1,280 us: about 240 us per megapixel of blended paint, in line with the slope.
+
+`rg_gui_end_frame` now culls hidden draws. It walks the finished list
+backwards, keeping the 16 largest opaque rectangles passed so far as occluders
+(each at least 4,096 px). A rectangle of at least 1,024 px whose painted area
+lies inside an occluder is dropped; one of at least 16,384 px that an occluder
+covers by a quarter or more is replaced by its remainder, up to eight pieces,
+subtracting further occluders from the pieces. Only rectangles are dropped or
+split and only opaque rectangles occlude. An occludee's area is its rectangle
+inside its clip rounded outwards as the shader rounds, which overstates it; an
+occluder's is its rectangle inside its unrounded clip, which understates it.
+Pieces share their edges with the occluder, so each pixel center lands in
+exactly one under the rasterizer's rule. The output is written backwards into
+the overlay list's storage, free once merged, and copied back; the overlay
+start moves to the same boundary, since the renderers reset their clip stacks
+there. Capacity is respected by reserving one slot for every command still to
+be visited before a split may take the slack.
+
+Verification: a reference rasterizer in the CPU suite paints 3,000 random lists
+of up to 60 rectangles, clips, and triangles at 256x256, with the GPU path's
+rules, and the culled list must match byte for byte, keep every non-rectangle
+command in order, and stay within capacity; 28,850 rectangles were culled and
+4,767 split across the run, and 211 lists ran at exact capacity. It found two
+defects before the pass shipped: the overlay start was not moved, and a split
+could take slots that later commands still needed. The device test renders a
+14-command layered list with clips and translucency as pushed and as culled
+into a 256x256 target and compares the readbacks: 65,536 pixels identical with
+2 commands dropped and 2 split.
+
+| Showcase scenario, Immediate, 3 alternating rounds | kept | culled |
+| --- | ---: | ---: |
+| idle: frame work | 1,749 us | 1,328 us |
+| idle: layers per pixel, hidden paint | 3.32, 2.37 Mpx | 1.51, 0.52 Mpx |
+| edit: frame work | 1,750 us | 1,298 us |
+| docks (20 panels): frame work | 1,777 us | 1,538 us |
+| idle: UI build (includes the pass) | 78 us | 102 us |
+| docks: UI build | 110 us | 139 us |
+
+The pass costs 10 to 29 us of UI time per frame at the demo's clocks (about
+1.27 GHz; see change 10), against 420 to 450 us of frame work saved in the
+idle and edit scenarios and 240 us in docks. Timed alone on the dumped lists
+(`--dump-commands`) in a tight loop at full clock, it is 10.0 us for the idle
+scenario's 735 commands and 12.6 us for the docks scenario's 942, of which the
+copy back is 1 us; it drops 7 and splits 3 rectangles in the idle list, which
+is all it takes to remove 1.85 Mpx of paint. Eight mutants of the pass were
+run against the oracle: seven that change pixels or overflow are caught (a
+one-pixel slack in containment, an occludee's clip left unrounded, a missing
+remainder strip, a wrong strip edge, translucent occluders, a misplaced overlay
+boundary, and the unreserved capacity); the eighth, rounding an occluder's clip
+outwards, is equivalent, since the shader paints that rounded area, and the
+shipping choice is merely the conservative one.
+
+The Dear ImGui comparison's workloads have no layered backgrounds, so culling
+removes nothing there and its only effect is the pass's own 1 to 3 us of CPU;
+a rerun on 2026-10-26 with culling on moved no cell beyond its noise. A
+workload with a backdrop under panels under widgets, as real editors have,
+would show the difference and is a candidate for the harness. The CPU
+benchmark suite keeps hidden draws (`RgGuiInitDesc.keep_hidden_draws`) so
+that its draw-list signatures stay comparable across versions, and times the
+pass in its own extended case, `cull_hidden`, over a synthetic layered list of
+525 commands (backdrop, menu, dockspace, three windows with clipped panels of
+28 widget rows, a dialog, and an overlay tooltip): 12 us per frame, with a
+deterministic output signature. What remains hidden, 0.52 Mpx, is
+in rectangles below the thresholds or covered by more than eight pieces' worth
+of occluders. VSync pacing is unchanged at 16.67 ms.
+
 ## Measured effect of the changes
 
 Extended CPU suite, `benchmarks/run.py compare`, five alternating process
@@ -799,11 +887,12 @@ hidden tab.
    Pixel-snapped 16-bit
    position and size would make a 16-byte quad, and 16-quad pages would halve
    the padding for short labels.
-4. **The GPU queue is now the frame.** With change 11 a frame's queue cost
-   matches Dear ImGui's for the same content and rg_gui's CPU is a fraction of
-   its frame; what remains per frame is fill and the fixed per-submit cost.
-   Overdraw under opaque panels and not presenting unchanged frames are the
-   levers, both outside the shader.
+4. **Overdraw under opaque panels.** Done on 2026-10-26 (change 12): hidden-draw
+   culling drops and splits rectangles under later opaque rectangles, taking
+   the showcase from 3.3 to 1.5 layers per pixel and its frame work down 24 to
+   26 percent. What remains per frame is the visible fill, the fixed per-submit
+   cost, and the present path; not presenting unchanged frames is the
+   remaining lever, and both mechanisms for it already ship.
 ## Verified and left alone
 
 - Text length in the draw command, tried on 2026-10-23 and not adopted.

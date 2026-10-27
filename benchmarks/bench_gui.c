@@ -172,6 +172,11 @@ static void init_bench(Bench* b, int synthetic) {
         fail("frontend lookup initialization");
     gui_desc.text_lookup = &b->frontend_lookup;
 #endif
+#if defined(RG_GUI_CULL_OCCLUDER_MAX)
+    /* Keep every pushed command so draw-list signatures compare across versions;
+     * the culling pass has its own extended case. */
+    gui_desc.keep_hidden_draws = 1;
+#endif
     size_t gui_size = rg_gui_memory_required(&gui_desc);
     b->gui_memory = allocate(gui_size);
     RgArena gui_arena = {(char*)b->gui_memory, gui_size, 0u, gui_size};

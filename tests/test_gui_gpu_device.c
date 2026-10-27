@@ -200,10 +200,10 @@ cleanup:
 }
 
 /* Render a list into the 64x64 target and read it back. */
-static int test_gpu_render(SDL_GPUDevice* device, SDL_GPUTexture* target, SDL_GPUTransferBuffer* readback,
-                           RgGuiGpuRenderer* gpu, RgGuiRenderer* text, RgGpuUploadRing* ring,
-                           const RgGuiDrawList* list, const RgGuiGpuDrawDesc* draw, u8* pixels,
-                           u32* clip_count, RgGuiGpuStats* stats)
+static int test_gpu_render_sized(SDL_GPUDevice* device, SDL_GPUTexture* target, SDL_GPUTransferBuffer* readback,
+                                 RgGuiGpuRenderer* gpu, RgGuiRenderer* text, RgGpuUploadRing* ring,
+                                 const RgGuiDrawList* list, const RgGuiGpuDrawDesc* draw, u8* pixels,
+                                 u32* clip_count, RgGuiGpuStats* stats, u32 size)
 {
 	int passed = 0;
 	SDL_GPUCommandBuffer* command = NULL;
@@ -233,10 +233,10 @@ static int test_gpu_render(SDL_GPUDevice* device, SDL_GPUTexture* target, SDL_GP
 	copy = SDL_BeginGPUCopyPass(command);
 	if (!copy) goto cleanup;
 	SDL_GPUTextureRegion source = {0};
-	source.texture = target; source.w = source.h = 64u; source.d = 1u;
+	source.texture = target; source.w = source.h = size; source.d = 1u;
 	SDL_GPUTextureTransferInfo destination = {0};
 	destination.transfer_buffer = readback;
-	destination.pixels_per_row = destination.rows_per_layer = 64u;
+	destination.pixels_per_row = destination.rows_per_layer = size;
 	SDL_DownloadFromGPUTexture(copy, &source, &destination);
 	SDL_EndGPUCopyPass(copy);
 	if (!rg_gui_gpu_upload_ready(gpu, &upload)) goto cleanup;
@@ -247,12 +247,115 @@ static int test_gpu_render(SDL_GPUDevice* device, SDL_GPUTexture* target, SDL_GP
 	if (!SDL_WaitForGPUIdle(device)) goto cleanup;
 	const u8* mapped = (const u8*)SDL_MapGPUTransferBuffer(device, readback, false);
 	if (!mapped) goto cleanup;
-	memcpy(pixels, mapped, 64u * 64u * 4u);
+	memcpy(pixels, mapped, (size_t)size * size * 4u);
 	SDL_UnmapGPUTransferBuffer(device, readback);
 	passed = 1;
 cleanup:
 	if (command) SDL_CancelGPUCommandBuffer(command);
 	rg_gui_gpu_upload_abort(gpu, &upload);
+	return passed;
+}
+
+static int test_gpu_render(SDL_GPUDevice* device, SDL_GPUTexture* target, SDL_GPUTransferBuffer* readback,
+                           RgGuiGpuRenderer* gpu, RgGuiRenderer* text, RgGpuUploadRing* ring,
+                           const RgGuiDrawList* list, const RgGuiGpuDrawDesc* draw, u8* pixels,
+                           u32* clip_count, RgGuiGpuStats* stats)
+{
+	return test_gpu_render_sized(device, target, readback, gpu, text, ring, list, draw, pixels, clip_count, stats, 64u);
+}
+
+/* Hidden-draw culling claims to leave every pixel unchanged. Render a layered
+ * list, a backdrop under a panel under widgets with clips and translucency, as
+ * pushed and as culled, into a 256-pixel target and compare the readbacks byte
+ * for byte. The culled list must have dropped and split commands. */
+static int test_gpu_hidden_culling(SDL_GPUDevice* device, RgGuiGpuRenderer* gpu, RgGuiRenderer* text,
+                                   RgGpuUploadRing* ring)
+{
+	enum { SIZE = 256 };
+	int passed = 0;
+	SDL_GPUTextureCreateInfo info = {0};
+	info.type = SDL_GPU_TEXTURETYPE_2D;
+	info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+	info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+	info.width = info.height = SIZE;
+	info.layer_count_or_depth = 1u;
+	info.num_levels = 1u;
+	info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+	SDL_GPUTexture* target = SDL_CreateGPUTexture(device, &info);
+	SDL_GPUTransferBufferCreateInfo transfer = {0};
+	transfer.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+	transfer.size = SIZE * SIZE * 4u;
+	SDL_GPUTransferBuffer* readback = SDL_CreateGPUTransferBuffer(device, &transfer);
+	static u8 plain_pixels[SIZE * SIZE * 4u], culled_pixels[SIZE * SIZE * 4u];
+	if (!target || !readback) goto cleanup;
+	typedef struct Layer { u32 type; RgGuiRect rect; u32 color; } Layer;
+	/* 20 commands: clips stay balanced; the 1-pixel clip around the second panel
+	 * exercises the outward rounding of an occludee's clip. */
+	const Layer layers[] = {
+	    {RG_GUI_CMD_RECT, {0, 0, 256, 256}, 0xff303030u},             /* backdrop: split into margins */
+	    {RG_GUI_CMD_RECT, {12, 12, 232, 232}, 0xff505050u},           /* panel: mostly covered, split */
+	    {RG_GUI_CMD_RECT, {20, 20, 100, 100}, 0x80ff4000u},           /* translucent, partly visible: kept */
+	    {RG_GUI_CMD_RECT, {40, 40, 60, 60}, 0xff0080ffu},             /* under the window below: dropped */
+	    {RG_GUI_CMD_CLIP_PUSH, {30.5f, 30.25f, 200.0f, 200.5f}, 0u},
+	    {RG_GUI_CMD_RECT, {0, 0, 256, 256}, 0xff707070u},             /* window: clipped occluder */
+	    {RG_GUI_CMD_RECT, {35, 35, 40, 40}, 0x40ffffffu},             /* translucent under the toolbar: dropped */
+	    {RG_GUI_CMD_CLIP_POP, {0, 0, 0, 0}, 0u},
+	    {RG_GUI_CMD_RECT, {32, 32, 180, 50}, 0xff906020u},            /* toolbar: occluder */
+	    {RG_GUI_CMD_RECT, {150, 150, 90, 90}, 0xc0208040u},           /* translucent over the window: kept */
+	    {RG_GUI_CMD_RECT, {34, 34, 176, 46}, 0xff20a0c0u},            /* inset over the toolbar: occluder */
+	    {RG_GUI_CMD_RECT, {36.5f, 36.5f, 20, 20}, 0xffffffffu},       /* small, kept */
+	    {RG_GUI_CMD_RECT, {200.25f, 10.75f, 50, 30}, 0x90ff00ffu},    /* spans panel edge, translucent */
+	    {RG_GUI_CMD_RECT, {-20, 100, 60, 300}, 0xff804040u},          /* off the edge, occluder */
+	};
+	enum { LAYER_COUNT = sizeof(layers) / sizeof(layers[0]) };
+	RgGuiDrawCmd plain[LAYER_COUNT], culled[LAYER_COUNT + 8u], scratch[LAYER_COUNT + 8u];
+	RgGuiRect clips[LAYER_COUNT + 8u];
+	memset(plain, 0, sizeof(plain));
+	for (u32 i = 0u; i < LAYER_COUNT; i++)
+	{
+		plain[i].type = layers[i].type;
+		plain[i].color = layers[i].color;
+		if (layers[i].type == RG_GUI_CMD_RECT) plain[i].data.rect.rect = layers[i].rect;
+		else if (layers[i].type == RG_GUI_CMD_CLIP_PUSH) plain[i].data.clip.rect = layers[i].rect;
+	}
+	memcpy(culled, plain, sizeof(plain));
+	RgGuiDrawList plain_list = {plain, LAYER_COUNT, LAYER_COUNT};
+	RgGuiDrawList culled_list = {culled, LAYER_COUNT, LAYER_COUNT + 8u};
+	u32 overlay = LAYER_COUNT, dropped = 0u, split = 0u;
+	rg_gui_draw_list_cull_hidden_ex(&culled_list, &overlay, clips, scratch, LAYER_COUNT + 8u, &dropped, &split);
+	if (dropped < 2u || split < 2u || overlay != culled_list.count)
+	{
+		SDL_SetError("Hidden-draw culling dropped %u and split %u commands (expected at least 2 each)", dropped, split);
+		goto cleanup;
+	}
+	RgGuiGpuDrawDesc draw = {0};
+	draw.output_width = draw.output_height = SIZE;
+	draw.viewport = (SDL_Rect){0, 0, SIZE, SIZE};
+	RgGuiGpuStats stats = {0};
+	u32 clip_count = 0u;
+	if (!test_gpu_render_sized(device, target, readback, gpu, text, ring, &plain_list, &draw, plain_pixels, &clip_count, &stats, SIZE) ||
+	    !test_gpu_render_sized(device, target, readback, gpu, text, ring, &culled_list, &draw, culled_pixels, &clip_count, &stats, SIZE))
+	{
+		SDL_SetError("Hidden-draw culling render failed");
+		goto cleanup;
+	}
+	u32 differing = 0u, painted = 0u;
+	for (u32 i = 0u; i < SIZE * SIZE; i++)
+	{
+		differing += memcmp(plain_pixels + i * 4u, culled_pixels + i * 4u, 4u) != 0;
+		painted += plain_pixels[i * 4u] | plain_pixels[i * 4u + 1u] | plain_pixels[i * 4u + 2u] ? 1u : 0u;
+	}
+	if (differing || painted < SIZE * SIZE / 2u)
+	{
+		SDL_SetError("Hidden-draw culling changed %u of %u pixels (%u painted)", differing, SIZE * SIZE, painted);
+		goto cleanup;
+	}
+	printf("Hidden-draw culling: %u GPU pixels identical with %u of %u commands dropped and %u split\n",
+	       SIZE * SIZE, dropped, LAYER_COUNT, split);
+	passed = 1;
+cleanup:
+	if (readback) SDL_ReleaseGPUTransferBuffer(device, readback);
+	if (target) SDL_ReleaseGPUTexture(device, target);
 	return passed;
 }
 
@@ -752,6 +855,7 @@ int main(void)
 	puts("Indexed material, clip, alpha, triangle, and overlay: 17 GPU pixel probes passed");
 	if (!test_gpu_full_cache_ring(device, target_texture, readback, &renderer, &text_renderer, &ring)) goto cleanup;
 	if (!test_gpu_clip_distances(device, target_texture, readback, &renderer, &text_renderer, &ring)) goto cleanup;
+	if (!test_gpu_hidden_culling(device, &renderer, &text_renderer, &ring)) goto cleanup;
 	if (!test_gpu_mutable_value_text(device, 2u) || !test_gpu_mutable_value_text(device, 3u)) goto cleanup;
 
 	puts("rg_gui_gpu end-to-end SDL_GPU checks passed");

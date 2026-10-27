@@ -747,6 +747,11 @@ typedef struct RgGuiDiagnostics
 	size_t draw_command_high_water;
 	size_t text_buffer_high_water;
 	u32 recovered_active_ids;
+	/* Cumulative counts from hidden-draw culling: rectangles dropped because a
+	 * later opaque rectangle covered them, and rectangles replaced by their
+	 * visible parts. */
+	u32 culled_draw_commands;
+	u32 split_draw_commands;
 } RgGuiDiagnostics;
 
 typedef struct RgGuiLayout
@@ -1567,6 +1572,10 @@ typedef struct RgGuiContext
 	RgGuiDrawList* draw_target;
 	RgGuiDrawList* overlay_target;
 	RgGuiDrawList* modal_base_target;
+	/* Hidden-draw culling: per-command effective clips (max_draw_cmds entries)
+	 * and the runtime switch, 1 unless RgGuiInitDesc.keep_hidden_draws. */
+	RgGuiRect* cull_clips;
+	int cull_hidden_draws;
 	u32 overlay_start;
 #if defined(RG_GUI_ENABLE_VIEWPORTS)
 	RgGuiViewport* viewports;
@@ -1744,6 +1753,10 @@ typedef struct RgGuiInitDesc
 	u32 menu_width_cache_size;
 	u32 tab_scroll_cache_size;
 	const RgGuiTextLookup* text_lookup; // Optional; ignored when its font differs from font.
+	/* Nonzero keeps every pushed command in the draw list. By default end-of-frame
+	 * drops rectangles that lie under a later opaque rectangle and splits large
+	 * ones into their visible parts; see rg_gui_draw_list_cull_hidden. */
+	int keep_hidden_draws;
 #if defined(RG_GUI_ENABLE_VIEWPORTS)
 	/* Optional caller-owned viewport arrays, acquired on first use. Null retains
 	 * the default eager arena allocation included in rg_gui_memory_required. */
@@ -10219,6 +10232,7 @@ RGINLINE int rg_gui_init_desc_resolve(const RgGuiInitDesc* desc, RgGuiInitDesc* 
 	memset(out, 0, sizeof(*out));
 	out->font = desc->font;
 	out->text_lookup = desc->text_lookup;
+	out->keep_hidden_draws = desc->keep_hidden_draws;
 	out->max_draw_cmds = desc->max_draw_cmds ? desc->max_draw_cmds : RG_GUI_MAX_DRAW_CMDS;
 	out->text_buffer_size = desc->text_buffer_size ? desc->text_buffer_size : RG_GUI_TEXT_BUFFER_SIZE;
 	out->ime_callback = desc->ime_callback;
@@ -10289,6 +10303,7 @@ RGINLINE size_t rg_gui_memory_required(const RgGuiInitDesc* desc)
 	} while (0)
 	RG_GUI_MEMORY_ADD(RgGuiDrawCmd, init.max_draw_cmds);
 	RG_GUI_MEMORY_ADD(RgGuiDrawCmd, init.max_draw_cmds);
+	RG_GUI_MEMORY_ADD(RgGuiRect, init.max_draw_cmds);
 	RG_GUI_MEMORY_ADD(char, init.text_buffer_size);
 	RG_GUI_MEMORY_ADD(RgGuiValueCacheEntry, value_cache_capacity);
 	RG_GUI_MEMORY_ADD(RgGuiTextMeasureCacheEntry, measure_cache_capacity);
@@ -10369,6 +10384,8 @@ RGINLINE int rg_gui_init(RgGuiContext* ctx, RgArena* arena, const RgGuiInitDesc*
 	ctx->overlay_target = &ctx->overlay_list;
 	ctx->modal_base_target = &ctx->draw_list;
 	ctx->overlay_start = 0u;
+	ctx->cull_clips = RG_ARENA_PUSH_ARRAY(arena, RgGuiRect, init.max_draw_cmds);
+	ctx->cull_hidden_draws = !init.keep_hidden_draws;
 	memset(&ctx->diagnostics, 0, sizeof(ctx->diagnostics));
 
 	ctx->text_buffer = RG_ARENA_PUSH_ARRAY(arena, char, init.text_buffer_size);
@@ -10623,7 +10640,7 @@ RGINLINE int rg_gui_init(RgGuiContext* ctx, RgArena* arena, const RgGuiInitDesc*
 	ctx->cursor_blink_timer = 0.0f;
 	ctx->cursor_visible = 1;
 
-	int allocation_failed = !ctx->draw_list.cmds || !ctx->overlay_list.cmds || !ctx->text_buffer ||
+	int allocation_failed = !ctx->draw_list.cmds || !ctx->overlay_list.cmds || !ctx->cull_clips || !ctx->text_buffer ||
 	                        (init.value_cache_size > 0u && !ctx->value_cache) ||
 	                        (init.text_measure_cache_size > 0u && !ctx->text_measure_cache) ||
 	                        (init.text_length_cache_size > 0u && !ctx->text_length_cache) ||
@@ -11000,6 +11017,290 @@ RGINLINE void rg_gui_diagnostics_finish_stacks(RgGuiContext* ctx)
 	}
 }
 
+
+/* Hidden-draw culling.
+ *
+ * Interfaces paint in layers: a backdrop, window backgrounds over it, panel
+ * backgrounds over those, widgets on top. Each layer is a full fill of its
+ * area, and on a fill-bound GPU a blended full-window layer costs as much as
+ * all the widgets together. The showcase painted every pixel 3.3 times and
+ * 70 percent of its rectangle paint lay under a later opaque rectangle.
+ *
+ * At the end of a frame this pass walks the finished list backwards, keeping
+ * the largest opaque rectangles it has passed as occluders. A rectangle whose
+ * painted area lies inside an occluder is dropped; a large one that an
+ * occluder mostly covers is replaced by its visible remainder, up to
+ * RG_GUI_CULL_FRAGMENT_MAX pieces. Only rectangles are dropped or split, and
+ * only opaque rectangles occlude. Pixels are unchanged: a dropped pixel would
+ * have been overwritten, and fragments share their edges with the occluder,
+ * so each pixel center falls in exactly one of them under the rasterizer's
+ * rules.
+ *
+ * Clips are honoured the way the GPU path applies them. An occludee's painted
+ * area is its rectangle inside its clip rounded outwards (floor the near
+ * edges, ceil the far edges, as the shader does), which can only overstate it;
+ * an occluder's covered area is its rectangle inside its unrounded clip, which
+ * can only understate it. Commands under a clip stack deeper than the pass
+ * tracks are left alone. Writes go to a scratch array the size of the list,
+ * backwards from its end, and are copied back when the pass completes. */
+#define RG_GUI_CULL_OCCLUDER_MAX 16u
+#define RG_GUI_CULL_FRAGMENT_MAX 8u
+#define RG_GUI_CULL_CLIP_STACK_MAX 64u
+#define RG_GUI_CULL_MIN_OCCLUDEE_AREA 1024.0f
+#define RG_GUI_CULL_MIN_OCCLUDER_AREA 4096.0f
+#define RG_GUI_CULL_MIN_SPLIT_AREA 16384.0f
+#define RG_GUI_CULL_SPLIT_FRACTION 0.25f
+
+typedef struct RgGuiCullBox
+{
+	f32 x0, y0, x1, y1;
+} RgGuiCullBox;
+
+RGINLINE RgGuiCullBox rg_gui_cull_box(RgGuiRect r)
+{
+	RgGuiCullBox b = {r.x, r.y, r.x + r.w, r.y + r.h};
+	return b;
+}
+
+RGINLINE f32 rg_gui_cull_area(RgGuiCullBox b)
+{
+	return b.x1 > b.x0 && b.y1 > b.y0 ? (b.x1 - b.x0) * (b.y1 - b.y0) : 0.0f;
+}
+
+RGINLINE RgGuiCullBox rg_gui_cull_intersect(RgGuiCullBox a, RgGuiCullBox b)
+{
+	RgGuiCullBox r = {a.x0 > b.x0 ? a.x0 : b.x0, a.y0 > b.y0 ? a.y0 : b.y0,
+	                  a.x1 < b.x1 ? a.x1 : b.x1, a.y1 < b.y1 ? a.y1 : b.y1};
+	return r;
+}
+
+RGINLINE int rg_gui_cull_contains(RgGuiCullBox outer, RgGuiCullBox inner)
+{
+	return inner.x0 >= outer.x0 && inner.y0 >= outer.y0 && inner.x1 <= outer.x1 && inner.y1 <= outer.y1;
+}
+
+/* The clip intersection the renderers compute: max of the near edges, min of
+ * the far edges, empty rather than negative. */
+RGINLINE RgGuiRect rg_gui_cull_clip_intersect(RgGuiRect a, RgGuiRect b)
+{
+	f32 x0 = a.x > b.x ? a.x : b.x;
+	f32 y0 = a.y > b.y ? a.y : b.y;
+	f32 ax1 = a.x + a.w, ay1 = a.y + a.h, bx1 = b.x + b.w, by1 = b.y + b.h;
+	f32 x1 = ax1 < bx1 ? ax1 : bx1;
+	f32 y1 = ay1 < by1 ? ay1 : by1;
+	RgGuiRect r = {x0, y0, x1 > x0 ? x1 - x0 : 0.0f, y1 > y0 ? y1 - y0 : 0.0f};
+	return r;
+}
+
+/* Cull `list` in place. `clips` holds at least list->count entries, `scratch`
+ * at least list->capacity commands. `*overlay_start`, the index where the
+ * overlay commands begin and the renderers reset their clip stacks, is moved
+ * to the same boundary in the culled list. Returns the dropped and split
+ * counts. */
+static RG_NOINLINE void rg_gui_draw_list_cull_hidden_ex(RgGuiDrawList* list, u32* overlay_start,
+                                                       RgGuiRect* clips, RgGuiDrawCmd* scratch,
+                                                       u32 scratch_capacity, u32* out_culled,
+                                                       u32* out_split)
+{
+	if (out_culled) *out_culled = 0u;
+	if (out_split) *out_split = 0u;
+	if (!list || !list->cmds || !clips || !scratch || !overlay_start || list->count < 2u ||
+	    list->count > list->capacity || scratch_capacity < list->count)
+		return;
+	const u32 count = list->count;
+	const u32 capacity = list->capacity < scratch_capacity ? list->capacity : scratch_capacity;
+	RgGuiDrawCmd* cmds = list->cmds;
+	const u32 overlay_at = *overlay_start > count ? count : *overlay_start;
+
+	/* Forward: the clip in effect for each command. w < 0 marks unclipped,
+	 * w < -1 marks a depth the pass does not track. */
+	RgGuiRect stack[RG_GUI_CULL_CLIP_STACK_MAX];
+	RgGuiRect clip = {0.0f, 0.0f, 0.0f, 0.0f};
+	u32 depth = 0u, ignored = 0u;
+	int enabled = 0;
+	for (u32 i = 0u; i < count; i++)
+	{
+		if (i == overlay_at)
+		{
+			depth = 0u;
+			ignored = 0u;
+			enabled = 0;
+		}
+		const RgGuiDrawCmd* cmd = &cmds[i];
+		if (cmd->type == RG_GUI_CMD_CLIP_PUSH)
+		{
+			if (depth >= RG_GUI_CULL_CLIP_STACK_MAX) ignored++;
+			else
+			{
+				clip = enabled ? rg_gui_cull_clip_intersect(clip, cmd->data.clip.rect) : cmd->data.clip.rect;
+				stack[depth++] = clip;
+				enabled = 1;
+			}
+		}
+		else if (cmd->type == RG_GUI_CMD_CLIP_POP)
+		{
+			if (ignored) ignored--;
+			else if (depth)
+			{
+				depth--;
+				enabled = depth != 0u;
+				if (enabled) clip = stack[depth - 1u];
+			}
+		}
+		if (ignored) clips[i] = (RgGuiRect){0.0f, 0.0f, -2.0f, -2.0f};
+		else if (enabled) clips[i] = clip;
+		else clips[i] = (RgGuiRect){0.0f, 0.0f, -1.0f, -1.0f};
+	}
+
+	/* Backward: occluders are the largest opaque rectangles already passed,
+	 * which are the ones drawn after the command in hand. */
+	RgGuiCullBox occluders[RG_GUI_CULL_OCCLUDER_MAX];
+	f32 occluder_areas[RG_GUI_CULL_OCCLUDER_MAX];
+	u32 occluder_count = 0u;
+	u32 written = 0u, culled = 0u, split = 0u, overlay_written = 0u;
+	RgGuiDrawCmd* out = scratch + capacity;
+	for (u32 n = count; n-- > 0u;)
+	{
+		/* Every command from the overlay has been written once n drops below it. */
+		if (n + 1u == overlay_at) overlay_written = written;
+		const RgGuiDrawCmd* cmd = &cmds[n];
+		const RgGuiRect cmd_clip = clips[n];
+		/* A negative size draws a flipped quad, so only non-negative rectangles
+		 * take part, as occludee or occluder. */
+		const int plain_rect = cmd->type == RG_GUI_CMD_RECT && cmd_clip.w >= -1.0f &&
+		                       cmd->data.rect.rect.w >= 0.0f && cmd->data.rect.rect.h >= 0.0f;
+		if (plain_rect)
+		{
+			RgGuiCullBox box = rg_gui_cull_box(cmd->data.rect.rect);
+			if (cmd_clip.w >= 0.0f)
+			{
+				RgGuiCullBox rounded = {rg_floorf(cmd_clip.x), rg_floorf(cmd_clip.y),
+				                        rg_ceilf(cmd_clip.x + cmd_clip.w), rg_ceilf(cmd_clip.y + cmd_clip.h)};
+				box = rg_gui_cull_intersect(box, rounded);
+			}
+			const f32 area = rg_gui_cull_area(box);
+			if (area <= 0.0f)
+			{
+				culled++;
+				continue;
+			}
+			if (area >= RG_GUI_CULL_MIN_OCCLUDEE_AREA && occluder_count)
+			{
+				RgGuiCullBox fragments[RG_GUI_CULL_FRAGMENT_MAX];
+				u32 fragment_count = 1u;
+				int changed = 0;
+				fragments[0] = box;
+				for (u32 o = 0u; o < occluder_count && fragment_count; o++)
+				{
+					const RgGuiCullBox occluder = occluders[o];
+					for (u32 f = 0u; f < fragment_count;)
+					{
+						const RgGuiCullBox fragment = fragments[f];
+						if (rg_gui_cull_contains(occluder, fragment))
+						{
+							fragments[f] = fragments[--fragment_count];
+							changed = 1;
+							continue;
+						}
+						const RgGuiCullBox overlap = rg_gui_cull_intersect(occluder, fragment);
+						const f32 overlap_area = rg_gui_cull_area(overlap);
+						const f32 fragment_area = rg_gui_cull_area(fragment);
+						if (overlap_area > 0.0f && area >= RG_GUI_CULL_MIN_SPLIT_AREA &&
+						    overlap_area >= RG_GUI_CULL_SPLIT_FRACTION * fragment_area &&
+						    fragment_count + 3u <= RG_GUI_CULL_FRAGMENT_MAX)
+						{
+							/* fragment minus overlap: left and right strips at full
+							 * height, top and bottom strips between them. */
+							RgGuiCullBox pieces[4] = {
+							    {fragment.x0, fragment.y0, overlap.x0, fragment.y1},
+							    {overlap.x1, fragment.y0, fragment.x1, fragment.y1},
+							    {overlap.x0, fragment.y0, overlap.x1, overlap.y0},
+							    {overlap.x0, overlap.y1, overlap.x1, fragment.y1}};
+							fragments[f] = fragments[--fragment_count];
+							for (u32 k = 0u; k < 4u; k++)
+								if (rg_gui_cull_area(pieces[k]) > 0.0f) fragments[fragment_count++] = pieces[k];
+							changed = 1;
+							continue;
+						}
+						f++;
+					}
+				}
+				if (fragment_count == 0u)
+				{
+					culled++;
+					continue;
+				}
+				/* The n commands still to come need a slot each, so a split may only
+				 * use the slack beyond them; dropped commands return theirs. */
+				if (changed && written + fragment_count + n <= capacity)
+				{
+					for (u32 f = 0u; f < fragment_count; f++)
+					{
+						RgGuiDrawCmd piece = *cmd;
+						piece.data.rect.rect = rg_gui_make_rect(fragments[f].x0, fragments[f].y0,
+						                                        fragments[f].x1 - fragments[f].x0,
+						                                        fragments[f].y1 - fragments[f].y0);
+						*--out = piece;
+						written++;
+					}
+					split++;
+					goto occlude;
+				}
+			}
+		}
+		*--out = *cmd;
+		written++;
+	occlude:
+		if (plain_rect && (cmd->color >> 24u) == 255u)
+		{
+			RgGuiCullBox covered = rg_gui_cull_box(cmd->data.rect.rect);
+			if (cmd_clip.w >= 0.0f) covered = rg_gui_cull_intersect(covered, rg_gui_cull_box(cmd_clip));
+			const f32 covered_area = rg_gui_cull_area(covered);
+			if (covered_area >= RG_GUI_CULL_MIN_OCCLUDER_AREA)
+			{
+				u32 slot = occluder_count;
+				if (occluder_count == RG_GUI_CULL_OCCLUDER_MAX)
+				{
+					slot = 0u;
+					for (u32 o = 1u; o < occluder_count; o++)
+						if (occluder_areas[o] < occluder_areas[slot]) slot = o;
+					if (occluder_areas[slot] >= covered_area) slot = RG_GUI_CULL_OCCLUDER_MAX;
+				}
+				else occluder_count++;
+				if (slot < RG_GUI_CULL_OCCLUDER_MAX)
+				{
+					occluders[slot] = covered;
+					occluder_areas[slot] = covered_area;
+				}
+			}
+		}
+	}
+	if (overlay_at == 0u) overlay_written = written;
+	if (culled || split)
+	{
+		memcpy(cmds, out, sizeof(*cmds) * written);
+		list->count = written;
+		*overlay_start = written - overlay_written;
+	}
+	if (out_culled) *out_culled = culled;
+	if (out_split) *out_split = split;
+}
+
+/* Cull a finished list with the context's scratch storage; the overlay list's
+ * command array is free once its commands have been merged into `list`. */
+RGINLINE void rg_gui_draw_list_cull_hidden(RgGuiContext* ctx, RgGuiDrawList* list,
+                                           u32* overlay_start, RgGuiDrawList* scratch)
+{
+	if (!ctx || !ctx->cull_hidden_draws || !ctx->cull_clips || !list || !overlay_start || !scratch ||
+	    !scratch->cmds || list->count > scratch->capacity || list->count > ctx->draw_list.capacity)
+		return;
+	u32 culled = 0u, split = 0u;
+	rg_gui_draw_list_cull_hidden_ex(list, overlay_start, ctx->cull_clips, scratch->cmds,
+	                                scratch->capacity, &culled, &split);
+	ctx->diagnostics.culled_draw_commands += culled;
+	ctx->diagnostics.split_draw_commands += split;
+}
+
 RGINLINE void rg_gui_end_frame(RgGuiContext* ctx)
 {
 	rg_gui_end_frame_state(ctx);
@@ -11031,6 +11332,7 @@ RGINLINE void rg_gui_end_frame(RgGuiContext* ctx)
 			ctx->draw_list.count += copy_count;
 		}
 	}
+	rg_gui_draw_list_cull_hidden(ctx, &ctx->draw_list, &ctx->overlay_start, &ctx->overlay_list);
 
 	if (ctx->text_buffer_used > ctx->diagnostics.text_buffer_high_water)
 	{
@@ -15665,6 +15967,7 @@ RGINLINE void rg_gui_viewport_end(RgGuiContext* ctx, RgGuiViewport* viewport)
 			viewport->draw_list.count += copy_count;
 		}
 	}
+	rg_gui_draw_list_cull_hidden(ctx, &viewport->draw_list, &viewport->overlay_start, &viewport->overlay_list);
 
 	RgGuiViewportStackEntry* entry = &ctx->viewport_stack[--ctx->viewport_stack_top];
 	ctx->draw_target = entry->prev_draw_target ? entry->prev_draw_target : &ctx->draw_list;

@@ -36,6 +36,13 @@ typedef struct ExtendedBench {
     char event_text[64];
     RgInputEventQueue events;
     u32 edit_frame;
+    /* A layered list for the hidden-draw culling pass: backdrop, three columns,
+     * panels, and widgets, as an editor layout paints them. */
+    RgGuiDrawCmd cull_source[1024];
+    RgGuiDrawCmd cull_working[1024];
+    RgGuiDrawCmd cull_scratch[1024];
+    RgGuiRect cull_clips[1024];
+    u32 cull_count, cull_overlay, cull_result_count, cull_culled, cull_split;
 } ExtendedBench;
 
 static void extended_init(Bench* b, ExtendedBench* e) {
@@ -68,6 +75,41 @@ static void extended_init(Bench* b, ExtendedBench* e) {
     rg_gui_text_area_cache_init(&e->cache, e->cache_text, sizeof(e->cache_text),
                                 e->cache_lines, RG_ARRAY_COUNT(e->cache_lines));
     e->edit_area.layout_cache = &e->cache;
+    {
+        u32 n = 0u;
+        RgGuiDrawCmd* c = e->cull_source;
+#define CULL_RECT(X, Y, W, H, COLOR) do { memset(&c[n], 0, sizeof(c[n])); c[n].type = RG_GUI_CMD_RECT; c[n].color = (COLOR); c[n].data.rect.rect = rg_gui_make_rect((f32)(X), (f32)(Y), (f32)(W), (f32)(H)); n++; } while (0)
+#define CULL_CLIP(X, Y, W, H) do { memset(&c[n], 0, sizeof(c[n])); c[n].type = RG_GUI_CMD_CLIP_PUSH; c[n].data.clip.rect = rg_gui_make_rect((f32)(X), (f32)(Y), (f32)(W), (f32)(H)); n++; } while (0)
+#define CULL_POP() do { memset(&c[n], 0, sizeof(c[n])); c[n].type = RG_GUI_CMD_CLIP_POP; n++; } while (0)
+        CULL_RECT(0, 0, 1280, 800, 0xff202020u);                 /* backdrop */
+        CULL_RECT(0, 0, 1280, 28, 0xff303030u);                  /* menu bar */
+        CULL_RECT(10, 38, 1260, 752, 0xff2a2a2au);               /* dockspace */
+        for (u32 column = 0u; column < 3u; column++) {
+            const f32 x = 12.0f + 420.0f * (f32)column;
+            CULL_RECT(x, 40, 416, 748, 0xff353535u);             /* window */
+            CULL_RECT(x, 40, 416, 24, 0xff404040u);              /* title bar */
+            CULL_CLIP(x + 1.5f, 66.25f, 413.0f, 720.5f);
+            CULL_RECT(x + 4, 70, 408, 712, 0xff2e2e2eu);         /* panel */
+            for (u32 row = 0u; row < 28u; row++) {
+                const f32 y = 76.0f + 25.0f * (f32)row;
+                CULL_RECT(x + 12, y, 180, 20, 0xff454545u);      /* label background */
+                CULL_RECT(x + 200, y, 200, 20, 0xff3a3a3au);     /* slider track */
+                CULL_RECT(x + 200, y, 1, 20, 0xff606060u);       /* outline strips */
+                CULL_RECT(x + 399, y, 1, 20, 0xff606060u);
+                CULL_RECT(x + 200 + (f32)((row * 37u) % 180u), y + 2, 12, 16, 0xff80a0ffu); /* grab */
+                CULL_RECT(x + 210, y + 4, 60, 12, 0x60ffffffu);  /* translucent highlight */
+            }
+            CULL_POP();
+        }
+        CULL_RECT(400, 300, 480, 200, 0xff505050u);              /* a dialog over everything */
+        CULL_RECT(408, 332, 464, 160, 0xff606060u);
+        e->cull_overlay = n;
+        CULL_RECT(600, 500, 200, 120, 0xe0303030u);              /* overlay tooltip */
+#undef CULL_RECT
+#undef CULL_CLIP
+#undef CULL_POP
+        e->cull_count = n;
+    }
     rg_input_event_queue_init(&e->events, e->event_storage, RG_ARRAY_COUNT(e->event_storage),
                               e->event_text, sizeof(e->event_text));
 }
@@ -120,7 +162,19 @@ static void extended_edit_frame(Bench* b, ExtendedBench* e) {
 }
 
 RG_NOINLINE static void extended_frame(Bench* b, ExtendedBench* e, int mode) {
-    if (mode == 6) {
+    if (mode == 7) {
+#if defined(RG_GUI_CULL_OCCLUDER_MAX)
+        memcpy(e->cull_working, e->cull_source, sizeof(*e->cull_working) * e->cull_count);
+        RgGuiDrawList list = {e->cull_working, e->cull_count, (u32)RG_ARRAY_COUNT(e->cull_working)};
+        u32 overlay = e->cull_overlay;
+        rg_gui_draw_list_cull_hidden_ex(&list, &overlay, e->cull_clips, e->cull_scratch,
+                                        (u32)RG_ARRAY_COUNT(e->cull_scratch), &e->cull_culled, &e->cull_split);
+        e->cull_result_count = list.count;
+        sink += (double)list.count + overlay;
+#else
+        fail("hidden-draw culling is not available in this rg_gui");
+#endif
+    } else if (mode == 6) {
         extended_edit_frame(b, e);
     } else if (mode < 3) {
         rg_gui_renderer_begin_frame(&b->renderer);
@@ -187,6 +241,21 @@ static u64 extended_signature(Bench* b, ExtendedBench* e, int mode) {
             hash = hash_u32(hash, (u32)e->lines[i].start);
             hash = hash_u32(hash, (u32)e->lines[i].end);
         }
+    } else if (mode == 7) {
+        hash = hash_u32(hash, e->cull_result_count);
+        hash = hash_u32(hash, e->cull_culled);
+        hash = hash_u32(hash, e->cull_split);
+        for (u32 i = 0u; i < e->cull_result_count; i++) {
+            const RgGuiDrawCmd* cmd = &e->cull_working[i];
+            hash = hash_u32(hash, cmd->type);
+            hash = hash_u32(hash, cmd->color);
+            if (cmd->type == RG_GUI_CMD_RECT) {
+                hash = hash_float(hash, cmd->data.rect.rect.x);
+                hash = hash_float(hash, cmd->data.rect.rect.y);
+                hash = hash_float(hash, cmd->data.rect.rect.w);
+                hash = hash_float(hash, cmd->data.rect.rect.h);
+            }
+        }
     } else if (mode == 6) {
         /* Finish an insertion's deletion so the document is back to its text,
          * then the whole cached layout and the editor state are deterministic. */
@@ -223,7 +292,7 @@ static u64 extended_signature(Bench* b, ExtendedBench* e, int mode) {
 
 static void extended_case(Bench* b, ExtendedBench* e, const char* font, int mode) {
     static const char* names[] = {"gpu_prepare_static_warm", "gpu_prepare_content_warm",
-        "gpu_prepare_cold", "textarea_wrap_300", "textarea_wrap_1200", "textarea_click_drag", "textarea_edit"};
+        "gpu_prepare_cold", "textarea_wrap_300", "textarea_wrap_1200", "textarea_click_drag", "textarea_edit", "cull_hidden"};
     const size_t document_length = mode == 6 ? e->edit_length : e->document_length;
     change_labels(b, 0u);
     rg_gui_renderer_clear_cache(&b->renderer);
@@ -266,7 +335,7 @@ int main(void) {
     static const char* label_cases[] = {"frontend_measured_labels_static_warm", "frontend_measured_labels_dynamic",
         "renderer_static_warm", "renderer_content_warm", "renderer_cold", "renderer_init"};
     static const char* more_cases[] = {"gpu_prepare_static_warm", "gpu_prepare_content_warm",
-        "gpu_prepare_cold", "textarea_wrap_300", "textarea_wrap_1200", "textarea_click_drag", "textarea_edit"};
+        "gpu_prepare_cold", "textarea_wrap_300", "textarea_wrap_1200", "textarea_click_drag", "textarea_edit", "cull_hidden"};
     Uint64 frequency = SDL_GetPerformanceFrequency();
     if (!frequency) fail("performance counter");
     timer_scale = 1.0 / (double)frequency;
@@ -280,7 +349,7 @@ int main(void) {
             font, b->font.glyph_count, b->font.kerning_count, (unsigned)RG_GUI_LABEL_COPY);
         if (!getenv("RG_GUI_BENCH_VERIFY"))
             for (int mode = 0; mode < 6; mode++) if (extended_selected(label_cases[mode])) run_case(b, font, mode);
-        for (int mode = 0; mode < 7; mode++) if (extended_selected(more_cases[mode])) extended_case(b, e, font, mode);
+        for (int mode = 0; mode < 8; mode++) if (extended_selected(more_cases[mode])) extended_case(b, e, font, mode);
         free(e->gpu.items);
 #if defined(RG_GUI_GPU_FRAME_CLIP_LIMIT)
         free(e->gpu.clips);

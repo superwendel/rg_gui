@@ -500,6 +500,192 @@ static int test_visual_line_lookup(void)
 
 /* Unpacking is exact at 0 and 1, matches the scalar path, and packing returns
  * every channel value of every channel unchanged. */
+
+/* Hidden-draw culling must leave every pixel as it was. A reference
+ * rasterizer paints each list with the GPU path's rules (pixel centers,
+ * clips rounded outwards, opaque replaces, otherwise source-over) and the
+ * culled list must reproduce the original byte for byte, keep every non-
+ * rectangle command in order, and never exceed the list's capacity. */
+#define CULL_TEST_SIZE 256
+static u32 cull_test_random(u64* state)
+{
+	*state = *state * 6364136223846793005ull + 1442695040888963407ull;
+	return (u32)(*state >> 33u);
+}
+
+static f32 cull_test_coord(u64* state, f32 low, f32 high)
+{
+	return low + (f32)(cull_test_random(state) % 1000u) * (high - low) / 1000.0f;
+}
+
+static void cull_test_raster(const RgGuiDrawList* list, u32 overlay_start, u8* rgba)
+{
+	memset(rgba, 0, (size_t)CULL_TEST_SIZE * CULL_TEST_SIZE * 4u);
+	RgGuiRect stack[64];
+	u32 depth = 0u;
+	for (u32 i = 0u; i < list->count; i++)
+	{
+		if (i == overlay_start) depth = 0u;
+		const RgGuiDrawCmd* cmd = &list->cmds[i];
+		if (cmd->type == RG_GUI_CMD_CLIP_PUSH)
+		{
+			if (depth < 64u)
+			{
+				stack[depth] = depth ? rg_gui_cull_clip_intersect(stack[depth - 1u], cmd->data.clip.rect) : cmd->data.clip.rect;
+				depth++;
+			}
+			continue;
+		}
+		if (cmd->type == RG_GUI_CMD_CLIP_POP) { if (depth) depth--; continue; }
+		if (cmd->type != RG_GUI_CMD_RECT) continue;
+		RgGuiRect r = cmd->data.rect.rect;
+		f32 cx0 = -1e9f, cy0 = -1e9f, cx1 = 1e9f, cy1 = 1e9f;
+		if (depth)
+		{
+			cx0 = rg_floorf(stack[depth - 1u].x); cy0 = rg_floorf(stack[depth - 1u].y);
+			cx1 = rg_ceilf(stack[depth - 1u].x + stack[depth - 1u].w); cy1 = rg_ceilf(stack[depth - 1u].y + stack[depth - 1u].h);
+		}
+		const u32 a = cmd->color >> 24u;
+		const u32 src[3] = {cmd->color & 255u, (cmd->color >> 8u) & 255u, (cmd->color >> 16u) & 255u};
+		int py0 = (int)rg_floorf(r.y), py1 = (int)rg_ceilf(r.y + r.h) + 1, px0 = (int)rg_floorf(r.x), px1 = (int)rg_ceilf(r.x + r.w) + 1;
+		if (py0 < 0) py0 = 0;
+		if (px0 < 0) px0 = 0;
+		if (py1 > CULL_TEST_SIZE) py1 = CULL_TEST_SIZE;
+		if (px1 > CULL_TEST_SIZE) px1 = CULL_TEST_SIZE;
+		for (int py = py0; py < py1; py++)
+			for (int px = px0; px < px1; px++)
+			{
+				const f32 cx = (f32)px + 0.5f, cy = (f32)py + 0.5f;
+				if (cx < r.x || cx >= r.x + r.w || cy < r.y || cy >= r.y + r.h) continue;
+				if (cx < cx0 || cx >= cx1 || cy < cy0 || cy >= cy1) continue;
+				u8* dst = rgba + ((size_t)py * CULL_TEST_SIZE + (size_t)px) * 4u;
+				if (a == 255u)
+				{
+					dst[0] = (u8)src[0]; dst[1] = (u8)src[1]; dst[2] = (u8)src[2]; dst[3] = 255u;
+					continue;
+				}
+				for (u32 c = 0u; c < 3u; c++) dst[c] = (u8)((src[c] * a + dst[c] * (255u - a) + 127u) / 255u);
+				dst[3] = (u8)((255u * a + dst[3] * (255u - a) + 127u) / 255u);
+			}
+	}
+}
+
+static int test_hidden_draw_culling(void)
+{
+	enum { CAPACITY = 128 };
+	static RgGuiDrawCmd original[CAPACITY], working[CAPACITY], scratch[CAPACITY];
+	static RgGuiRect clips[CAPACITY];
+	static u8 expected[CULL_TEST_SIZE * CULL_TEST_SIZE * 4u], actual[CULL_TEST_SIZE * CULL_TEST_SIZE * 4u];
+	u64 state = 0x5eed1234abcdull;
+	u64 total_culled = 0u, total_split = 0u, total_commands = 0u, total_kept = 0u, capacity_bound = 0u;
+	for (u32 iteration = 0u; iteration < 3000u; iteration++)
+	{
+		const u32 count = 8u + cull_test_random(&state) % 53u;
+		u32 depth = 0u;
+		for (u32 i = 0u; i < count; i++)
+		{
+			RgGuiDrawCmd cmd;
+			memset(&cmd, 0, sizeof(cmd));
+			const u32 roll = cull_test_random(&state) % 100u;
+			if (roll < 12u)
+			{
+				cmd.type = RG_GUI_CMD_CLIP_PUSH;
+				cmd.data.clip.rect = rg_gui_make_rect(cull_test_coord(&state, -20.0f, 220.0f), cull_test_coord(&state, -20.0f, 220.0f),
+				                                     cull_test_coord(&state, 0.0f, 240.0f), cull_test_coord(&state, 0.0f, 240.0f));
+				depth++;
+			}
+			else if (roll < 24u && depth)
+			{
+				cmd.type = RG_GUI_CMD_CLIP_POP;
+				depth--;
+			}
+			else if (roll < 29u)
+			{
+				cmd.type = RG_GUI_CMD_TRIANGLE;
+				cmd.data.triangle.a = rg_vec2(cull_test_coord(&state, 0.0f, 256.0f), cull_test_coord(&state, 0.0f, 256.0f));
+				cmd.data.triangle.b = rg_vec2(cull_test_coord(&state, 0.0f, 256.0f), cull_test_coord(&state, 0.0f, 256.0f));
+				cmd.data.triangle.c = rg_vec2(cull_test_coord(&state, 0.0f, 256.0f), cull_test_coord(&state, 0.0f, 256.0f));
+				cmd.color = cull_test_random(&state) | 0xff000000u;
+			}
+			else
+			{
+				const int big = cull_test_random(&state) % 100u < 35u;
+				cmd.type = RG_GUI_CMD_RECT;
+				cmd.data.rect.rect = rg_gui_make_rect(cull_test_coord(&state, -20.0f, 260.0f), cull_test_coord(&state, -20.0f, 260.0f),
+				                                     cull_test_coord(&state, big ? 100.0f : 0.0f, big ? 290.0f : 80.0f),
+				                                     cull_test_coord(&state, big ? 100.0f : 0.0f, big ? 290.0f : 80.0f));
+				const u32 alpha = cull_test_random(&state) % 100u < 45u ? 255u : cull_test_random(&state) % 255u;
+				cmd.color = (cull_test_random(&state) & 0x00ffffffu) | (alpha << 24u);
+			}
+			original[i] = cmd;
+		}
+		const u32 overlay_start = cull_test_random(&state) % (count + 1u);
+		const u32 capacity = count + cull_test_random(&state) % 13u;
+		memcpy(working, original, sizeof(*working) * count);
+		RgGuiDrawList before = {original, count, count};
+		RgGuiDrawList after = {working, count, capacity};
+		u32 culled = 0u, split = 0u;
+		u32 after_overlay = overlay_start;
+		rg_gui_draw_list_cull_hidden_ex(&after, &after_overlay, clips, scratch, CAPACITY, &culled, &split);
+		if (after.count > capacity || after.count + culled < count - split || after_overlay > after.count)
+		{
+			fprintf(stderr, "hidden-draw culling: iteration %u produced %u commands from %u (capacity %u, overlay %u)\n", iteration, after.count, count, capacity, after_overlay);
+			return 0;
+		}
+		cull_test_raster(&before, overlay_start, expected);
+		cull_test_raster(&after, after_overlay, actual);
+		if (memcmp(expected, actual, sizeof(expected)))
+		{
+			fprintf(stderr, "hidden-draw culling: iteration %u changed pixels (%u commands, overlay at %u, culled %u, split %u)\n",
+			        iteration, count, overlay_start, culled, split);
+			return 0;
+		}
+		u32 j = 0u;
+		for (u32 i = 0u; i < count; i++)
+		{
+			if (original[i].type == RG_GUI_CMD_RECT) continue;
+			while (j < after.count && working[j].type == RG_GUI_CMD_RECT) j++;
+			if (j >= after.count || memcmp(&working[j], &original[i], sizeof(original[i])))
+			{
+				fprintf(stderr, "hidden-draw culling: iteration %u lost or reordered a non-rectangle command\n", iteration);
+				return 0;
+			}
+			j++;
+		}
+		total_culled += culled;
+		total_split += split;
+		total_commands += count;
+		total_kept += after.count;
+		capacity_bound += capacity == count && split == 0u;
+	}
+	if (total_culled < 2000u || total_split < 300u || capacity_bound < 100u)
+	{
+		fprintf(stderr, "hidden-draw culling: too little coverage (culled %llu, split %llu, capacity-bound %llu)\n",
+		        (unsigned long long)total_culled, (unsigned long long)total_split, (unsigned long long)capacity_bound);
+		return 0;
+	}
+	/* A layered layout: the small rectangle under the panel goes, the backdrop
+	 * becomes its four margins, the panel and the widget on top stay. */
+	RgGuiDrawCmd layered[4];
+	memset(layered, 0, sizeof(layered));
+	layered[0].type = RG_GUI_CMD_RECT; layered[0].color = 0xff202020u; layered[0].data.rect.rect = rg_gui_make_rect(0, 0, 256, 256);
+	layered[1].type = RG_GUI_CMD_RECT; layered[1].color = 0xff404040u; layered[1].data.rect.rect = rg_gui_make_rect(16, 16, 224, 224);
+	layered[2].type = RG_GUI_CMD_RECT; layered[2].color = 0x80ff0000u; layered[2].data.rect.rect = rg_gui_make_rect(70, 70, 60, 60);
+	layered[3].type = RG_GUI_CMD_RECT; layered[3].color = 0xff606060u; layered[3].data.rect.rect = rg_gui_make_rect(60, 60, 100, 100);
+	memcpy(working, layered, sizeof(layered));
+	RgGuiDrawList list = {working, 4u, CAPACITY};
+	u32 culled = 0u, split = 0u, layered_overlay = 4u;
+	rg_gui_draw_list_cull_hidden_ex(&list, &layered_overlay, clips, scratch, CAPACITY, &culled, &split);
+	if (culled != 1u || split != 1u || list.count != 6u || layered_overlay != 6u)
+	{
+		fprintf(stderr, "hidden-draw culling: layered layout gave %u commands, culled %u, split %u (expected 6, 1, 1)\n", list.count, culled, split);
+		return 0;
+	}
+	printf("Hidden-draw culling: 3000 random lists matched the reference (%llu of %llu commands kept, %llu culled, %llu split)\n",
+	       (unsigned long long)total_kept, (unsigned long long)total_commands, (unsigned long long)total_culled, (unsigned long long)total_split);
+	return 1;
+}
+
 static int test_unpack_color(void)
 {
 	for (u32 channel = 0u; channel < 4u; channel++)
@@ -1307,6 +1493,7 @@ int main(void)
 	if (!test_dock_layout_validation(&gui) || !test_dock_tab_title_cache(&gui) || !test_visual_line_lookup() ||
 	    !test_pack_color() ||
 	    !test_unpack_color() ||
+	    !test_hidden_draw_culling() ||
 	    !test_node_graph_bundle_validation() ||
 	    !test_integer_widget_boundaries(&gui) ||
 	    !test_viewport_and_input_router(&gui) || !test_viewport_storage(&font) ||

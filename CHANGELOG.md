@@ -46,6 +46,20 @@ between 0.x releases.
 
 ### Changed
 
+- `rg_gui_end_frame` now culls hidden draws: a rectangle that lies under a later
+  opaque rectangle is dropped, and a large one that an opaque rectangle mostly
+  covers is replaced by its visible remainder. Text, images, and triangles are
+  untouched and keep their order, pixels are unchanged, and the overlay start
+  moves with the list. The full showcase painted every pixel 3.3 times with 70
+  percent of its rectangle paint hidden; it now paints 1.5 times, and its frame
+  work under Immediate presentation falls 24 to 26 percent in the idle and edit
+  scenarios and 13 percent with 20 docked panels, for about 10 us more CPU per
+  frame at full clock. `RgGuiInitDesc.keep_hidden_draws` or the context's
+  `cull_hidden_draws` switch it off; `rg_gui_diagnostics` counts
+  `culled_draw_commands` and `split_draw_commands`. Context memory grows by 16
+  bytes per draw command. The CPU benchmarks keep hidden draws so their output
+  signatures stay comparable across versions; the pass has its own extended
+  case, `cull_hidden`.
 - The indexed fragment shader reads two input slots instead of three: the
   sampled-or-solid flag now rides in the `uv` slot's third component, and the
   shader samples unconditionally and selects. On an Intel UHD G1 the third

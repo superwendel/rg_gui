@@ -470,6 +470,37 @@ The prepared item stream preserves rectangles, triangles, images, text, clip
 stack changes, and overlay ordering. Adjacent compatible items are combined,
 but items are not moved across unlike commands.
 
+### Hidden-draw culling
+
+Interfaces paint in layers: a backdrop, window backgrounds over it, panel
+backgrounds over those, and widgets on top. Each layer fills its whole area, and
+on a fill-bound GPU a blended full-window layer costs about as much as every
+widget together. The full showcase painted each pixel 3.3 times on average, and
+70 percent of its rectangle paint lay under a later opaque rectangle where it
+could never be seen.
+
+`rg_gui_end_frame` therefore walks the finished draw list backwards, keeping the
+largest opaque rectangles it has passed as occluders. A rectangle whose painted
+area lies inside an occluder is dropped; a large rectangle that an occluder
+mostly covers is replaced by its visible remainder, at most eight pieces. Only
+rectangles are dropped or split, and only opaque rectangles occlude; text,
+images, and triangles are left exactly as pushed, in their original order. The
+pixels are unchanged: a dropped pixel would have been overwritten, and the
+pieces share their edges with the occluder, so each pixel center falls in
+exactly one of them. Clips are applied as the GPU path rounds them, an
+occludee's area overstated and an occluder's understated, so clipped geometry
+is culled only when it is certainly hidden.
+
+What a renderer or tool sees is the culled list: fewer rectangles, some of them
+split, with `rg_gui_draw_list_overlay_start` moved to the same boundary. The
+tile cache and the frame signature consume that list and need no change. Set
+`RgGuiInitDesc.keep_hidden_draws` to keep every pushed command instead, or flip
+`gui.cull_hidden_draws` at run time; `rg_gui_diagnostics` counts the dropped
+and split rectangles in `culled_draw_commands` and `split_draw_commands`. The
+pass costs about 10 us of CPU per frame for the showcase's 735 commands at
+3.4 GHz and needs 16 bytes of context memory per draw command, included in
+`rg_gui_memory_required`.
+
 ### Skipping unchanged frames
 
 An immediate-mode application rebuilds its draw list every frame, but it does
@@ -582,7 +613,8 @@ above. Capacity exhaustion has layer-specific behavior:
 - The frontend drops commands, text bytes, or input events that do not fit and
   continues the frame. Inspect `rg_gui_diagnostics(&gui)` after the frame;
   `flags`, dropped counts, and high-water values identify which capacity needs
-  adjustment.
+  adjustment. `culled_draw_commands` and `split_draw_commands` count the
+  rectangles hidden-draw culling removed or replaced; they are not drops.
 - The persistent text renderer may drop only the affected text runs and
   continue preparing other runs. Inspect `rg_gui_renderer_stats` for
   `diagnostic_flags`, `frame_dropped_runs`, `frame_dropped_glyphs`, and cache and

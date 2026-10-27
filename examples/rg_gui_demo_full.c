@@ -1,5 +1,6 @@
 // Full rg_gui widget and docking showcase.
 
+#include <math.h>
 #include "rg_gui_demo_common.h"
 #include "rg_gui_demo_profile.h"
 #include "rg_gui_demo_present.h"
@@ -848,10 +849,115 @@ static void full_profile_images(RgGuiContext* gui, int width, int height,
 	rg_gui_pop_clip(gui);
 }
 
+
+/* --coverage: on the first measured frame, rasterize the completed draw list's
+ * rectangles and images into a layer-count buffer and report how many times a
+ * pixel is painted, and how much of that paint lies under a later opaque
+ * rectangle, where it can never be seen. Text is counted, not rasterized: the
+ * glyph quads are small against the window. Printed to stderr once. */
+static void full_coverage_clamp(int* x0, int* y0, int* x1, int* y1, int width, int height)
+{
+	if (*x0 < 0) *x0 = 0;
+	if (*y0 < 0) *y0 = 0;
+	if (*x1 > width) *x1 = width;
+	if (*y1 > height) *y1 = height;
+}
+
+static void full_profile_coverage(const RgGuiDrawList* list, int width, int height)
+{
+	if (!list || width <= 0 || height <= 0) return;
+	const size_t pixels = (size_t)width * (size_t)height;
+	u8* layers = (u8*)calloc(pixels, 1u);
+	u8* opaque = (u8*)calloc(pixels, 1u);
+	RgGuiRect* clips = (RgGuiRect*)malloc(sizeof(RgGuiRect) * (list->count ? list->count : 1u));
+	if (!layers || !opaque || !clips) { free(layers); free(opaque); free(clips); return; }
+	RgGuiRect stack[64];
+	u32 depth = 0u;
+	RgGuiRect window_rect = rg_gui_make_rect(0.0f, 0.0f, (f32)width, (f32)height);
+	u32 rects = 0u, images = 0u, texts = 0u, triangles = 0u, text_bytes = 0u;
+	f64 rect_area = 0.0, image_area = 0.0;
+	for (u32 i = 0u; i < list->count; i++)
+	{
+		const RgGuiDrawCmd* cmd = &list->cmds[i];
+		RgGuiRect clip = depth ? stack[depth - 1u] : window_rect;
+		if (cmd->type == RG_GUI_CMD_CLIP_PUSH)
+		{
+			RgGuiRect r = cmd->data.clip.rect;
+			f32 x0 = r.x > clip.x ? r.x : clip.x, y0 = r.y > clip.y ? r.y : clip.y;
+			f32 x1 = r.x + r.w < clip.x + clip.w ? r.x + r.w : clip.x + clip.w;
+			f32 y1 = r.y + r.h < clip.y + clip.h ? r.y + r.h : clip.y + clip.h;
+			clip = rg_gui_make_rect(x0, y0, x1 > x0 ? x1 - x0 : 0.0f, y1 > y0 ? y1 - y0 : 0.0f);
+			if (depth < 64u) stack[depth++] = clip;
+		}
+		else if (cmd->type == RG_GUI_CMD_CLIP_POP) { if (depth) depth--; }
+		clips[i] = clip;
+		if (cmd->type == RG_GUI_CMD_RECT || cmd->type == RG_GUI_CMD_IMAGE)
+		{
+			RgGuiRect r = cmd->type == RG_GUI_CMD_RECT ? cmd->data.rect.rect : cmd->data.image.rect;
+			int x0 = (int)floorf(r.x > clip.x ? r.x : clip.x), y0 = (int)floorf(r.y > clip.y ? r.y : clip.y);
+			int x1 = (int)ceilf(r.x + r.w < clip.x + clip.w ? r.x + r.w : clip.x + clip.w);
+			int y1 = (int)ceilf(r.y + r.h < clip.y + clip.h ? r.y + r.h : clip.y + clip.h);
+			full_coverage_clamp(&x0, &y0, &x1, &y1, width, height);
+			if (x1 > x0 && y1 > y0)
+			{
+				f64 area = (f64)(x1 - x0) * (f64)(y1 - y0);
+				if (cmd->type == RG_GUI_CMD_RECT) { rects++; rect_area += area; } else { images++; image_area += area; }
+				for (int y = y0; y < y1; y++)
+					for (int x = x0; x < x1; x++)
+						if (layers[(size_t)y * (size_t)width + (size_t)x] < 255u) layers[(size_t)y * (size_t)width + (size_t)x]++;
+			}
+		}
+		else if (cmd->type == RG_GUI_CMD_TEXT) { texts++; text_bytes += cmd->data.text.length ? cmd->data.text.length : (u32)strlen(cmd->data.text.text); }
+		else if (cmd->type == RG_GUI_CMD_TRIANGLE) triangles++;
+	}
+	/* Back to front: paint under a later opaque rectangle is wasted. */
+	f64 hidden = 0.0, hidden_opaque = 0.0;
+	u32 fully_hidden_cmds = 0u;
+	for (u32 n = list->count; n-- > 0u;)
+	{
+		const RgGuiDrawCmd* cmd = &list->cmds[n];
+		if (cmd->type != RG_GUI_CMD_RECT && cmd->type != RG_GUI_CMD_IMAGE) continue;
+		RgGuiRect r = cmd->type == RG_GUI_CMD_RECT ? cmd->data.rect.rect : cmd->data.image.rect;
+		RgGuiRect clip = clips[n];
+		int x0 = (int)floorf(r.x > clip.x ? r.x : clip.x), y0 = (int)floorf(r.y > clip.y ? r.y : clip.y);
+		int x1 = (int)ceilf(r.x + r.w < clip.x + clip.w ? r.x + r.w : clip.x + clip.w);
+		int y1 = (int)ceilf(r.y + r.h < clip.y + clip.h ? r.y + r.h : clip.y + clip.h);
+		full_coverage_clamp(&x0, &y0, &x1, &y1, width, height);
+		if (x1 <= x0 || y1 <= y0) continue;
+		const int is_opaque = cmd->type == RG_GUI_CMD_RECT && (cmd->color >> 24u) == 255u;
+		f64 covered = 0.0;
+		for (int y = y0; y < y1; y++)
+			for (int x = x0; x < x1; x++)
+			{
+				u8* o = &opaque[(size_t)y * (size_t)width + (size_t)x];
+				covered += *o;
+				if (is_opaque) *o = 1u;
+			}
+		hidden += covered;
+		if (is_opaque) hidden_opaque += covered;
+		if (covered >= (f64)(x1 - x0) * (f64)(y1 - y0)) fully_hidden_cmds++;
+	}
+	u64 histogram[9] = {0};
+	f64 layer_sum = 0.0;
+	for (size_t i = 0u; i < pixels; i++) { histogram[layers[i] > 8u ? 8u : layers[i]]++; layer_sum += layers[i]; }
+	fprintf(stderr, "coverage %dx%d: %u commands; %u rects %.2f Mpx, %u images %.2f Mpx, %u texts (%u bytes), %u triangles\n",
+	        width, height, list->count, rects, rect_area / 1e6, images, image_area / 1e6, texts, text_bytes, triangles);
+	fprintf(stderr, "coverage layers per pixel: mean %.2f; histogram", layer_sum / (f64)pixels);
+	for (u32 i = 0u; i < 9u; i++) fprintf(stderr, " %u:%.1f%%", i, 100.0 * (f64)histogram[i] / (f64)pixels);
+	fprintf(stderr, "%s\n", " (8 means 8 or more)");
+	fprintf(stderr, "coverage hidden under later opaque rects: %.2f Mpx of rect/image paint (%.1f%% of it), %.2f Mpx of that itself opaque; %u rect/image commands fully hidden\n",
+	        hidden / 1e6, 100.0 * hidden / (rect_area + image_area > 0.0 ? rect_area + image_area : 1.0), hidden_opaque / 1e6, fully_hidden_cmds);
+	free(layers); free(opaque); free(clips);
+}
+
 int main(int argc, char** argv)
 {
 	int result = 1;
 	int hidden = 0;
+	int coverage = 0;
+	int keep_hidden_draws = 0;
+	const char* dump_commands = NULL;
+	int window_width = 1280, window_height = 800;
 	int frame_limit = 0;
 	SDL_GPUPresentMode start_present_mode = SDL_GPU_PRESENTMODE_VSYNC;
 	int smoke_test = 0;
@@ -887,6 +993,18 @@ int main(int argc, char** argv)
 		{
 			frame_limit = atoi(argv[++i]);
 			if (frame_limit < 1) frame_limit = 1;
+		}
+		else if (strcmp(argv[i], "--coverage") == 0) coverage = 1;
+		else if (strcmp(argv[i], "--keep-hidden-draws") == 0) keep_hidden_draws = 1;
+		else if (strcmp(argv[i], "--dump-commands") == 0 && i + 1 < argc) dump_commands = argv[++i];
+		else if (strcmp(argv[i], "--size") == 0 && i + 1 < argc)
+		{
+			if (sscanf(argv[++i], "%dx%d", &window_width, &window_height) != 2 ||
+			    window_width < 320 || window_height < 200 || window_width > 8192 || window_height > 8192)
+			{
+				fprintf(stderr, "--size expects WIDTHxHEIGHT, 320x200 to 8192x8192\n");
+				return 1;
+			}
 		}
 		else if (strcmp(argv[i], "--tile-cache") == 0) tile_cache = 1;
 		else if (strcmp(argv[i], "--tile-cache-verify") == 0) tile_cache = tile_verify = 1;
@@ -943,7 +1061,7 @@ int main(int argc, char** argv)
 	demo_platform_init(&platform_state);
 	SDL_WindowFlags window_flags = SDL_WINDOW_RESIZABLE;
 	if (hidden) window_flags |= SDL_WINDOW_HIDDEN;
-	window = SDL_CreateWindow("rg_gui full showcase", 1280, 800, window_flags);
+	window = SDL_CreateWindow("rg_gui full showcase", window_width, window_height, window_flags);
 	if (!window) goto cleanup;
 
 	RgGpuDeviceDesc device_desc = {0};
@@ -968,6 +1086,7 @@ int main(int argc, char** argv)
 	gui_desc.font = &demo_font.font;
 	gui_desc.text_lookup = &demo_font.text_lookup;
 	gui_desc.max_draw_cmds = 16384u;
+	gui_desc.keep_hidden_draws = keep_hidden_draws;
 	gui_desc.text_buffer_size = KB(256);
 	size_t gui_memory_size = rg_gui_memory_required(&gui_desc);
 	if (!gui_memory_size)
@@ -1155,6 +1274,21 @@ int main(int argc, char** argv)
 		                                     &presented, &sample.main))
 			goto cleanup;
 		const RgGuiDrawList* completed_draw_list = rg_gui_draw_list(&gui);
+		if (coverage && sample.frame == profile_options.warmup)
+			full_profile_coverage(completed_draw_list, width, height);
+		if (dump_commands && sample.frame == profile_options.warmup && completed_draw_list)
+		{
+			/* Raw commands of one frame for offline analysis; text pointers are not
+			 * meaningful outside this process. Header: count, overlay start. */
+			FILE* dump = fopen(dump_commands, "wb");
+			if (dump)
+			{
+				const u32 header[2] = {completed_draw_list->count, rg_gui_draw_list_overlay_start(&gui)};
+				fwrite(header, sizeof(header), 1u, dump);
+				fwrite(completed_draw_list->cmds, sizeof(*completed_draw_list->cmds), completed_draw_list->count, dump);
+				fclose(dump);
+			}
+		}
 		state.previous_draw_command_count = completed_draw_list ? completed_draw_list->count : 0u;
 		sample.frame_work_ms = demo_profile_elapsed_ms(frame_start);
 		if (!demo_profile_capture_append(&profile_capture, &sample)) goto cleanup;

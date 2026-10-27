@@ -262,6 +262,28 @@ run's 10th-percentile frame rather than its median. See the
 [performance audit](../docs/performance-audit-2026-10.md#many-docked-panels)
 for results.
 
+## Fill and overdraw
+
+Four full-showcase options measure where a fill-bound frame goes. `--size WxH`
+opens the window at another size; frame work against window area shows whether
+the frame is fill-bound (on the audit's laptop it was 114 + 1,568 us per
+megapixel). `--coverage` rasterizes the first measured frame's rectangles on
+the CPU and prints the layers painted per pixel and how much paint lies under a
+later opaque rectangle. `--keep-hidden-draws` turns off the end-of-frame
+hidden-draw culling for an A/B of its effect, and `--dump-commands PATH` writes
+that frame's raw draw commands for offline analysis, such as timing the culling
+pass in a tight loop. See
+[change 12](../docs/performance-audit-2026-10.md#12-hidden-draw-culling).
+
+```sh
+out/linux/rg_gui_demo_full --scenario idle --present immediate --coverage \
+    --frames 160 --profile-warmup 120 --profile out/coverage.csv
+for size in 640x400 905x566 1280x800 1568x980; do
+    out/linux/rg_gui_demo_full --scenario idle --present immediate --size $size \
+        --frames 1320 --profile-warmup 120 --profile out/size-$size.csv
+done
+```
+
 ## Loaded-font Unicode CPU workloads
 
 `bench_unicode.c` generates and loads sorted synthetic 4,096- and 16,384-glyph

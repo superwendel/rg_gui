@@ -29,6 +29,7 @@ CASES = (
 EXTENDED_CASES = CASES + (
     "gpu_prepare_static_warm", "gpu_prepare_content_warm", "gpu_prepare_cold",
     "textarea_wrap_300", "textarea_wrap_1200", "textarea_click_drag", "textarea_edit",
+    "cull_hidden",
 )
 SIGNATURE_FIELDS = ("width_checksum", "geometry_checksum", "cache_hits", "cache_misses", "glyphs")
 TRIALS = 5
