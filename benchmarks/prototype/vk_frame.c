@@ -6,7 +6,9 @@
  * the SDL_GPU calls. GPU time comes from a timestamp pair around the command
  * buffer. The target is an offscreen image like --offscreen; nothing is presented.
  * Build and usage: see benchmarks/PROFILING.md ("Matched raw-Vulkan replay").
- *   vk_frame <dump dir> <frames> [out.ppm|-] [shader dir] */
+ *   vk_frame <dump dir> <frames> [out.ppm|-] [shader dir]
+ * Exit status: 0 when the output matches the dump's reference.bin, 1 when any
+ * pixel differs, 2 when the dump has no usable reference or setup fails. */
 #include <vulkan/vulkan.h>
 #include <dlfcn.h>
 #include <stdio.h>
@@ -265,17 +267,17 @@ int main(int argc, char** argv)
 		vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
 		VkBufferImageCopy region = {0}; region.imageSubresource = (VkImageSubresourceLayers){VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}; region.imageExtent = (VkExtent3D){m.viewport[2], m.viewport[3], 1};
 		vkCmdCopyImageToBuffer(c, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb.buffer, 1, &region); one_shot_end(c);
-		const unsigned char* px = rb.mapped; size_t pixels = (size_t)m.viewport[2] * m.viewport[3];
+		const unsigned char* px = rb.mapped; size_t pixels = (size_t)m.viewport[2] * m.viewport[3]; int status = 2;
 		int bgr = m.target_format == VK_FORMAT_B8G8R8A8_UNORM || m.target_format == VK_FORMAT_B8G8R8A8_SRGB;
 		/* compare with the SDL_GPU path's readback of the same frame, if the dump has one */
 		{ size_t ref_size = 0; char rp[1024]; snprintf(rp, sizeof(rp), "%s/reference.bin", dir); FILE* rf = fopen(rp, "rb");
 		  if (rf) { fseek(rf, 0, SEEK_END); ref_size = (size_t)ftell(rf); fseek(rf, 0, SEEK_SET); unsigned char* ref = malloc(ref_size ? ref_size : 1); if (fread(ref, 1, ref_size, rf) != ref_size) ref_size = 0; fclose(rf);
 		    if (ref_size != pixels * 4u) fprintf(stderr, "reference.bin is %zu bytes, expected %zu; not compared\n", ref_size, pixels * 4u);
-		    else { size_t differing = 0; unsigned max_delta = 0; for (size_t i = 0; i < pixels * 4u; i++) { unsigned d = px[i] > ref[i] ? px[i] - ref[i] : ref[i] - px[i]; if (d) { if ((i & 3u) != 3u || 1) { if (d > max_delta) max_delta = d; } } } for (size_t i = 0; i < pixels; i++) if (memcmp(px + i * 4u, ref + i * 4u, 4u)) differing++;
-		      fprintf(stderr, "reference comparison: %zu of %zu pixels differ from the SDL_GPU path's readback (max channel delta %u)\n", differing, pixels, max_delta); }
+		    else { size_t differing = 0; unsigned max_delta = 0; for (size_t i = 0; i < pixels * 4u; i++) { unsigned d = px[i] > ref[i] ? px[i] - ref[i] : ref[i] - px[i]; if (d > max_delta) max_delta = d; } for (size_t i = 0; i < pixels; i++) if (memcmp(px + i * 4u, ref + i * 4u, 4u)) differing++;
+		      fprintf(stderr, "reference comparison: %zu of %zu pixels differ from the SDL_GPU path's readback (max channel delta %u): %s\n", differing, pixels, max_delta, differing ? "FAIL" : "match"); status = differing ? 1 : 0; }
 		    free(ref); }
 		  else fprintf(stderr, "no reference.bin in the dump (dump with --offscreen to get one); output not compared\n"); }
 		if (ppm) { FILE* o = fopen(ppm, "wb"); if (o) { fprintf(o, "P6\n%u %u\n255\n", m.viewport[2], m.viewport[3]); for (size_t i = 0; i < pixels; i++) { unsigned char rgb[3] = {px[i * 4 + (bgr ? 2 : 0)], px[i * 4 + 1], px[i * 4 + (bgr ? 0 : 2)]}; fwrite(rgb, 1, 3, o); } fclose(o); fprintf(stderr, "wrote %s\n", ppm); } }
+		return status;
 	}
-	return 0;
 }

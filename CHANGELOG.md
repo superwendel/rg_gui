@@ -11,8 +11,10 @@ between 0.x releases.
   writes one frame's staged upload bytes, text cache, atlas, draw arguments,
   and (offscreen) a readback of the rendered target, and
   `benchmarks/prototype/vk_frame.c`, a raw-Vulkan replay of that frame timed
-  call by call with a GPU timestamp pair and checked against the readback,
-  for separating SDL_GPU's cost from the driver's. `benchmarks/profile/prof_clock.h` is the
+  call by call with a GPU timestamp pair and checked against the readback
+  (nonzero exit on any differing pixel; `check_replay.sh` exercises the
+  match and the failure cases), for separating SDL_GPU's cost from the
+  driver's. `benchmarks/profile/prof_clock.h` is the
   SDL-free profiler the replay and the text-path drivers use, with in-place
   wrapper calibration.
 - A `docks` profiling scenario and `--dock-panels N` option in the full

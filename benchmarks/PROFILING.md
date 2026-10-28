@@ -325,9 +325,11 @@ Run the profiled showcase and the replay back to back under the same load
 and compare per call: the replay's numbers are what a backend issuing the
 same call sequence pays on this driver, the difference is SDL_GPU's layer,
 and the fence wait against the GPU time says whether the frame is CPU- or
-GPU-bound. The replay compares its output with `reference.bin` when the dump
-has one and reports how many pixels differ (zero when the dump was
-interpreted correctly); the optional PPM is the replayed frame. See
+GPU-bound. The replay compares its output with `reference.bin` and exits 0 only
+when no pixel differs, 1 when any does, and 2 when the dump has no usable
+reference; `benchmarks/prototype/check_replay.sh [vulkan header dir]` runs
+the match, a corrupted-reference case, and a missing-reference case and
+checks those three exit codes. The optional PPM is the replayed frame. See
 [change 17](../docs/performance-audit-2026-10.md#17-matched-raw-vulkan-prototype).
 
 ```sh
