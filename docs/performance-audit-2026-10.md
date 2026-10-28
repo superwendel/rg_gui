@@ -893,6 +893,50 @@ same SDL_GPU backend, where Dear ImGui's per-draw binds and scissors make
 its share of this overhead larger; that share was not measured here
 either.
 
+### 16. Where a changed label's CPU time goes
+
+The comparison's changing-label cell differs from its static one by 37 us
+per frame at two flights, and the harness's own stage columns put 39 us of
+that in the UI build (5.4 to 44.3 us), 11 us in staging, 8 us in the extra
+upload call, and 11 us in submit. A smaller cached quad, the item on the
+remaining list, could touch only the staged bytes, 98 KB to 65 KB for the
+128 labels of 26 glyphs each, so it was set aside and the 39 us profiled
+instead, on 2026-10-27, with the call-level wrappers inside the renderer's
+production text path and the CPU benchmark's 128 changing labels on one
+pinned core. The desktop was busy (load average 3.5 to 8) and the wrapper
+costs about 50 ns per wrapped call, which is the same order as several of
+the stages below, so the inclusive numbers overstate the cheap calls; the
+per-label figures are the inclusive medians less the wrapper's cost.
+
+| Stage, 128 changed labels, 3,300 glyphs | per frame | per label |
+| --- | ---: | ---: |
+| `rg_gui_renderer_build_pages` (layout and quad write) | 41 us | 320 ns, 12 ns per glyph |
+| `rg_gui_renderer_get_run` bookkeeping around it | 13 us | 100 ns |
+| the preparation loop's own work (run records, batches) | 9 us | 70 ns |
+| `allocate_pages`, `key_hash`, `find_slot`, `strlen` | under 3 us together | under 25 ns |
+| the same 128 labels unchanged (all cache hits) | 7 us | 55 ns |
+
+The layout dominates, and it is already a tight loop: ASCII bytes decode
+in one branch, glyphs and kerning come from direct tables, and the rest is
+a dependent chain of two float adds and a 24-byte store per glyph. The
+12 ns per glyph is within about 2x of what that chain can do, and the
+frontend's own width measurement, which the showcase runs for every label
+it sizes and the harness does not, costs the same again (49 us per 128
+labels, the same traversal without the store). The bookkeeping around a
+miss, 100 ns per run, is six saturating statistics updates, page and
+metadata checks, a text copy, and generation stamps; it is the one part
+with slack, perhaps half of it.
+
+What this rules out is a large win from the text path on this cell. A
+faster layout loop, trimmed bookkeeping, and the 16-byte quad together are
+worth perhaps 15 us of the 168 us frame, each a few percent, and none is
+the kind of change that moved earlier sections. Where an application
+measures and then draws the same label, as the showcase does, the measure
+is a second traversal of the same text, and a width memo keyed on the
+label's bytes would remove it; that is an application-level pattern rather
+than a renderer change. The raw output and the driver are kept under
+`out/profile-2026-10-27/`.
+
 ## Measured effect of the changes
 
 Extended CPU suite, `benchmarks/run.py compare`, five alternating process
@@ -1176,11 +1220,11 @@ hidden tab.
    text with the snapshot and copying text and lines into the cache; relayout
    in place would about halve it, a microsecond or two.
 3. **Smaller cached glyph quads.** A changing-label frame uploads 98,304 bytes
-   of 24-byte quads padded to 32-quad pages, which the replication sweep put at
-   about 30 us of fixed per-frame cost on this iGPU, CPU staging included.
-   Pixel-snapped 16-bit
-   position and size would make a 16-byte quad, and 16-quad pages would halve
-   the padding for short labels.
+   of 24-byte quads; a 16-byte quad would make that 65,536. Change 16 split
+   the changing-label cell's cost and found the quad size controls only part
+   of its 11 us staging delta, a few microseconds of a 168 us frame, so this
+   stays listed but low; the labels already fit one 32-quad page each, so
+   smaller pages would not help this workload.
 4. **Overdraw under opaque panels.** Done on 2026-10-26 (change 12): hidden-draw
    culling drops and splits rectangles under later opaque rectangles, taking
    the showcase from 3.3 to 1.5 layers per pixel and its frame work down 24 to
