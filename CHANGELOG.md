@@ -7,6 +7,13 @@ between 0.x releases.
 
 ### Added
 
+- `--dump-frame DIR` (and `--dump-frame-index N`) in the full showcase, which
+  writes one frame's staged upload bytes, text cache, atlas, and draw
+  arguments, and `benchmarks/prototype/vk_frame.c`, a raw-Vulkan replay of
+  that frame timed call by call with a GPU timestamp pair, for separating
+  SDL_GPU's cost from the driver's. `benchmarks/profile/prof_clock.h` is the
+  SDL-free profiler the replay and the text-path drivers use, with in-place
+  wrapper calibration.
 - A `docks` profiling scenario and `--dock-panels N` option in the full
   showcase, which dock up to 60 extra property panels as tabs in up to three
   new columns to measure how frame cost grows with the number of panels.

@@ -279,7 +279,11 @@ back instead of acquiring and presenting, which separates the GUI's own
 frame time from the platform's presentation path (frame times, not GPU
 timings: CPU and GPU overlap inside them), and `--drop KIND` removes `text`,
 `translucent` rectangles, all `rects`, `images`, or `all` commands from the
-finished list so the frame can be attributed by content. See
+finished list so the frame can be attributed by content. `--dump-frame DIR`
+(with `--dump-frame-index N`, default 150) writes one frame's staged upload
+bytes, the resident text cache, the atlas, and the draw arguments to `DIR`
+for the raw-Vulkan replay below; it records the direct render path and
+cannot be combined with the tile cache. See
 [change 12](../docs/performance-audit-2026-10.md#12-hidden-draw-culling),
 [change 13](../docs/performance-audit-2026-10.md#13-backdrop-lift), and
 [change 14](../docs/performance-audit-2026-10.md#14-where-the-remaining-frame-goes).
@@ -298,6 +302,30 @@ a stage's total minus the SDL calls inside it is the library's own time. Run
 it with `--offscreen` so presentation does not pace the loop, and record the
 load average: the numbers are wall times. See
 [change 15](../docs/performance-audit-2026-10.md#15-per-call-profile-of-the-fixed-cpu-cost).
+
+### Matched raw-Vulkan replay
+
+To separate what SDL_GPU adds from what the driver charges for the same
+frame, `benchmarks/prototype/vk_frame.c` replays a dumped showcase frame on
+raw Vulkan: the same bytes in the same two buffer copies, one render pass,
+the same indexed draws and scissors with the shipped SPIR-V shaders, one
+submit with a fence, two frames in flight, each call timed like the per-call
+profile above, plus a GPU timestamp pair around the command buffer. It needs
+the Vulkan loader and headers (the SDL source tree carries headers under
+`src/video/khronos` if the system has none):
+
+```
+out/linux/rg_gui_demo_full --offscreen --scenario idle --frames 200 --present immediate --dump-frame out/dump
+gcc -std=gnu11 -O2 -I <vulkan headers> -I benchmarks/profile benchmarks/prototype/vk_frame.c -l:libvulkan.so.1 -o out/linux/vk_frame
+taskset -c 3 out/linux/vk_frame out/dump 1200 out/dump/frame.ppm
+```
+
+Run the profiled showcase and the replay back to back under the same load
+and compare per call: the replay's numbers are what any backend pays on this
+driver, the difference is SDL_GPU's layer, and the fence wait against the
+GPU time says whether the frame is CPU- or GPU-bound. The optional PPM is the
+replayed frame for checking that the dump was interpreted correctly. See
+[change 17](../docs/performance-audit-2026-10.md#17-matched-raw-vulkan-prototype).
 
 ```sh
 out/linux/rg_gui_demo_full --scenario idle --present immediate --coverage \

@@ -718,6 +718,90 @@ typedef struct DemoFrameSkip
  * cost, without the platform's presentation. The texture and fences are
  * released by demo_render_offscreen_release. */
 static int demo_render_offscreen = 0;
+
+/* --dump-frame DIR: write one frame's staged bytes and draw arguments so
+ * benchmarks/prototype/vk_frame.c can replay the identical frame on raw Vulkan.
+ * The bytes are read from the mapped upload ring between staging and unmapping;
+ * the draw arguments are read from the finished upload packet before the draw.
+ * Direct path only; the tile cache stages differently. */
+static const char* demo_dump_dir = NULL;
+static u32 demo_dump_frame_index = 150u;
+static u32 demo_dump_counter = 0u;
+static FILE* demo_dump_meta = NULL;
+
+static int demo_dump_write(const char* name, const void* data, size_t size)
+{
+	char path[1024];
+	snprintf(path, sizeof(path), "%s/%s", demo_dump_dir, name);
+	FILE* file = fopen(path, "wb");
+	if (!file) return 0;
+	int ok = size == 0u || fwrite(data, 1u, size, file) == size;
+	return fclose(file) == 0 && ok;
+}
+
+static void demo_dump_atlas(const void* pixels, u32 width, u32 height)
+{
+	char text[64];
+	if (!demo_dump_dir || !pixels) return;
+	snprintf(text, sizeof(text), "%u %u\n", width, height);
+	if (!demo_dump_write("atlas.bin", pixels, (size_t)width * height * 4u) ||
+	    !demo_dump_write("atlas.txt", text, strlen(text)))
+		fprintf(stderr, "--dump-frame: could not write the atlas to %s\n", demo_dump_dir);
+}
+
+static void demo_dump_frame_bytes(const RgGuiGpuRenderer* gpu, const RgGuiRenderer* text,
+                                  const RgGpuUploadRing* ring, const RgGuiGpuUpload* upload)
+{
+	char path[1024];
+	snprintf(path, sizeof(path), "%s/meta.txt", demo_dump_dir);
+	demo_dump_meta = fopen(path, "w");
+	if (!demo_dump_meta || !ring->mapped)
+	{
+		fprintf(stderr, "--dump-frame: could not write %s\n", path);
+		if (demo_dump_meta) fclose(demo_dump_meta);
+		demo_dump_meta = NULL;
+		return;
+	}
+	fprintf(demo_dump_meta, "ref_capacity %u\nframe_capacity %u\ncached_quad_capacity %u\nframe_buffer_count %u\n",
+	        gpu->ref_capacity, gpu->frame_capacity, gpu->text.cached_quad_capacity, gpu->frame_buffer_count);
+	fprintf(demo_dump_meta, "frame_size %u\ngeometry_offset %u\nrefs_offset %u\nclips_offset %u\nclip_count %u\nref_count %u\nvertex_count %u\nitem_count %u\nbatch_count %u\n",
+	        upload->frame.size, upload->geometry_offset, upload->refs_offset, upload->clips_offset, upload->clip_count,
+	        upload->ref_count, upload->vertex_count, upload->item_count, upload->batch_count);
+	fprintf(demo_dump_meta, "cache_bytes %u\ncache_ranges %u\n", upload->has_text ? upload->text.cached_quads.size : 0u,
+	        upload->has_text ? upload->text.cache_range_count : 0u);
+	for (u32 i = 0u; upload->has_text && i < upload->text.cache_range_count; i++)
+		fprintf(demo_dump_meta, "range %u %u\n", upload->text.cache_ranges[i].first_quad, upload->text.cache_ranges[i].quad_count);
+	fprintf(demo_dump_meta, "text_total_pages %u page_quads %u\natlas %u %u\n", text->total_pages, text->page_quads,
+	        gpu->text.atlas_width, gpu->text.atlas_height);
+	const u8* mapped = (const u8*)ring->mapped;
+	if (!demo_dump_write("frame.bin", mapped + upload->frame.offset, upload->frame.size) ||
+	    !demo_dump_write("cache.bin", upload->has_text ? mapped + upload->text.cached_quads.offset : NULL,
+	                     upload->has_text ? upload->text.cached_quads.size : 0u) ||
+	    !demo_dump_write("cache_full.bin", text->core.cache_quads,
+	                     (size_t)text->total_pages * text->page_quads * sizeof(RgGuiRendererCachedQuad)))
+		fprintf(stderr, "--dump-frame: could not write the frame bytes to %s\n", demo_dump_dir);
+}
+
+static void demo_dump_frame_draw(const RgGuiGpuDrawDesc* desc, const RgGuiGpuUpload* upload)
+{
+	if (!demo_dump_meta) return;
+	fprintf(demo_dump_meta, "uniforms %g %g %g %g %u %u %u\nviewport %d %d %d %d\n", (double)desc->output_width,
+	        (double)desc->output_height, (double)desc->offset_x, (double)desc->offset_y, upload->geometry_offset,
+	        upload->refs_offset, upload->clips_offset, desc->viewport.x, desc->viewport.y, desc->viewport.w,
+	        desc->viewport.h);
+	for (u32 i = 0u; i < upload->batch_count; i++)
+	{
+		const RgGuiGpuIndexedBatch* batch = &upload->batches[i];
+		SDL_Rect scissor = rg_gui_gpu_scissor(batch->clip, batch->clip_enabled != 0u, desc);
+		fprintf(demo_dump_meta, "draw %u indices %u first_index %u scissor %d %d %d %d material %u glyphs %u geometry_vertices %u\n",
+		        i, batch->ref_count * 6u, batch->first_ref * 6u, scissor.x, scissor.y, scissor.w, scissor.h,
+		        (unsigned)batch->material, batch->glyph_count, batch->geometry_vertices);
+	}
+	fprintf(demo_dump_meta, "end\n");
+	fclose(demo_dump_meta);
+	demo_dump_meta = NULL;
+	fprintf(stderr, "--dump-frame: wrote frame %u to %s\n", demo_dump_counter, demo_dump_dir);
+}
 static SDL_GPUTexture* demo_offscreen_texture = NULL;
 static u32 demo_offscreen_width = 0u, demo_offscreen_height = 0u;
 static SDL_GPUFence* demo_offscreen_fences[2] = {NULL, NULL};
@@ -803,6 +887,8 @@ static int demo_render_draw_list_skippable(SDL_GPUDevice* device, SDL_Window* wi
 
 	rg_gpu_upload_ring_begin(upload_ring, 1);
 	int staged = rg_gui_gpu_stage_upload(gpu, text_renderer, upload_ring, &upload);
+	if (staged && demo_dump_dir && ++demo_dump_counter == demo_dump_frame_index)
+		demo_dump_frame_bytes(gpu, text_renderer, upload_ring, &upload);
 	rg_gpu_upload_ring_end(upload_ring);
 	if (metrics)
 	{
@@ -942,6 +1028,7 @@ static int demo_render_draw_list_skippable(SDL_GPUDevice* device, SDL_Window* wi
 		draw_desc.output_width = width;
 		draw_desc.output_height = height;
 		draw_desc.viewport = (SDL_Rect){0, 0, (int)width, (int)height};
+		demo_dump_frame_draw(&draw_desc, &upload);
 		RgGuiGpuStats draw_stats = rg_gui_gpu_draw(gpu, command_buffer, pass, &draw_desc, &upload);
 		if (metrics) metrics->draw_stats = draw_stats;
 		SDL_EndGPURenderPass(pass);

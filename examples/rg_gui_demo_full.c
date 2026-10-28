@@ -1025,6 +1025,12 @@ int main(int argc, char** argv)
 		else if (strcmp(argv[i], "--keep-hidden-draws") == 0) keep_hidden_draws = 1;
 		else if (strcmp(argv[i], "--keep-backdrop") == 0) keep_backdrop = 1;
 		else if (strcmp(argv[i], "--offscreen") == 0) demo_render_offscreen = 1;
+		else if (strcmp(argv[i], "--dump-frame") == 0 && i + 1 < argc) demo_dump_dir = argv[++i];
+		else if (strcmp(argv[i], "--dump-frame-index") == 0 && i + 1 < argc)
+		{
+			int index = atoi(argv[++i]);
+			demo_dump_frame_index = index > 0 ? (u32)index : 1u;
+		}
 		else if (strcmp(argv[i], "--drop") == 0 && i + 1 < argc)
 		{
 			drop_kind = argv[++i];
@@ -1080,6 +1086,11 @@ int main(int argc, char** argv)
 		fprintf(stderr, "--offscreen renders without presenting and cannot be combined with the tile cache or --smoke-test\n");
 		return 1;
 	}
+	if (demo_dump_dir && tile_cache)
+	{
+		fprintf(stderr, "--dump-frame records the direct render path and cannot be combined with the tile cache\n");
+		return 1;
+	}
 	if (smoke_test)
 	{
 		hidden = 0;
@@ -1119,6 +1130,7 @@ int main(int argc, char** argv)
 	atlas = demo_atlas_create(device, demo_font.pixels,
 	                          demo_font.atlas_width, demo_font.atlas_height);
 	if (!atlas) goto cleanup;
+	demo_dump_atlas(demo_font.pixels, demo_font.atlas_width, demo_font.atlas_height);
 	if (profile_scenario == FULL_PROFILE_IMAGES || profile_scenario == FULL_PROFILE_IMAGES_GROUPED)
 	{
 		profile_atlas = demo_atlas_create(device, demo_font.pixels, demo_font.atlas_width, demo_font.atlas_height);
