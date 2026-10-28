@@ -727,33 +727,39 @@ static int demo_render_offscreen = 0;
 static const char* demo_dump_dir = NULL;
 static u32 demo_dump_frame_index = 150u;
 static u32 demo_dump_counter = 0u;
+static int demo_dump_reference_pending = 0;
 static FILE* demo_dump_meta = NULL;
 
-static int demo_dump_write(const char* name, const void* data, size_t size)
+RGINLINE void demo_dump_path(char* out, size_t size, const char* name)
+{
+	snprintf(out, size, "%s/%s", demo_dump_dir ? demo_dump_dir : ".", name);
+}
+
+RGINLINE int demo_dump_write(const char* name, const void* data, size_t size)
 {
 	char path[1024];
-	snprintf(path, sizeof(path), "%s/%s", demo_dump_dir, name);
+	demo_dump_path(path, sizeof(path), name);
 	FILE* file = fopen(path, "wb");
 	if (!file) return 0;
-	int ok = size == 0u || fwrite(data, 1u, size, file) == size;
+	int ok = size == 0u || (data && fwrite(data, 1u, size, file) == size);
 	return fclose(file) == 0 && ok;
 }
 
-static void demo_dump_atlas(const void* pixels, u32 width, u32 height)
+RGINLINE void demo_dump_atlas(const void* pixels, u32 width, u32 height)
 {
 	char text[64];
 	if (!demo_dump_dir || !pixels) return;
 	snprintf(text, sizeof(text), "%u %u\n", width, height);
 	if (!demo_dump_write("atlas.bin", pixels, (size_t)width * height * 4u) ||
 	    !demo_dump_write("atlas.txt", text, strlen(text)))
-		fprintf(stderr, "--dump-frame: could not write the atlas to %s\n", demo_dump_dir);
+		fprintf(stderr, "--dump-frame: could not write the atlas\n");
 }
 
-static void demo_dump_frame_bytes(const RgGuiGpuRenderer* gpu, const RgGuiRenderer* text,
+RGINLINE void demo_dump_frame_bytes(const RgGuiGpuRenderer* gpu, const RgGuiRenderer* text,
                                   const RgGpuUploadRing* ring, const RgGuiGpuUpload* upload)
 {
 	char path[1024];
-	snprintf(path, sizeof(path), "%s/meta.txt", demo_dump_dir);
+	demo_dump_path(path, sizeof(path), "meta.txt");
 	demo_dump_meta = fopen(path, "w");
 	if (!demo_dump_meta || !ring->mapped)
 	{
@@ -779,12 +785,23 @@ static void demo_dump_frame_bytes(const RgGuiGpuRenderer* gpu, const RgGuiRender
 	                     upload->has_text ? upload->text.cached_quads.size : 0u) ||
 	    !demo_dump_write("cache_full.bin", text->core.cache_quads,
 	                     (size_t)text->total_pages * text->page_quads * sizeof(RgGuiRendererCachedQuad)))
-		fprintf(stderr, "--dump-frame: could not write the frame bytes to %s\n", demo_dump_dir);
+		fprintf(stderr, "--dump-frame: could not write the frame bytes\n");
 }
 
-static void demo_dump_frame_draw(const RgGuiGpuDrawDesc* desc, const RgGuiGpuUpload* upload)
+RGINLINE const char* demo_dump_format_name(SDL_GPUTextureFormat format)
+{
+	return format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? "rgba8" :
+	       format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM ? "bgra8" :
+	       format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB ? "rgba8_srgb" :
+	       format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB ? "bgra8_srgb" : "other";
+}
+
+RGINLINE void demo_dump_frame_draw(const RgGuiGpuDrawDesc* desc, const RgGuiGpuUpload* upload,
+                                   const SDL_FColor* clear, SDL_GPUTextureFormat target_format)
 {
 	if (!demo_dump_meta) return;
+	fprintf(demo_dump_meta, "clear %g %g %g %g\ntarget_format %s\n", (double)clear->r, (double)clear->g, (double)clear->b,
+	        (double)clear->a, demo_dump_format_name(target_format));
 	fprintf(demo_dump_meta, "uniforms %g %g %g %g %u %u %u\nviewport %d %d %d %d\n", (double)desc->output_width,
 	        (double)desc->output_height, (double)desc->offset_x, (double)desc->offset_y, upload->geometry_offset,
 	        upload->refs_offset, upload->clips_offset, desc->viewport.x, desc->viewport.y, desc->viewport.w,
@@ -800,7 +817,50 @@ static void demo_dump_frame_draw(const RgGuiGpuDrawDesc* desc, const RgGuiGpuUpl
 	fprintf(demo_dump_meta, "end\n");
 	fclose(demo_dump_meta);
 	demo_dump_meta = NULL;
-	fprintf(stderr, "--dump-frame: wrote frame %u to %s\n", demo_dump_counter, demo_dump_dir);
+	demo_dump_reference_pending = demo_render_offscreen;
+	fprintf(stderr, "--dump-frame: wrote frame %u\n", demo_dump_counter);
+}
+
+/* After the dumped frame's submission on the offscreen path, read the target
+ * back as reference.bin (tightly packed rows in the target's format) so the
+ * replay can check its output against the SDL_GPU path's. */
+RGINLINE void demo_dump_reference(SDL_GPUDevice* device, SDL_GPUTexture* texture, u32 width, u32 height)
+{
+	char text[64];
+	SDL_GPUTransferBufferCreateInfo transfer_desc = {0};
+	transfer_desc.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+	transfer_desc.size = width * height * 4u;
+	SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(device, &transfer_desc);
+	SDL_GPUCommandBuffer* command = transfer ? SDL_AcquireGPUCommandBuffer(device) : NULL;
+	SDL_GPUCopyPass* copy = command ? SDL_BeginGPUCopyPass(command) : NULL;
+	int ok = 0;
+	if (copy)
+	{
+		SDL_GPUTextureRegion region = {0};
+		region.texture = texture;
+		region.w = width;
+		region.h = height;
+		region.d = 1u;
+		SDL_GPUTextureTransferInfo destination = {0};
+		destination.transfer_buffer = transfer;
+		destination.pixels_per_row = width;
+		destination.rows_per_layer = height;
+		SDL_DownloadFromGPUTexture(copy, &region, &destination);
+		SDL_EndGPUCopyPass(copy);
+		ok = SDL_SubmitGPUCommandBuffer(command) && SDL_WaitForGPUIdle(device);
+	}
+	else if (command) SDL_CancelGPUCommandBuffer(command);
+	void* pixels = ok ? SDL_MapGPUTransferBuffer(device, transfer, false) : NULL;
+	if (pixels)
+	{
+		snprintf(text, sizeof(text), "%u %u\n", width, height);
+		ok = demo_dump_write("reference.bin", pixels, transfer_desc.size) &&
+		     demo_dump_write("reference.txt", text, strlen(text));
+		SDL_UnmapGPUTransferBuffer(device, transfer);
+	}
+	else ok = 0;
+	if (transfer) SDL_ReleaseGPUTransferBuffer(device, transfer);
+	if (!ok) fprintf(stderr, "--dump-frame: could not read the reference frame back\n");
 }
 static SDL_GPUTexture* demo_offscreen_texture = NULL;
 static u32 demo_offscreen_width = 0u, demo_offscreen_height = 0u;
@@ -1028,7 +1088,7 @@ static int demo_render_draw_list_skippable(SDL_GPUDevice* device, SDL_Window* wi
 		draw_desc.output_width = width;
 		draw_desc.output_height = height;
 		draw_desc.viewport = (SDL_Rect){0, 0, (int)width, (int)height};
-		demo_dump_frame_draw(&draw_desc, &upload);
+		demo_dump_frame_draw(&draw_desc, &upload, &effective_clear, SDL_GetGPUSwapchainTextureFormat(device, window));
 		RgGuiGpuStats draw_stats = rg_gui_gpu_draw(gpu, command_buffer, pass, &draw_desc, &upload);
 		if (metrics) metrics->draw_stats = draw_stats;
 		SDL_EndGPURenderPass(pass);
@@ -1055,6 +1115,11 @@ static int demo_render_draw_list_skippable(SDL_GPUDevice* device, SDL_Window* wi
 		metrics->submitted = submitted;
 	}
 	if (!submitted) goto done;
+	if (demo_dump_reference_pending && demo_render_offscreen && swapchain)
+	{
+		demo_dump_reference_pending = 0;
+		demo_dump_reference(device, swapchain, width, height);
+	}
 	/* An offscreen frame is submitted but never presented. */
 	const int presented = swapchain != NULL && !demo_render_offscreen;
 	if (out_presented) *out_presented = presented;

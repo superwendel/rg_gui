@@ -282,8 +282,9 @@ timings: CPU and GPU overlap inside them), and `--drop KIND` removes `text`,
 finished list so the frame can be attributed by content. `--dump-frame DIR`
 (with `--dump-frame-index N`, default 150) writes one frame's staged upload
 bytes, the resident text cache, the atlas, and the draw arguments to `DIR`
-for the raw-Vulkan replay below; it records the direct render path and
-cannot be combined with the tile cache. See
+for the raw-Vulkan replay below, and with `--offscreen` also reads the
+rendered target back as `reference.bin`; it records the direct render path
+and cannot be combined with the tile cache. See
 [change 12](../docs/performance-audit-2026-10.md#12-hidden-draw-culling),
 [change 13](../docs/performance-audit-2026-10.md#13-backdrop-lift), and
 [change 14](../docs/performance-audit-2026-10.md#14-where-the-remaining-frame-goes).
@@ -321,10 +322,12 @@ taskset -c 3 out/linux/vk_frame out/dump 1200 out/dump/frame.ppm
 ```
 
 Run the profiled showcase and the replay back to back under the same load
-and compare per call: the replay's numbers are what any backend pays on this
-driver, the difference is SDL_GPU's layer, and the fence wait against the
-GPU time says whether the frame is CPU- or GPU-bound. The optional PPM is the
-replayed frame for checking that the dump was interpreted correctly. See
+and compare per call: the replay's numbers are what a backend issuing the
+same call sequence pays on this driver, the difference is SDL_GPU's layer,
+and the fence wait against the GPU time says whether the frame is CPU- or
+GPU-bound. The replay compares its output with `reference.bin` when the dump
+has one and reports how many pixels differ (zero when the dump was
+interpreted correctly); the optional PPM is the replayed frame. See
 [change 17](../docs/performance-audit-2026-10.md#17-matched-raw-vulkan-prototype).
 
 ```sh

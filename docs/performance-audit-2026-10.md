@@ -993,62 +993,73 @@ the draw arguments (uniforms, viewport, every batch's index range and
 scissor); and `benchmarks/prototype/vk_frame.c` records that frame again on
 raw Vulkan with the shipped SPIR-V shaders, the same two buffer copies into
 the same buffer layouts, one render pass with the same clear and store, the
-same indexed draw with the same blend state and flipped viewport, one
+same indexed draw with the same blend state and flipped viewport, the
+same clear color and target format (the lifted backdrop, BGRA8), one
 submit with a fence, two frames in flight, and SDL_GPU's descriptor
 convention (two vertex storage buffers, a dynamic uniform, a combined
-sampler). The replayed image is the showcase's idle frame. Descriptor sets
-are written once at start, which is what a native backend would do and
-what SDL_GPU does per bind; the copies get one barrier to vertex reads.
+sampler). Descriptor sets are written once at start, which is what a
+native backend would do and what SDL_GPU does per bind. The shared
+resources get the dependencies SDL_GPU also records: a barrier from the
+previous frame's vertex reads of the text cache to this frame's copy into
+it, one from the copies to vertex reads, and a render pass dependency
+ordering each frame's target writes after the last frame's. When the dump
+is taken on the offscreen path the showcase also reads its own target back,
+and the replay compares its output with it: 0 of 1,024,000 pixels differ.
 Each Vulkan call is timed the way `prof_core.h` times the SDL calls, and a
 timestamp pair around the command buffer gives the GPU's execution time.
 The profiled showcase and the replay ran back to back, pinned to one core,
-three rounds, 1,000 measured frames each, load average 4.4 to 5.2; per-call
-medians agreed within 1 us across rounds.
+three rounds, 1,000 measured frames each, load average about 5 with the
+desktop busy; the table has the medians of the rounds, and the ranges in
+the text cover the other interleaved sets of the day (load 3 to 9).
 
 | Idle frame, same bytes and draw | SDL_GPU 3.4.18 | raw Vulkan (Mesa ANV 25.2.8) |
 | --- | ---: | ---: |
-| acquire command buffer / begin command buffer | 14.3 us | 10.8 us |
-| two buffer uploads / two copies and one barrier | 27.3 us | 24.1 us |
-| begin render pass | 26.9 us | 18.1 us |
-| bind pipeline | 5.3 us | 4.4 us |
-| binds, uniform push, viewport and scissor | 3.9 us | 2.2 us |
-| indexed draw | 19.8 us | 14.0 us |
-| end render pass / end command buffer | 2.8 us | 2.3 us |
-| submit with fence (and fence release) | 71.6 us | 58.9 us |
-| recording and submission together | 172 us | 135 us |
-| fence wait (pacing, two in flight) | 21 us | 270 us |
-| GPU execution, timestamp to timestamp | not measured | 382 to 387 us |
+| acquire command buffer / begin command buffer | 10.9 us | 8.3 us |
+| two buffer uploads / two copies and two barriers | 21.2 us | 18.5 us |
+| begin render pass | 24.4 us | 14.0 us |
+| bind pipeline | 3.9 us | 3.4 us |
+| binds, uniform push, viewport and scissor | 3.1 us | 1.8 us |
+| indexed draw | 15.5 us | 11.6 us |
+| end render pass / end command buffer | 2.0 us | 1.9 us |
+| submit with fence (and fence release) | 56.1 us | 47.1 us |
+| recording and submission together | 137 us | 107 us |
+| fence wait (pacing, two in flight) | 27 to 114 us | 243 to 250 us |
+| GPU execution, timestamp to timestamp | not measured | 350 to 369 us |
 
-Two results. First, the hypothesis was wrong in size. SDL_GPU's layer costs
-about 37 us on this frame, a fifth of its call time and about nine percent
-of the frame, spread over the submit (13 us), the pass begin (9), the draw
-(6), the uploads (3), the acquire (3.5), and the small binds (2). The other
-135 us is the driver: Mesa's submit alone is 59 us (the kernel execbuf),
-its render pass begin 18, its first draw 14, a buffer copy 20. A direct
-Vulkan backend on this machine would pay all of that too, so the most it
-could save is those 37 us (earlier rounds under load 7 to 9 put the raw
-figure at 125 us and the gap at about 50; a solo run at load 3 put the raw
-figure at 105 us). The backend question is closed for now: not worth a
-second renderer for a tenth of the frame.
+Two results. First, the hypothesis was wrong in size. On this call
+sequence SDL_GPU's layer costs 30 to 50 us per frame across the day's
+sets (31 in the table, 37 in a set at load 5, about 50 at load 9), a fifth
+to a quarter of its call time and about a tenth of the frame, spread over
+the submit (9 to 13 us), the pass begin (9 to 10), the draw (4 to 6), the
+uploads (3), the acquire (3), and the small binds (1 to 2). The rest, 107
+to 135 us, is the driver: Mesa's submit alone is 47 to 59 us (the kernel
+execbuf), its render pass begin 14 to 18, its first draw 12 to 14, a
+buffer copy 15 to 20. A backend that issued the same sequence directly
+would save only the layer's share. That is a bound on this sequence, not
+on every backend: one that also changed the frame's structure, say a
+host-visible frame buffer written in place with no copy and no barrier,
+would be measured separately, and nothing here says what it would save.
+What this does settle is that the per-call overhead section 15 suspected
+is mostly the driver, and that a second renderer is not justified by it.
 
-Second, and larger: the GPU takes 343 to 387 us to execute this frame
-(the spread is the integrated GPU's clock under the desktop's load; 343 at
-load 3, 365 to 372 at load 9, 382 to 387 in the table's rounds). That is
-the whole offscreen frame of change 14 (347 us on a quiet machine). The
-replay's CPU finishes in about 145 us and then waits 270 us on the fence
-two frames back; the SDL path's CPU work, at about 350 us per frame with
-the widget build and the renderer's stages, is what hides the wait. The
-idle frame on this machine is at the GPU's floor: the clear of the
-1,280 by 800 target and the culled frame's remaining blended layers take
-the Ice Lake GT1 about 350 us, whether that is its raster limit or its
-clock under this load was not separated, and no CPU change can take the
-frame below it.
+Second, and larger: the GPU takes 343 to 387 us to execute this frame as
+drawn (the spread follows the integrated GPU's clock under the desktop's
+load: 343 at load 3, 350 to 369 in the table's rounds, up to 387 in
+others). That is the whole offscreen frame of change 14 (347 us on a quiet
+machine). The replay's CPU finishes in about 115 us and then waits about
+245 us on the fence two frames back, and the SDL path shows the same once
+the desktop quiets: in two of the three rounds its fence wait rose from
+27 to 110 us as its CPU work shrank. The idle frame on this machine is
+GPU-bound, and no CPU change can take it below what the GPU needs. What
+the timestamp measures is this frame with these shaders on this driver,
+not a hardware limit: fewer painted layers, a cheaper fragment path, or a
+different driver could lower it, and none of those was measured here.
 What CPU savings still buy is headroom: time for the application's own
-work and lower power, not a shorter frame. Lowering the frame further
-means fewer pixels painted, which culling already started, or a faster
-GPU. The fill floor the audit inferred in change 14 is now measured. The
-replay, the dump, the readback image, and the interleaved runs are kept
-under `out/prototype-2026-10-28/`; the method is in the profiling guide.
+work and lower power, not a shorter frame. Lowering the frame means
+drawing less, which culling already started, or a faster GPU. The replay,
+the dump with its reference readback, the readback image, and the
+interleaved runs are kept under `out/prototype-2026-10-28/`; the method is
+in the profiling guide.
 
 ## Measured effect of the changes
 
@@ -1351,21 +1362,24 @@ hidden tab.
    the minimum set of calls a frame needs, against about 60 us in the
    renderer's own stages, of which the submit is probably driver work any
    backend pays. The matched raw-Vulkan prototype (change 17, 2026-10-28)
-   then measured it: SDL_GPU's layer is about 37 us of a 172 us call total,
-   the rest is the Mesa driver, and the GPU executes the frame in 343 to
-   387 us, so the offscreen idle frame sits at the GPU's fill floor on this
-   machine. What remains per frame is the visible fill, the fixed per-submit
+   then measured it: SDL_GPU's layer is 30 to 50 us of a 137 to 174 us call
+   total on this call sequence, the rest is the Mesa driver, and the GPU
+   executes the frame as drawn in 343 to 387 us, so the offscreen idle
+   frame is GPU-bound on this machine. What remains per frame is the visible fill, the fixed per-submit
    cost, and the present path; not presenting unchanged frames is the
    remaining lever, and both mechanisms for it already ship.
 ## Verified and left alone
 
-- A direct Vulkan backend, measured on 2026-10-28 (change 17) and not
-  pursued. A raw-Vulkan replay of the identical idle frame records and
-  submits in 135 us against SDL_GPU's 172 us, so the layer costs about 37 us
-  per frame, a tenth of the frame; the driver's own submit, pass begin,
-  draw, and copies are the rest, and the frame is GPU-bound at 343 to 387 us
-  regardless. The replay stays in `benchmarks/prototype/` for other drivers
-  and platforms, where the split may differ.
+- A direct Vulkan backend issuing the same call sequence, measured on
+  2026-10-28 (change 17) and not pursued. A raw-Vulkan replay of the
+  identical idle frame, verified pixel-identical against the SDL_GPU path's
+  readback, records and submits in 107 to 135 us against SDL_GPU's 137 to
+  174 us, so the layer costs 30 to 50 us per frame, about a tenth of it;
+  the driver's own submit, pass begin, draw, and copies are the rest, and
+  the frame is GPU-bound at 343 to 387 us regardless. A backend with a
+  different frame structure was not measured. The replay stays in
+  `benchmarks/prototype/` for other drivers and platforms, where the split
+  may differ.
 - Text length in the draw command, tried on 2026-10-23 and not adopted.
   Recording the byte length at push time removes the renderer's `strlen` for
   each changing text command, an expected saving of about 2 us per 128 changing

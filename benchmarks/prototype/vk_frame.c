@@ -24,6 +24,8 @@ typedef struct Draw { uint32_t indices, first_index; int32_t scissor[4]; } Draw;
 typedef struct Meta {
 	uint32_t ref_capacity, frame_capacity, cached_quad_capacity, frame_size, geometry_offset, refs_offset, clips_offset, ref_count, cache_bytes, range_first, range_count, viewport[4], atlas_w, atlas_h, total_pages, page_quads, draw_count;
 	float uniforms[12]; /* output size, draw offset, atlas inverse size, geometry/refs/clips offsets as uints, padding */
+	float clear[4];
+	VkFormat target_format;
 	Draw draws[MAX_DRAWS];
 } Meta;
 
@@ -31,7 +33,7 @@ static void* read_file(const char* dir, const char* name, size_t* size) { char p
 static void read_meta(const char* dir, Meta* m) {
 	size_t n; char* t = read_file(dir, "meta.txt", &n); t = realloc(t, n + 1); t[n] = 0; char* line = strtok(t, "\n");
 	while (line) {
-		unsigned a, b, c, d; float u[4]; unsigned g, r, cl; int sc[4];
+		unsigned a, b, c, d; float u[4]; unsigned g, r, cl; int sc[4]; char fmt[32];
 		if (sscanf(line, "ref_capacity %u", &a) == 1) m->ref_capacity = a;
 		else if (sscanf(line, "frame_capacity %u", &a) == 1) m->frame_capacity = a;
 		else if (sscanf(line, "cached_quad_capacity %u", &a) == 1) m->cached_quad_capacity = a;
@@ -45,12 +47,15 @@ static void read_meta(const char* dir, Meta* m) {
 		else if (sscanf(line, "text_total_pages %u page_quads %u", &a, &b) == 2) { m->total_pages = a; m->page_quads = b; }
 		else if (sscanf(line, "uniforms %f %f %f %f %u %u %u", &u[0], &u[1], &u[2], &u[3], &g, &r, &cl) == 7) { memcpy(m->uniforms, u, sizeof(float) * 4); uint32_t gi = g, ri = r, ci = cl; memcpy(&m->uniforms[6], &gi, 4); memcpy(&m->uniforms[7], &ri, 4); memcpy(&m->uniforms[8], &ci, 4); }
 		else if (sscanf(line, "atlas %u %u", &a, &b) == 2) { m->atlas_w = a; m->atlas_h = b; }
+		else if (sscanf(line, "clear %f %f %f %f", &u[0], &u[1], &u[2], &u[3]) == 4) memcpy(m->clear, u, sizeof(m->clear));
+		else if (sscanf(line, "target_format %31s", fmt) == 1) m->target_format = !strcmp(fmt, "bgra8") ? VK_FORMAT_B8G8R8A8_UNORM : !strcmp(fmt, "rgba8_srgb") ? VK_FORMAT_R8G8B8A8_SRGB : !strcmp(fmt, "bgra8_srgb") ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
 		else if (sscanf(line, "draw %u indices %u first_index %u scissor %d %d %d %d", &a, &b, &c, &sc[0], &sc[1], &sc[2], &sc[3]) == 7 && m->draw_count < MAX_DRAWS) { Draw* dr = &m->draws[m->draw_count++]; dr->indices = b; dr->first_index = c; memcpy(dr->scissor, sc, sizeof(sc)); }
 		else if (sscanf(line, "viewport %u %u %u %u", &a, &b, &c, &d) == 4) { m->viewport[0] = a; m->viewport[1] = b; m->viewport[2] = c; m->viewport[3] = d; }
 		line = strtok(NULL, "\n");
 	}
 	free(t);
 	m->uniforms[4] = m->atlas_w ? 1.0f / (float)m->atlas_w : 0.0f; m->uniforms[5] = m->atlas_h ? 1.0f / (float)m->atlas_h : 0.0f;
+	if (!m->target_format) m->target_format = VK_FORMAT_R8G8B8A8_UNORM;
 	if (!m->draw_count || !m->frame_size || !m->viewport[2] || !m->viewport[3]) { fprintf(stderr, "meta.txt is incomplete: did the showcase reach the dumped frame?\n"); exit(1); }
 }
 
@@ -72,9 +77,9 @@ static Buffer make_buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryP
 	return b;
 }
 typedef struct Image { VkImage image; VkDeviceMemory memory; VkImageView view; } Image;
-static Image make_image(uint32_t w, uint32_t h, VkImageUsageFlags usage) {
+static Image make_image(uint32_t w, uint32_t h, VkFormat format, VkImageUsageFlags usage) {
 	Image im = {0};
-	VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO}; ci.imageType = VK_IMAGE_TYPE_2D; ci.format = VK_FORMAT_R8G8B8A8_UNORM; ci.extent = (VkExtent3D){w, h, 1}; ci.mipLevels = 1; ci.arrayLayers = 1; ci.samples = VK_SAMPLE_COUNT_1_BIT; ci.tiling = VK_IMAGE_TILING_OPTIMAL; ci.usage = usage; ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO}; ci.imageType = VK_IMAGE_TYPE_2D; ci.format = format; ci.extent = (VkExtent3D){w, h, 1}; ci.mipLevels = 1; ci.arrayLayers = 1; ci.samples = VK_SAMPLE_COUNT_1_BIT; ci.tiling = VK_IMAGE_TILING_OPTIMAL; ci.usage = usage; ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	CHECK(vkCreateImage(dev, &ci, NULL, &im.image));
 	VkMemoryRequirements req; vkGetImageMemoryRequirements(dev, im.image, &req);
 	VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO}; ai.allocationSize = req.size; ai.memoryTypeIndex = find_memory(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -132,8 +137,8 @@ int main(int argc, char** argv)
 	VkDeviceSize staging_cache_offset = (m.frame_size + STAGING_ALIGN - 1) / STAGING_ALIGN * STAGING_ALIGN;
 	Buffer staging[FLIGHTS]; for (unsigned i = 0; i < FLIGHTS; i++) staging[i] = make_buffer(staging_cache_offset + m.cache_bytes + STAGING_ALIGN, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1);
 	Buffer uniform = make_buffer(256u * FLIGHTS, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1);
-	Image target = make_image(m.viewport[2], m.viewport[3], VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-	Image atlas_img = make_image(m.atlas_w, m.atlas_h, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+	Image target = make_image(m.viewport[2], m.viewport[3], m.target_format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+	Image atlas_img = make_image(m.atlas_w, m.atlas_h, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
 	{ Buffer st = make_buffer(atlas_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1); memcpy(st.mapped, atlas, atlas_bytes);
 	  VkCommandBuffer cb = one_shot_begin();
 	  VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}; b.srcAccessMask = 0; b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.image = atlas_img.image; b.subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
@@ -147,9 +152,11 @@ int main(int argc, char** argv)
 	VkSampler sampler; CHECK(vkCreateSampler(dev, &sci, NULL, &sampler));
 
 	/* render pass + framebuffer: clear, store, like the showcase's offscreen pass */
-	VkAttachmentDescription att = {0}; att.format = VK_FORMAT_R8G8B8A8_UNORM; att.samples = VK_SAMPLE_COUNT_1_BIT; att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; att.storeOp = VK_ATTACHMENT_STORE_OP_STORE; att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; att.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	VkAttachmentDescription att = {0}; att.format = m.target_format; att.samples = VK_SAMPLE_COUNT_1_BIT; att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; att.storeOp = VK_ATTACHMENT_STORE_OP_STORE; att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; att.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 	VkAttachmentReference ref = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}; VkSubpassDescription sub = {0}; sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; sub.colorAttachmentCount = 1; sub.pColorAttachments = &ref;
-	VkRenderPassCreateInfo rpci = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO}; rpci.attachmentCount = 1; rpci.pAttachments = &att; rpci.subpassCount = 1; rpci.pSubpasses = &sub;
+	/* Both flights render into the one target: order this pass's clear and writes after the previous frame's writes. */
+	VkSubpassDependency dep = {0}; dep.srcSubpass = VK_SUBPASS_EXTERNAL; dep.dstSubpass = 0; dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+	VkRenderPassCreateInfo rpci = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO}; rpci.attachmentCount = 1; rpci.pAttachments = &att; rpci.subpassCount = 1; rpci.pSubpasses = &sub; rpci.dependencyCount = 1; rpci.pDependencies = &dep;
 	VkRenderPass rp; CHECK(vkCreateRenderPass(dev, &rpci, NULL, &rp));
 	VkFramebufferCreateInfo fci = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO}; fci.renderPass = rp; fci.attachmentCount = 1; fci.pAttachments = &target.view; fci.width = m.viewport[2]; fci.height = m.viewport[3]; fci.layers = 1;
 	VkFramebuffer fb; CHECK(vkCreateFramebuffer(dev, &fci, NULL, &fb));
@@ -216,13 +223,16 @@ int main(int argc, char** argv)
 		PROF_VOID("vk: begin command buffer (acquire)", CHECK(vkBeginCommandBuffer(c, &bi)));
 		if (timestamps) { vkCmdResetQueryPool(c, qp, 2 * slot, 2); vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qp, 2 * slot); }
 		VkBufferCopy frame_copy = {0, 0, m.frame_size}, cache_copy = {staging_cache_offset, (VkDeviceSize)m.range_first * 24u, m.cache_bytes};
+		/* The text cache is shared by both flights: the previous frame's vertex reads of it must complete before this copy overwrites the page. */
+		VkBufferMemoryBarrier before = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER}; before.srcAccessMask = VK_ACCESS_SHADER_READ_BIT; before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; before.srcQueueFamilyIndex = before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; before.buffer = cache.buffer; before.size = VK_WHOLE_SIZE;
+		PROF_VOID("vk: pipeline barrier (prior vertex reads to copies)", vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1, &before, 0, NULL));
 		PROF_VOID("vk: copy buffer (frame data)", vkCmdCopyBuffer(c, staging[slot].buffer, frame_buf[slot].buffer, 1, &frame_copy));
 		PROF_VOID("vk: copy buffer (text cache page)", vkCmdCopyBuffer(c, staging[slot].buffer, cache.buffer, 1, &cache_copy));
 		VkBufferMemoryBarrier bb[2] = {{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER}, {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER}};
 		for (int i = 0; i < 2; i++) { bb[i].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; bb[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT; bb[i].srcQueueFamilyIndex = bb[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; bb[i].size = VK_WHOLE_SIZE; }
 		bb[0].buffer = frame_buf[slot].buffer; bb[1].buffer = cache.buffer;
 		PROF_VOID("vk: pipeline barrier (copies to vertex reads)", vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 0, NULL, 2, bb, 0, NULL));
-		VkClearValue clear = {{{0.11f, 0.11f, 0.12f, 1.0f}}};
+		VkClearValue clear; memcpy(clear.color.float32, m.clear, sizeof(m.clear));
 		VkRenderPassBeginInfo rb = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO}; rb.renderPass = rp; rb.framebuffer = fb; rb.renderArea = (VkRect2D){{0, 0}, {m.viewport[2], m.viewport[3]}}; rb.clearValueCount = 1; rb.pClearValues = &clear;
 		PROF_VOID("vk: begin render pass", vkCmdBeginRenderPass(c, &rb, VK_SUBPASS_CONTENTS_INLINE));
 		VkViewport vpv = {(float)m.viewport[0], (float)(m.viewport[1] + m.viewport[3]), (float)m.viewport[2], -(float)m.viewport[3], 0.0f, 1.0f}; /* SDL_GPU flips Vulkan this way too */ VkRect2D sc = {{m.draws[0].scissor[0], m.draws[0].scissor[1]}, {(uint32_t)m.draws[0].scissor[2], (uint32_t)m.draws[0].scissor[3]}};
@@ -248,14 +258,24 @@ int main(int argc, char** argv)
 	fprintf(stderr, "replayed %u frames: %u bytes frame data + %u bytes cache page per frame, %u draw%s, %ux%u target\n", frames, m.frame_size, m.cache_bytes, m.draw_count, m.draw_count == 1 ? "" : "s", m.viewport[2], m.viewport[3]);
 	prof_report("raw Vulkan replay of the dumped showcase frame");
 	if (gpu_samples > 200) { double p; double med = prof_median(gpu_ns, gpu_samples, 200, &p); fprintf(stderr, "GPU time between top-of-pipe and bottom-of-pipe timestamps: median %.1f us, p90 %.1f us (%u samples)\n", med / 1000.0, p / 1000.0, gpu_samples - 200); }
-	if (ppm) {
+	{
 		Buffer rb = make_buffer((VkDeviceSize)m.viewport[2] * m.viewport[3] * 4u, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1);
 		VkCommandBuffer c = one_shot_begin();
 		VkImageMemoryBarrier ib = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}; ib.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; ib.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT; ib.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; ib.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; ib.srcQueueFamilyIndex = ib.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; ib.image = target.image; ib.subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 		vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
 		VkBufferImageCopy region = {0}; region.imageSubresource = (VkImageSubresourceLayers){VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}; region.imageExtent = (VkExtent3D){m.viewport[2], m.viewport[3], 1};
 		vkCmdCopyImageToBuffer(c, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb.buffer, 1, &region); one_shot_end(c);
-		FILE* o = fopen(ppm, "wb"); if (o) { fprintf(o, "P6\n%u %u\n255\n", m.viewport[2], m.viewport[3]); const unsigned char* px = rb.mapped; for (size_t i = 0; i < (size_t)m.viewport[2] * m.viewport[3]; i++) fwrite(px + i * 4, 1, 3, o); fclose(o); fprintf(stderr, "wrote %s\n", ppm); }
+		const unsigned char* px = rb.mapped; size_t pixels = (size_t)m.viewport[2] * m.viewport[3];
+		int bgr = m.target_format == VK_FORMAT_B8G8R8A8_UNORM || m.target_format == VK_FORMAT_B8G8R8A8_SRGB;
+		/* compare with the SDL_GPU path's readback of the same frame, if the dump has one */
+		{ size_t ref_size = 0; char rp[1024]; snprintf(rp, sizeof(rp), "%s/reference.bin", dir); FILE* rf = fopen(rp, "rb");
+		  if (rf) { fseek(rf, 0, SEEK_END); ref_size = (size_t)ftell(rf); fseek(rf, 0, SEEK_SET); unsigned char* ref = malloc(ref_size ? ref_size : 1); if (fread(ref, 1, ref_size, rf) != ref_size) ref_size = 0; fclose(rf);
+		    if (ref_size != pixels * 4u) fprintf(stderr, "reference.bin is %zu bytes, expected %zu; not compared\n", ref_size, pixels * 4u);
+		    else { size_t differing = 0; unsigned max_delta = 0; for (size_t i = 0; i < pixels * 4u; i++) { unsigned d = px[i] > ref[i] ? px[i] - ref[i] : ref[i] - px[i]; if (d) { if ((i & 3u) != 3u || 1) { if (d > max_delta) max_delta = d; } } } for (size_t i = 0; i < pixels; i++) if (memcmp(px + i * 4u, ref + i * 4u, 4u)) differing++;
+		      fprintf(stderr, "reference comparison: %zu of %zu pixels differ from the SDL_GPU path's readback (max channel delta %u)\n", differing, pixels, max_delta); }
+		    free(ref); }
+		  else fprintf(stderr, "no reference.bin in the dump (dump with --offscreen to get one); output not compared\n"); }
+		if (ppm) { FILE* o = fopen(ppm, "wb"); if (o) { fprintf(o, "P6\n%u %u\n255\n", m.viewport[2], m.viewport[3]); for (size_t i = 0; i < pixels; i++) { unsigned char rgb[3] = {px[i * 4 + (bgr ? 2 : 0)], px[i * 4 + 1], px[i * 4 + (bgr ? 0 : 2)]}; fwrite(rgb, 1, 3, o); } fclose(o); fprintf(stderr, "wrote %s\n", ppm); } }
 	}
 	return 0;
 }
