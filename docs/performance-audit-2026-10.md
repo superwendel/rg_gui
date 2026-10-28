@@ -932,7 +932,7 @@ inclusive medians less 18 ns per call; the totals are the control's.
 | `rg_gui_renderer_prepare`, uninstrumented control | 33 us | 260 ns |
 | of which `rg_gui_renderer_build_pages` (layout and quad write) | 26 us | 204 ns, 7.8 ns per glyph |
 | of which `key_hash`, `allocate_pages`, `find_slot`, `strlen` | 5.6 us | 44 ns |
-| remainder: `get_run` bookkeeping and the preparation loop | 1 to 2 us | about 10 ns |
+| remainder: `get_run` bookkeeping and the preparation loop | about 1 to 2 us | about 10 ns |
 | `rg_gui_label` (frontend push) | 2.1 us | 16 ns |
 | the same labels static, `prepare` control, all cache hits | 2.6 us | 20 ns |
 
@@ -940,10 +940,13 @@ The instrumented build's own `prepare` total was 71 us, more than twice
 the control's 33 us, which is why the control exists: 640 wrapped calls
 per frame at 45 ns each are not a perturbation this path can absorb. The
 corrected leaves sum to 32 us against the control's 33, so the
-decomposition is consistent to about a microsecond. The static-to-changing
-difference in `prepare` is 30 us of the harness's 39 us UI-build delta;
-the rest was not attributed (the harness rewrites the 128 strings each
-frame, and the GPU adapter builds instances after `prepare`).
+decomposition is consistent to about a microsecond, and the remainder row
+is the difference between two such numbers, an estimate rather than a
+measurement. The static-to-changing difference in `prepare` is 30 us of
+the harness's 39 us UI-build delta. The other 9 us is unattributed: the
+harness formats its strings before the UI timer starts, so that is not it;
+the GPU adapter's instance build after `prepare` and the label push are
+candidates, but neither was measured on the changing cell.
 
 What this says about the text path is a judgment, not a measured floor.
 The layout loop takes 7.8 ns per glyph, about 25 cycles if the core held
@@ -952,11 +955,13 @@ ASCII decode, a glyph table read, two float adds, and a
 24-byte quad store per glyph. No cycle-level bound was measured for that
 loop and no faster version was built to compare against, so how much of
 the 26 us is removable is not established here. The bookkeeping around a
-miss, which the first version put at 100 ns per run, is in fact 10 ns or
-less together with the preparation loop, and the cache-hit path at 20 ns
-per label has nothing worth taking. The whole renderer text path for this
-cell is 33 us of a frame of about 168 us; that is the most any text-path
-change can recover on this cell, and the layout is 26 us of it. A 16-byte
+miss, which the first version put at 100 ns per run, is about 10 ns
+together with the preparation loop, and the cache-hit path at 20 ns per
+label has nothing worth taking. The renderer's CPU preparation for this
+cell is 33 us of a frame of about 168 us, and the layout is 26 us of it;
+that bounds what a change to the preparation code can recover, not what a
+change to the text format can, since a smaller quad also changes the
+staged bytes and the GPU's vertex reads. A 16-byte
 quad would change the layout's stores, page memory and cache footprint,
 the staged bytes, and the GPU's vertex reads; the earlier measurement
 bounded only the staging part (a few microseconds) and the rest remains
