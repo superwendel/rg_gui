@@ -899,42 +899,80 @@ The comparison's changing-label cell differs from its static one by 37 us
 per frame at two flights, and the harness's own stage columns put 39 us of
 that in the UI build (5.4 to 44.3 us), 11 us in staging, 8 us in the extra
 upload call, and 11 us in submit. A smaller cached quad, the item on the
-remaining list, could touch only the staged bytes, 98 KB to 65 KB for the
-128 labels of 26 glyphs each, so it was set aside and the 39 us profiled
-instead, on 2026-10-27, with the call-level wrappers inside the renderer's
-production text path and the CPU benchmark's 128 changing labels on one
-pinned core. The desktop was busy (load average 3.5 to 8) and the wrapper
-costs about 50 ns per wrapped call, which is the same order as several of
-the stages below, so the inclusive numbers overstate the cheap calls; the
-per-label figures are the inclusive medians less the wrapper's cost.
+remaining list, was set aside and the UI-build delta profiled instead, on
+2026-10-27, with call-level wrappers inside the renderer's production text
+path. The first version of this section profiled the CPU benchmark's
+fixture (41-byte labels of 35 glyphs, two 32-quad pages per run, kerning
+on) and scaled the result to the comparison's label length; that is not a
+valid substitute, since the one-page and multi-page layout branches differ,
+and it is replaced here by a driver that reproduces the comparison
+adapter's fixture exactly: `Item %03u: The quick brown fox %02u` (26 glyphs,
+one page), `inter_medium_16` at text height 16, kerning disabled the way
+the adapter disables it, the adapter's renderer limits (1,024 runs, 2,048
+slots, 32-quad pages), the labels pushed with `rg_gui_label` at the
+adapter's rectangles, then `rg_gui_renderer_prepare` on the list. The
+driver asserts 3,328 glyphs and 128 cache misses (changing) or 128 hits
+(static) every frame. One pinned core, 2,000 measured frames after 200,
+load average 3 to 4 from other work on the machine.
 
-| Stage, 128 changed labels, 3,300 glyphs | per frame | per label |
+The wrapper's cost was calibrated in place this time: a wrapped no-op,
+called once per label per frame, measures 18 ns inside its own interval
+(one clock read), while the whole wrapper costs 45 ns, so a parent's
+exclusive time keeps about 27 ns per wrapped child call. The first
+version subtracted the full cost from the leaves, which drove the cheap
+stages to near zero, and left the residue in `get_run`'s exclusive time,
+which it then reported as 13 us of bookkeeping. To avoid depending on the
+correction at all, the same driver was also built against the
+uninstrumented header with only the outer `prepare` wrapper, one call per
+frame, as a control. The per-stage figures below are the instrumented
+inclusive medians less 18 ns per call; the totals are the control's.
+
+| 128 changing labels, 3,328 glyphs, comparison fixture | per frame | per label |
 | --- | ---: | ---: |
-| `rg_gui_renderer_build_pages` (layout and quad write) | 41 us | 320 ns, 12 ns per glyph |
-| `rg_gui_renderer_get_run` bookkeeping around it | 13 us | 100 ns |
-| the preparation loop's own work (run records, batches) | 9 us | 70 ns |
-| `allocate_pages`, `key_hash`, `find_slot`, `strlen` | under 3 us together | under 25 ns |
-| the same 128 labels unchanged (all cache hits) | 7 us | 55 ns |
+| `rg_gui_renderer_prepare`, uninstrumented control | 33 us | 260 ns |
+| of which `rg_gui_renderer_build_pages` (layout and quad write) | 26 us | 204 ns, 7.8 ns per glyph |
+| of which `key_hash`, `allocate_pages`, `find_slot`, `strlen` | 5.6 us | 44 ns |
+| remainder: `get_run` bookkeeping and the preparation loop | 1 to 2 us | about 10 ns |
+| `rg_gui_label` (frontend push) | 2.1 us | 16 ns |
+| the same labels static, `prepare` control, all cache hits | 2.6 us | 20 ns |
 
-The layout dominates, and it is already a tight loop: ASCII bytes decode
-in one branch, glyphs and kerning come from direct tables, and the rest is
-a dependent chain of two float adds and a 24-byte store per glyph. The
-12 ns per glyph is within about 2x of what that chain can do, and the
-frontend's own width measurement, which the showcase runs for every label
-it sizes and the harness does not, costs the same again (49 us per 128
-labels, the same traversal without the store). The bookkeeping around a
-miss, 100 ns per run, is six saturating statistics updates, page and
-metadata checks, a text copy, and generation stamps; it is the one part
-with slack, perhaps half of it.
+The instrumented build's own `prepare` total was 71 us, more than twice
+the control's 33 us, which is why the control exists: 640 wrapped calls
+per frame at 45 ns each are not a perturbation this path can absorb. The
+corrected leaves sum to 32 us against the control's 33, so the
+decomposition is consistent to about a microsecond. The static-to-changing
+difference in `prepare` is 30 us of the harness's 39 us UI-build delta;
+the rest was not attributed (the harness rewrites the 128 strings each
+frame, and the GPU adapter builds instances after `prepare`).
 
-What this rules out is a large win from the text path on this cell. A
-faster layout loop, trimmed bookkeeping, and the 16-byte quad together are
-worth perhaps 15 us of the 168 us frame, each a few percent, and none is
-the kind of change that moved earlier sections. Where an application
-measures and then draws the same label, as the showcase does, the measure
-is a second traversal of the same text, and a width memo keyed on the
-label's bytes would remove it; that is an application-level pattern rather
-than a renderer change. The raw output and the driver are kept under
+What this says about the text path is a judgment, not a measured floor.
+The layout loop takes 7.8 ns per glyph, about 25 cycles if the core held
+its 3.4 GHz turbo (the clock under this load was not recorded), for an
+ASCII decode, a glyph table read, two float adds, and a
+24-byte quad store per glyph. No cycle-level bound was measured for that
+loop and no faster version was built to compare against, so how much of
+the 26 us is removable is not established here. The bookkeeping around a
+miss, which the first version put at 100 ns per run, is in fact 10 ns or
+less together with the preparation loop, and the cache-hit path at 20 ns
+per label has nothing worth taking. The whole renderer text path for this
+cell is 33 us of a frame of about 168 us; that is the most any text-path
+change can recover on this cell, and the layout is 26 us of it. A 16-byte
+quad would change the layout's stores, page memory and cache footprint,
+the staged bytes, and the GPU's vertex reads; the earlier measurement
+bounded only the staging part (a few microseconds) and the rest remains
+unmeasured.
+
+The first version also proposed a width memo for applications that
+measure a label and then draw it, on the strength of a synthetic driver
+that measured all 128 labels with a text copy each frame (49 us). The
+showcase does not do that. Counting calls in an instrumented showcase
+build, `--offscreen`, 240 frames each: the idle and docks scenarios run 11
+width traversals per frame and the edit scenario 6, over 30 to 86 bytes in
+total, about a microsecond; plain labels only push text, menu and tab
+measurements go through the existing pointer-keyed measure cache and the
+dock tab title cache. There is no width-memo opportunity in the showcase.
+The driver, the profiler header, the raw instrumented and control runs,
+the showcase counts, and the earlier mismatched run are kept under
 `out/profile-2026-10-27/`.
 
 ## Measured effect of the changes
@@ -1220,11 +1258,13 @@ hidden tab.
    text with the snapshot and copying text and lines into the cache; relayout
    in place would about halve it, a microsecond or two.
 3. **Smaller cached glyph quads.** A changing-label frame uploads 98,304 bytes
-   of 24-byte quads; a 16-byte quad would make that 65,536. Change 16 split
-   the changing-label cell's cost and found the quad size controls only part
-   of its 11 us staging delta, a few microseconds of a 168 us frame, so this
-   stays listed but low; the labels already fit one 32-quad page each, so
-   smaller pages would not help this workload.
+   of 24-byte quads; a 16-byte quad would make that 65,536. Change 16 bounded
+   the staging part of that at a few microseconds of a 168 us frame, and
+   found the whole renderer text path for the cell to be 33 us, 26 us of it
+   the layout loop that writes the quads. The quad format also touches the
+   layout's stores, page memory, and the GPU's vertex reads, which were not
+   measured, so this stays listed and low; the labels already fit one
+   32-quad page each, so smaller pages would not help this workload.
 4. **Overdraw under opaque panels.** Done on 2026-10-26 (change 12): hidden-draw
    culling drops and splits rectangles under later opaque rectangles, taking
    the showcase from 3.3 to 1.5 layers per pixel and its frame work down 24 to
