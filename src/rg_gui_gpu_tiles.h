@@ -362,7 +362,7 @@ RGINLINE RgGuiTileRedraw rg_gui_tile_cache_update(RgGuiTileCache* cache,
 		u64 digest = rg_gui_tile_mix(0x9e3779b97f4a7c15ull, (u64)cmd->type);
 		if (clip_enabled) digest = rg_gui_tile_mix_rect(digest, clip);
 		RgGuiRect bounds;
-		RgGuiTilePixelRect pixels;
+		RgGuiTilePixelRect pixels = {0}; /* every binned command assigns it; MSVC's flow analysis cannot see that */
 		if (cmd->type == RG_GUI_CMD_RECT)
 		{
 			bounds = cmd->data.rect.rect;

@@ -292,16 +292,25 @@ and cannot be combined with the tile cache. See
 ### Per-call profile of the CPU stages
 
 `perf` is unavailable on the audit's laptop, so the fixed per-frame CPU cost
-is split by wrapping calls. Copy `src/` and `examples/` to a scratch
-directory, add `#include "prof_core.h"` as the first include of
-`rg_gui_demo_full.c` and `#include "prof_lib.h"` after the last include of
-`rg_gui_demo_common.h`, call `prof_frame_end()` once per loop iteration and
-`atexit(prof_report)` at the top of `main`, and build with the demo's flags
-plus `-I benchmarks/profile`. The report on stderr lists each SDL GPU call
-and each renderer stage with its per-frame median, p90, and calls per frame;
-a stage's total minus the SDL calls inside it is the library's own time. Run
-it with `--offscreen` so presentation does not pace the loop, and record the
-load average: the numbers are wall times. See
+is split by wrapping calls. Building the full showcase with
+`RG_GUI_DEMO_PROFILE_CALLS` defined and `benchmarks/profile` on the include
+path makes it the profiled showcase: `prof_core.h` replaces every SDL GPU
+call with a timed call, `prof_lib.h` times each renderer entry point, the
+frame loop closes one sample per iteration, and the report prints at exit.
+`build.bat demo_profile` builds it as `rg_gui_demo_full_profile.exe` with
+MSVC, where each value-returning call goes through a typed wrapper function
+instead of a GCC statement expression; on Linux, build it with the demo's
+flags plus `-DRG_GUI_DEMO_PROFILE_CALLS -I benchmarks/profile`. The
+profiled showcase prints `backend=<driver>` as its first line. The report
+on stderr lists each SDL GPU call and each renderer stage with its per-frame
+median, p90, and calls per frame, plus two per-frame totals, `frame: SDL
+calls except the fence wait` and `frame: library exclusive`, each summed
+within the frame before its median is taken (a sum of the per-slot medians
+is a different number); a stage's total minus the SDL calls inside it is the
+library's own time. Run it with `--offscreen` so presentation does
+not pace the loop, pinned to one core (`taskset -c 3`, or
+`start "" /b /wait /affinity 8` on Windows), and record the load: the
+numbers are wall times. See
 [change 15](../docs/performance-audit-2026-10.md#15-per-call-profile-of-the-fixed-cpu-cost).
 
 ### Matched raw-Vulkan replay

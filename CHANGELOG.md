@@ -7,6 +7,16 @@ between 0.x releases.
 
 ### Added
 
+- `build.bat demo_profile`, which builds the full showcase as
+  `rg_gui_demo_full_profile.exe` with every SDL GPU call and renderer entry
+  point timed (the per-call profile of audit change 15, until now a
+  hand-edited copy of the sources; `RG_GUI_DEMO_PROFILE_CALLS` selects it on
+  either platform), and MSVC support in `benchmarks/profile/prof_core.h` and
+  `prof_lib.h` through typed wrapper functions where GCC and Clang use
+  statement expressions. The profiled build prints `backend=<driver>` as its
+  first line, and the report adds two per-frame totals (the SDL calls except
+  the fence wait, and the library's exclusive time) whose medians are taken
+  over per-frame sums.
 - `--dump-frame DIR` (and `--dump-frame-index N`) in the full showcase, which
   writes one frame's staged upload bytes, text cache, atlas, draw arguments,
   and (offscreen) a readback of the rendered target, and

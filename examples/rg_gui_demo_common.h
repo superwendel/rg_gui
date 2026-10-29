@@ -13,6 +13,9 @@
 #endif
 #include "../src/rg_gui_gpu.h"
 #include "../src/rg_gui_gpu_tiles.h"
+#ifdef RG_GUI_DEMO_PROFILE_CALLS
+#include "prof_lib.h" /* benchmarks/profile: times the renderer entry points the frame functions below call */
+#endif
 
 #include <errno.h>
 #include <stdio.h>

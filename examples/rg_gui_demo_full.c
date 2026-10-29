@@ -1,5 +1,8 @@
 // Full rg_gui widget and docking showcase.
 
+#ifdef RG_GUI_DEMO_PROFILE_CALLS
+#include "prof_core.h" /* benchmarks/profile: times every SDL GPU call; precedes the SDL headers */
+#endif
 #include <math.h>
 #include "rg_gui_demo_common.h"
 #include "rg_gui_demo_profile.h"
@@ -977,6 +980,9 @@ static void full_profile_coverage(const RgGuiDrawList* list, int width, int heig
 
 int main(int argc, char** argv)
 {
+#ifdef RG_GUI_DEMO_PROFILE_CALLS
+	atexit(prof_report); /* the per-call report, on stderr, after the demo's own output */
+#endif
 	int result = 1;
 	int hidden = 0;
 	int coverage = 0;
@@ -1125,6 +1131,9 @@ int main(int argc, char** argv)
 	device = rg_gpu_device_create(&device_desc);
 	if (!device || !rg_gpu_claim_window(device, window)) goto cleanup;
 	window_claimed = 1;
+#ifdef RG_GUI_DEMO_PROFILE_CALLS
+	printf("backend=%s\n", SDL_GetGPUDeviceDriver(device)); /* the profile file's first line */
+#endif
 
 	if (!demo_font_load(&demo_font)) goto cleanup;
 	atlas = demo_atlas_create(device, demo_font.pixels,
@@ -1371,6 +1380,9 @@ int main(int argc, char** argv)
 			SDL_SetError("Full-demo smoke test could not present three swapchain frames in 120 attempts");
 			goto cleanup;
 		}
+#ifdef RG_GUI_DEMO_PROFILE_CALLS
+		prof_frame_end(); /* one profile sample per loop iteration */
+#endif
 	}
 
 	if ((profile_scenario == FULL_PROFILE_EDIT && observed_edits < 2u) ||
