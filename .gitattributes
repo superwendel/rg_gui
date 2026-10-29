@@ -4,3 +4,4 @@
 *.font text eol=lf
 *.hlsl text eol=lf
 *.rgba binary
+*.bin binary

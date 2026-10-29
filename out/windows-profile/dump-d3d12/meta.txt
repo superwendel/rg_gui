@@ -1,0 +1,24 @@
+ref_capacity 54613
+frame_capacity 1911480
+cached_quad_capacity 65536
+frame_buffer_count 2
+frame_size 61976
+geometry_offset 768
+refs_offset 51472
+clips_offset 61656
+clip_count 20
+ref_count 1273
+vertex_count 2535
+item_count 66
+batch_count 1
+cache_bytes 768
+cache_ranges 1
+range 15328 32
+text_total_pages 2048 page_quads 32
+atlas 256 128
+clear 0.0352941 0.0431373 0.0588235 1
+target_format bgra8
+uniforms 1280 800 0 0 768 51472 61656
+viewport 0 0 1280 800
+draw 0 indices 7638 first_index 0 scissor 0 0 1280 800 material 0 glyphs 619 geometry_vertices 2535
+end

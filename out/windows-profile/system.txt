@@ -1,0 +1,33 @@
+Microsoft Windows [Version 10.0.26200.9711]
+--- Win32_VideoController Name, DriverVersion (wmic is not installed on this Windows build; CIM equivalents) ---
+NVIDIA GeForce RTX 2060  32.0.16.1088
+--- Win32_Processor Name, NumberOfCores ---
+12th Gen Intel(R) Core(TM) i7-12700KF  cores=12  logical=20  maxclock=3600MHz
+--- powercfg /getactivescheme ---
+Power Scheme GUID: a1841308-3541-4fab-bc81-f71556f20b4a  (Power saver)
+--- system ---
+Machine: Micro-Star International Co., Ltd. MS-7D96, PCSystemType=1 (1 = desktop), 31.8 GB RAM
+Battery: none; desktop on mains power
+OS: Microsoft Windows 11 Pro build 26200
+SDL: 3.4.10 (SDL3_DIR=C:\libs\SDL3-3.4.10; SDL3.dll beside the executables)
+Compiler: MSVC 19.44.35219, cl /std:c11 /W4 /WX /O2 /DNDEBUG via build.bat demo_profile and build.bat demo_full
+Affinity: start /affinity 8 = logical CPU 3, the second SMT thread of P-core 1 (i7-12700KF: CPUs 0-15 are P-core threads, 16-19 E-cores)
+Vulkan ICD: NVIDIA nv-vk64.json, driver 32.0.16.1088
+Runs: three rounds, D3D12 then Vulkan interleaved (d3d12-idle-1, vulkan-idle-1, d3d12-idle-2, ...), offscreen, 1200 frames, present immediate
+Report: the 'frame:' rows are per-frame sums (SDL calls except the fence wait; library exclusive) with the median taken over frames
+--- before the runs : total CPU 29.4% over 4 s; processes using more than 0.05 s CPU in that window (seconds) ---
+  cl  12.5
+  claude  0.75
+  powershell  0.52
+  powershell  0.47
+  AWCC.UCSubAgent  0.28
+  powershell  0.16
+  WindowsTerminal  0.12
+  windows open: ApplicationFrameHost, brave, GitHubDesktop, SystemSettings, TextInputHost, WindowsTerminal
+--- after the runs : total CPU 17.1% over 4 s; processes using more than 0.05 s CPU in that window (seconds) ---
+  claude  0.27
+  AWCC.UCSubAgent  0.23
+  WindowsTerminal  0.14
+  GitHubDesktop  0.09
+  powershell  0.06
+  windows open: ApplicationFrameHost, brave, GitHubDesktop, SystemSettings, TextInputHost, WindowsTerminal
