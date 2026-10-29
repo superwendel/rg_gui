@@ -1061,6 +1061,101 @@ the dump with its reference readback, the readback image, and the
 interleaved runs are kept under `out/prototype-2026-10-28/`; the method is
 in the profiling guide.
 
+### 18. The same frame on a Windows desktop: D3D12 and Vulkan
+
+Changes 15 and 17 measured one machine, a four-core laptop with an
+integrated GPU on Mesa. On 2026-10-28 the per-call profile became a build
+target (`demo_profile`) that also compiles with MSVC, and the same idle
+frame was profiled on a Windows 11 desktop: i7-12700KF, GeForce RTX 2060
+(driver 32.0.16.1088, Vulkan through the NVIDIA ICD), SDL 3.4.10, MSVC
+19.44, Power saver plan, mains power, other work running (a compiler was
+finishing before the first run). Offscreen, 1,200 frames, immediate
+present, pinned to one logical CPU (the second thread of a P-core), three
+rounds alternating D3D12 and Vulkan. The table has the medians of the
+rounds; the rounds agree within 2 us on every line. The two `frame:`
+totals are per-frame sums with the median taken over frames, so they are
+not the sums of the lines above them. The Linux column is the laptop on
+the same build the same day (load 2.5), with the change 15 and 17 ranges
+where they differ. Every total includes the wrapper's own 100 to 135 ns
+per wrapped call, about 3 to 4 us per frame.
+
+| Idle frame, offscreen, per-frame medians | Linux laptop, SDL_GPU Vulkan (Mesa ANV) | Windows desktop, SDL_GPU Vulkan (NVIDIA) | Windows desktop, SDL_GPU D3D12 (NVIDIA) |
+| --- | ---: | ---: | ---: |
+| acquire command buffer | 9 to 11 us | 2.0 us | 0.2 us |
+| buffer uploads (1.3 to 1.8 calls) | 16 to 21 us | 1.3 us | 3.5 us |
+| begin render pass | 20 to 24 us | 2.0 us | 3.0 us |
+| bind pipeline | 3.9 us | 0.8 us | 1.5 us |
+| binds, uniform push, scissor, map, unmap | about 3 us | about 1 us | about 1.5 us |
+| indexed draw | 13 to 16 us | 0.6 us | 2.0 us |
+| end render pass | 2.0 us | 1.0 us | 0.3 us |
+| submit with fence | 47 to 56 us | 15.1 us | 34.7 us |
+| frame: SDL calls except the fence wait | 119 us (137 at load 5) | 24.0 us | 47.0 us |
+| frame: library exclusive | 45.6 us | 45.4 us | 43.6 us |
+| of which `rg_gui_gpu_prepare` | 18.7 us | 9.9 us | 10.2 us |
+| of which `rg_gui_end_frame` | 14.8 us | 27.7 us | 27.8 us |
+| of which `rg_gui_gpu_stage_upload` | about 10 us | 6.8 us | 4.7 us |
+| fence wait (pacing, two in flight) | 27 to 141 us | 1.9 us | 2.8 us |
+| CPU per frame, the three totals together | about 300 us | about 71 us | about 93 us |
+
+Four results. First, the desktop's frame is CPU-bound, the opposite of
+the laptop's. Its fence wait is 2 to 3 us (p90 8 to 13 us on D3D12, 2 us
+on Vulkan): with two frames in flight, the GPU had finished the frame two
+back before the CPU asked, every frame, so the GPU's time per frame is
+below the CPU's 71 to 93 us. The GPU execution time itself is not measured
+on the SDL path, and the change 17 conclusion, that no CPU change can
+shorten the frame, holds for the laptop and not here. On this desktop every
+CPU microsecond is frame time.
+
+Second, the backend layer plus driver is 24 us on NVIDIA Vulkan and 47 us
+on D3D12 for the same calls, against 119 to 137 us on Mesa on the laptop.
+The D3D12 excess is almost all the submit, 35 us against 15, with smaller
+differences in the uploads (3.5 against 1.3), the draw (2.0 against 0.6),
+and the pass begin (3.0 against 2.0); D3D12's acquire is the cheaper one.
+How much of the 47 us is SDL_GPU's D3D12 backend and how much the NVIDIA
+driver is not known: the raw replay exists only for Vulkan, and was not run
+on Windows. The change 17 split (SDL_GPU's layer 30 to 50 us of 137 on
+Mesa) does not carry over, since the layer's share cannot exceed 24 us on
+NVIDIA Vulkan here, and the laptop's large per-call numbers were the Mesa
+driver and the slower CPU more than the layer.
+
+Third, the library's own time is now the larger half: 45 us exclusive on
+the desktop, 65 percent of the Vulkan frame and 48 percent of the D3D12
+frame, where on the laptop it was about a quarter. It is also, within a
+microsecond, the same 45 us on both machines, and that is the finding that
+needs following up. The desktop's P-core takes preparation from 18.7 to
+9.9 us and staging from about 10 to 5 to 7 us, roughly the CPU and
+compiler difference one would expect, but `rg_gui_end_frame` goes the other
+way, 14.8 us on the laptop and 27.7 us on the desktop. In the idle scenario
+that function is the hidden-draw culling pass of change 12 (nested loops
+over fragments and occluders with rectangle arithmetic), an overlay merge,
+and bookkeeping; nothing in it calls SDL or the OS, and the pacing depends
+only on the draw list, which is the same on both machines. The candidates
+are MSVC's code for the culling pass against GCC's, and the Power saver
+plan's clock on a branchy loop, and they are separable: split the function
+in the profiled build (a scope hook inside `rg_gui_end_frame` that the
+profiled build defines and other builds compile away) and rebuild once with
+clang-cl. Until that is done the 27 us is the largest unexplained item in
+the desktop frame.
+
+Fourth, the two backends paint the same picture. The D3D12 dump's readback
+and the laptop's Vulkan readback of the same dumped frame index differ in
+8,439 of 1,024,000 pixels, every one of them inside x 1014 to 1263, y 73 to
+564: the statistics panel, whose frame-time text and plot differ between
+the machines (the dumps' geometry bytes differ there and nowhere else; the
+clip bytes are identical). The other 900,000 pixels, every widget and
+glyph outside that panel, are byte-identical across NVIDIA D3D12 and Mesa
+Vulkan. That is evidence of matching rendering, not a per-pixel proof,
+since the frames' content differs; a strict check would replay the Linux
+dump on D3D12, and the dump and its readback are kept for that. The six
+profiles, the machine description, and the D3D12 dump are under
+`out/windows-profile/`, force-added since `out/` is ignored.
+
+The caveats: SDL 3.4.10 on the desktop against 3.4.18 on the laptop; the
+Power saver plan, which may hold the desktop's clocks below what the same
+runs would see on Balanced; and background work, moderate, during the
+runs. The ordering of the lines would not change under any of them, the
+sizes might.
+
 ## Measured effect of the changes
 
 Extended CPU suite, `benchmarks/run.py compare`, five alternating process
@@ -1367,7 +1462,23 @@ hidden tab.
    executes the frame as drawn in 343 to 387 us, so the offscreen idle
    frame is GPU-bound on this machine. What remains per frame is the visible fill, the fixed per-submit
    cost, and the present path; not presenting unchanged frames is the
-   remaining lever, and both mechanisms for it already ship.
+   remaining lever, and both mechanisms for it already ship. On a Windows
+   desktop with a discrete GPU (change 18, 2026-10-28) the frame is
+   CPU-bound instead, 71 us on Vulkan and 93 us on D3D12, and the library's
+   own 45 us is the larger half of it.
+5. **`rg_gui_end_frame` under MSVC.** Open since 2026-10-28 (change 18).
+   The function takes 14.8 us on the Linux laptop and 27.7 us on a much
+   faster Windows desktop, while preparation and staging halve as expected.
+   In the idle frame it is the hidden-draw culling pass plus bookkeeping.
+   Split it in the profiled build and rebuild once with clang-cl to tell
+   MSVC's code for the culling loops from the desktop's power plan; at 27 us
+   it is 30 to 40 percent of that machine's CPU frame, and the largest
+   unexplained item in it.
+6. **The D3D12 submit.** 35 us against 15 us for the same frame on NVIDIA
+   Vulkan (change 18), two thirds of the D3D12 backend's cost. Whether that
+   is SDL_GPU's D3D12 backend or the driver needs a raw-D3D12 replay of the
+   dumped frame, which the D3D12 dump under `out/windows-profile/` is the
+   reference for; on D3D12 the submit is the only SDL_GPU line above 4 us.
 ## Verified and left alone
 
 - A direct Vulkan backend issuing the same call sequence, measured on
@@ -1379,7 +1490,9 @@ hidden tab.
   the frame is GPU-bound at 343 to 387 us regardless. A backend with a
   different frame structure was not measured. The replay stays in
   `benchmarks/prototype/` for other drivers and platforms, where the split
-  may differ.
+  may differ: on a Windows desktop (change 18) the whole SDL_GPU Vulkan
+  path is 24 us on NVIDIA, so the layer's share there is at most that, and
+  the open backend question on that machine is the D3D12 submit.
 - Text length in the draw command, tried on 2026-10-23 and not adopted.
   Recording the byte length at push time removes the renderer's `strlen` for
   each changing text command, an expected saving of about 2 us per 128 changing

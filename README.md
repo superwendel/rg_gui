@@ -205,6 +205,7 @@ build.bat shaders
 build.bat test_gpu_device
 build.bat test_demo_lifecycle
 build.bat demo
+build.bat demo_profile
 build.bat demo_smoke
 build.bat test_release
 ```
@@ -217,6 +218,8 @@ build.bat test_release
 - `test_gpu_device` executes the hidden-window SDL_GPU device test.
 - `test_demo_lifecycle` exercises native tear-out window reuse, restoration,
   text-input cleanup, and final destruction with actual SDL GPU windows.
+- `demo_profile` builds the full showcase with every SDL GPU call and renderer
+  stage timed; see the [profiling guide](benchmarks/PROFILING.md#per-call-profile-of-the-cpu-stages).
 - `demo_smoke` builds all three demos, briefly opens their windows, and requires
   three actual main-window presentations from each. The tear-out smoke also
   creates a secondary native window and presents its viewport at least once.

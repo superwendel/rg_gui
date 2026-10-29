@@ -7,9 +7,9 @@ between 0.x releases.
 
 ### Added
 
-- `build.bat demo_profile`, which builds the full showcase as
-  `rg_gui_demo_full_profile.exe` with every SDL GPU call and renderer entry
-  point timed (the per-call profile of audit change 15, until now a
+- `demo_profile` in `build.bat` and `build.sh`, which builds the full
+  showcase as `rg_gui_demo_full_profile` with every SDL GPU call and renderer
+  entry point timed (the per-call profile of audit change 15, until now a
   hand-edited copy of the sources; `RG_GUI_DEMO_PROFILE_CALLS` selects it on
   either platform), and MSVC support in `benchmarks/profile/prof_core.h` and
   `prof_lib.h` through typed wrapper functions where GCC and Clang use

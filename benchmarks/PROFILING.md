@@ -299,8 +299,8 @@ call with a timed call, `prof_lib.h` times each renderer entry point, the
 frame loop closes one sample per iteration, and the report prints at exit.
 `build.bat demo_profile` builds it as `rg_gui_demo_full_profile.exe` with
 MSVC, where each value-returning call goes through a typed wrapper function
-instead of a GCC statement expression; on Linux, build it with the demo's
-flags plus `-DRG_GUI_DEMO_PROFILE_CALLS -I benchmarks/profile`. The
+instead of a GCC statement expression; `./build.sh demo_profile` builds
+`out/linux/rg_gui_demo_full_profile` the same way on Linux. The
 profiled showcase prints `backend=<driver>` as its first line. The report
 on stderr lists each SDL GPU call and each renderer stage with its per-frame
 median, p90, and calls per frame, plus two per-frame totals, `frame: SDL
@@ -312,6 +312,26 @@ not pace the loop, pinned to one core (`taskset -c 3`, or
 `start "" /b /wait /affinity 8` on Windows), and record the load: the
 numbers are wall times. See
 [change 15](../docs/performance-audit-2026-10.md#15-per-call-profile-of-the-fixed-cpu-cost).
+
+On Windows, `SDL_GPU_DRIVER` selects the backend, so the same report
+compares D3D12 with Vulkan on one machine. The runs recorded in
+[change 18](../docs/performance-audit-2026-10.md#18-the-same-frame-on-a-windows-desktop-d3d12-and-vulkan)
+were taken this way, three rounds per backend, with the machine description
+(`ver`, the video controller and driver, the CPU, the power scheme, and
+what else was running) saved beside them under `out/windows-profile/`:
+
+```bat
+build.bat demo_profile
+set SDL_GPU_DRIVER=direct3d12
+start "" /b /wait /affinity 8 cmd /c "rg_gui_demo_full_profile.exe --offscreen --scenario idle --frames 1200 --present immediate > out\windows-profile\d3d12-idle-1.txt 2>&1"
+set SDL_GPU_DRIVER=vulkan
+start "" /b /wait /affinity 8 cmd /c "rg_gui_demo_full_profile.exe --offscreen --scenario idle --frames 1200 --present immediate > out\windows-profile\vulkan-idle-1.txt 2>&1"
+```
+
+`--dump-frame` works on either backend; the D3D12 dump under
+`out/windows-profile/dump-d3d12` is the reference a raw-D3D12 replay would
+compare against. `SDL_GetTicksNS` on Windows is the performance counter, so
+the sub-microsecond slots are at its resolution.
 
 ### Matched raw-Vulkan replay
 

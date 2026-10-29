@@ -137,12 +137,22 @@ shaders() {
 
 build_demo() {
     setup_sdl
-    local name=rg_gui_demo_$1
-    printf 'Building %s with %s...\n' "$name" "$cc"
-    local command=("$cc" "${common[@]}" "${sdl_cflags[@]}" -O2 -DNDEBUG "examples/$name.c"
-        "${sdl_libs[@]}" -lm -o "$build_dir/$name")
+    local name=rg_gui_demo_$1 output=rg_gui_demo_$1
+    shift
+    # Extra arguments are added compiler flags; RG_GUI_DEMO_OUTPUT renames the binary.
+    [[ -n ${RG_GUI_DEMO_OUTPUT:-} ]] && output=$RG_GUI_DEMO_OUTPUT
+    printf 'Building %s with %s...\n' "$output" "$cc"
+    local command=("$cc" "${common[@]}" "${sdl_cflags[@]}" -O2 -DNDEBUG "$@" "examples/$name.c"
+        "${sdl_libs[@]}" -lm -o "$build_dir/$output")
     "${command[@]}"
-    python3 .github/scripts/write-linux-build-metadata.py "$build_dir/$name" "${command[@]}"
+    python3 .github/scripts/write-linux-build-metadata.py "$build_dir/$output" "${command[@]}"
+}
+
+# The full showcase with every SDL GPU call and renderer stage timed
+# (benchmarks/profile); prints per-frame medians on stderr at exit.
+demo_profile() {
+    shaders
+    RG_GUI_DEMO_OUTPUT=rg_gui_demo_full_profile build_demo full -DRG_GUI_DEMO_PROFILE_CALLS -I benchmarks/profile
 }
 
 demo() {
@@ -195,6 +205,7 @@ case $target in
     shaders) shaders ;;
     demo) demo ;;
     demo_minimal|demo_full|demo_tearout) shaders; build_demo "${target#demo_}" ;;
+    demo_profile) demo_profile ;;
     test_gpu_device_build) test_gpu_device_build ;;
     test_gpu_device) shaders; test_gpu_device_build; "$build_dir/test_gui_gpu_device" ;;
     test_demo_lifecycle_build) test_demo_lifecycle_build ;;
