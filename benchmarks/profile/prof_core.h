@@ -44,6 +44,11 @@ static void prof_end(const char* name, Uint64 start) {
 	if (s >= 0) { prof_slots[s].incl_ns += incl; prof_slots[s].excl_ns += incl - child; prof_slots[s].frame_calls++; }
 	if (prof_depth > 0 && prof_depth - 1 < 64) prof_child_ns[prof_depth - 1] += incl;
 }
+/* The library's stage hooks, which src/rg_gui.h compiles away when they are
+ * not defined: rg_gui_end_frame and the culling pass report their stages as
+ * slots nested in their totals. */
+#define RG_GUI_PROF_BEGIN(var) Uint64 var = prof_begin()
+#define RG_GUI_PROF_END(var, name) prof_end(name, var)
 /* Two per-frame totals kept as slots of their own, so that their medians are
  * medians of per-frame sums rather than sums of per-slot medians: the SDL
  * calls except the fence wait (recording and submission), and the library's

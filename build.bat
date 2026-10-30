@@ -43,6 +43,7 @@ if /I "%TARGET%"=="demo" goto demo
 if /I "%TARGET%"=="demo_minimal" goto demo_minimal
 if /I "%TARGET%"=="demo_full" goto demo_full
 if /I "%TARGET%"=="demo_profile" goto demo_profile
+if /I "%TARGET%"=="demo_profile_clang" goto demo_profile_clang
 if /I "%TARGET%"=="demo_tearout" goto demo_tearout
 if /I "%TARGET%"=="demo_smoke" goto demo_smoke
 if /I "%TARGET%"=="run_demo" goto run_demo
@@ -388,6 +389,16 @@ set "DEMO_FLAGS=%GUI_FLAGS% /DNDEBUG"
 call :build_demo_profile
 exit /b %errorlevel%
 
+:demo_profile_clang
+call :setup
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+call "%~f0" shaders
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+call :build_demo_profile_clang
+exit /b %errorlevel%
+
 :demo_tearout
 call :setup
 if errorlevel 1 exit /b 1
@@ -446,6 +457,24 @@ cl %DEMO_FLAGS% /DRG_GUI_DEMO_PROFILE_CALLS /I benchmarks\profile examples\rg_gu
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
 echo rg_gui_demo_full_profile.exe built successfully.
+exit /b 0
+
+:build_demo_profile_clang
+rem The profiled showcase compiled with clang-cl (the "C++ Clang tools for Windows" component of Visual Studio), to tell the compiler's code from the machine.
+rem The dependency headers are system headers as build.sh has them, and compiler-rt supplies the 128-bit division rg_core uses under clang.
+where clang-cl >nul 2>nul
+if not errorlevel 1 goto build_demo_profile_clang_found
+if not defined VCINSTALLDIR (
+	echo clang-cl not found. Install the "C++ Clang tools for Windows" component of Visual Studio.
+	exit /b 1
+)
+set "PATH=%VCINSTALLDIR%Tools\Llvm\x64\bin;%PATH%"
+:build_demo_profile_clang_found
+echo Building per-call profiled full rg_gui showcase with clang-cl...
+clang-cl /nologo /std:c11 /W4 /WX /O2 /D_CRT_SECURE_NO_WARNINGS /imsvc "%RG_CORE_DIR%\src" /imsvc "%RG_TEXT_DIR%\src" /imsvc "%SDL3_INCLUDE_DIR%" /clang:-rtlib=compiler-rt /DNDEBUG /DRG_GUI_DEMO_PROFILE_CALLS /I benchmarks\profile examples\rg_gui_demo_full.c /Forg_gui_demo_full_profile_clang.obj /Ferg_gui_demo_full_profile_clang.exe /link /LIBPATH:"%SDL3_LIB_DIR%" SDL3.lib
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+echo rg_gui_demo_full_profile_clang.exe built successfully.
 exit /b 0
 
 :build_demo_tearout
@@ -580,9 +609,9 @@ del /q "%RG_GUI_ROOT%test_demo_profile.exe" "%RG_GUI_ROOT%test_demo_profile.obj"
 rem Every target below is rooted at this batch file's verified repository path.
 del /q "%RG_GUI_ROOT%test_demo_tearout.exe" "%RG_GUI_ROOT%test_demo_tearout.obj" 2>nul
 del /q "%RG_GUI_ROOT%test_assets.exe" "%RG_GUI_ROOT%test_gui_no_string_ids.exe" "%RG_GUI_ROOT%test_gui.exe" "%RG_GUI_ROOT%test_renderer.exe" "%RG_GUI_ROOT%test_gui_gpu.exe" "%RG_GUI_ROOT%test_gui_gpu_sse2.exe" "%RG_GUI_ROOT%test_gui_gpu_device.exe" 2>nul
-del /q "%RG_GUI_ROOT%rg_gui_demo_minimal.exe" "%RG_GUI_ROOT%rg_gui_demo_full.exe" "%RG_GUI_ROOT%rg_gui_demo_full_profile.exe" "%RG_GUI_ROOT%rg_gui_demo_tearout.exe" 2>nul
+del /q "%RG_GUI_ROOT%rg_gui_demo_minimal.exe" "%RG_GUI_ROOT%rg_gui_demo_full.exe" "%RG_GUI_ROOT%rg_gui_demo_full_profile.exe" "%RG_GUI_ROOT%rg_gui_demo_full_profile_clang.exe" "%RG_GUI_ROOT%rg_gui_demo_tearout.exe" 2>nul
 del /q "%RG_GUI_ROOT%test_assets.obj" "%RG_GUI_ROOT%test_gui_no_string_ids.obj" "%RG_GUI_ROOT%test_gui_no_string_ids_negative.obj" "%RG_GUI_ROOT%test_gui.obj" "%RG_GUI_ROOT%test_renderer.obj" "%RG_GUI_ROOT%test_gui_gpu.obj" "%RG_GUI_ROOT%test_gui_gpu_sse2.obj" "%RG_GUI_ROOT%test_gui_gpu_device.obj" 2>nul
-del /q "%RG_GUI_ROOT%rg_gui_demo_minimal.obj" "%RG_GUI_ROOT%rg_gui_demo_full.obj" "%RG_GUI_ROOT%rg_gui_demo_full_profile.obj" "%RG_GUI_ROOT%rg_gui_demo_tearout.obj" 2>nul
+del /q "%RG_GUI_ROOT%rg_gui_demo_minimal.obj" "%RG_GUI_ROOT%rg_gui_demo_full.obj" "%RG_GUI_ROOT%rg_gui_demo_full_profile.obj" "%RG_GUI_ROOT%rg_gui_demo_full_profile_clang.obj" "%RG_GUI_ROOT%rg_gui_demo_tearout.obj" 2>nul
 del /q "%RG_GUI_ROOT%bake_demo_font.obj" "%RG_GUI_ROOT%bake_ui_font.obj" 2>nul
 if exist "%RG_GUI_ROOT%shaders\Compiled" rmdir /s /q "%RG_GUI_ROOT%shaders\Compiled"
 for %%f in (test_demo_profile.exe test_demo_profile.obj test_demo_format.exe test_demo_format.obj test_assets.exe test_gui_no_string_ids.exe test_gui.exe test_renderer.exe test_gui_gpu.exe test_gui_gpu_sse2.exe test_gui_gpu_device.exe test_demo_tearout.exe rg_gui_demo_minimal.exe rg_gui_demo_full.exe rg_gui_demo_full_profile.exe rg_gui_demo_tearout.exe test_assets.obj test_gui_no_string_ids.obj test_gui_no_string_ids_negative.obj test_gui.obj test_renderer.obj test_gui_gpu.obj test_gui_gpu_sse2.obj test_gui_gpu_device.obj test_demo_tearout.obj rg_gui_demo_minimal.obj rg_gui_demo_full.obj rg_gui_demo_full_profile.obj rg_gui_demo_tearout.obj bake_demo_font.obj bake_ui_font.obj) do if exist "%RG_GUI_ROOT%%%f" (

@@ -17,6 +17,12 @@ between 0.x releases.
   first line, and the report adds two per-frame totals (the SDL calls except
   the fence wait, and the library's exclusive time) whose medians are taken
   over per-frame sums.
+- Stage timing hooks in `src/rg_gui.h` (`RG_GUI_PROF_BEGIN` and
+  `RG_GUI_PROF_END`, compiled away unless a profiled build defines them),
+  which split `rg_gui_end_frame` and the hidden-draw culling pass into slots
+  nested in their totals in the per-call profile, and
+  `build.bat demo_profile_clang`, the profiled showcase compiled with
+  clang-cl, so that the compiler's code can be told from the machine.
 - `--dump-frame DIR` (and `--dump-frame-index N`) in the full showcase, which
   writes one frame's staged upload bytes, text cache, atlas, draw arguments,
   and (offscreen) a readback of the rendered target, and
@@ -161,6 +167,9 @@ between 0.x releases.
 
 ### Fixed
 
+- The tests build with MSVC again: `tests/test_gui.c` no longer names a
+  variable `far`, an empty macro in the Windows headers `rg_core` includes,
+  and the lookup test compares its table flags as ints under `/W4 /WX`.
 - The full showcase docks Inspector, the Workspace and Node Graph tabs, and
   Frame Stats into three columns. It previously left half its dock space
   empty, because `rg_gui_dockspace_dock` splits the first leaf.

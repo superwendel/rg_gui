@@ -109,6 +109,15 @@
 #define RG_GUI_ASSERT(x) assert(x)
 #endif
 
+/* Stage timing hooks. A build that profiles the library's internal stages
+ * defines both before including this header (benchmarks/profile/prof_core.h
+ * does); every other build compiles them away. BEGIN declares the stage's
+ * start time in `var`, END closes the stage under `name`. */
+#ifndef RG_GUI_PROF_BEGIN
+#define RG_GUI_PROF_BEGIN(var) ((void)0)
+#define RG_GUI_PROF_END(var, name) ((void)0)
+#endif
+
 #ifndef RG_GUI_MAX_DRAW_CMDS
 #define RG_GUI_MAX_DRAW_CMDS 4096u
 #endif
@@ -11188,6 +11197,7 @@ static RG_NOINLINE void rg_gui_draw_list_cull_hidden_measured(RgGuiDrawList* lis
 
 	/* Forward: the clip in effect for each command. w < 0 marks unclipped,
 	 * w < -1 marks a depth the pass does not track. */
+	RG_GUI_PROF_BEGIN(prof_clips);
 	RgGuiRect stack[RG_GUI_CULL_CLIP_STACK_MAX];
 	RgGuiRect clip = {0.0f, 0.0f, 0.0f, 0.0f};
 	u32 depth = 0u, ignored = 0u;
@@ -11231,7 +11241,9 @@ static RG_NOINLINE void rg_gui_draw_list_cull_hidden_measured(RgGuiDrawList* lis
 		else if (enabled) clips[i] = clip;
 		else clips[i] = (RgGuiRect){0.0f, 0.0f, -1.0f, -1.0f};
 	}
+	RG_GUI_PROF_END(prof_clips, "cull hidden: clips forward");
 
+	RG_GUI_PROF_BEGIN(prof_decide);
 	/* Backward: decide. The occluders are the largest opaque rectangles
 	 * already passed, which are the ones drawn after the command in hand. The
 	 * decision for a command replaces its clip entry once the clip is read:
@@ -11373,8 +11385,10 @@ static RG_NOINLINE void rg_gui_draw_list_cull_hidden_measured(RgGuiDrawList* lis
 			}
 		}
 	}
+	RG_GUI_PROF_END(prof_decide, "cull hidden: decide backward");
 	if (!culled && !split_count) return;
 
+	RG_GUI_PROF_BEGIN(prof_write);
 	/* The culled list never outgrows the pushed one, so geometry sized for the
 	 * pushed list still holds it: a split that replaces one rectangle with k
 	 * spends k - 1 of the slots dropped rectangles returned. When the splits
@@ -11424,6 +11438,7 @@ static RG_NOINLINE void rg_gui_draw_list_cull_hidden_measured(RgGuiDrawList* lis
 	memcpy(cmds, scratch, sizeof(*cmds) * written);
 	list->count = written;
 	*overlay_start = overlay_written;
+	RG_GUI_PROF_END(prof_write, "cull hidden: write back");
 	if (out_culled) *out_culled = culled;
 	if (out_split) *out_split = active;
 	if (out_saved) *out_saved = saved;
@@ -11477,10 +11492,15 @@ RGINLINE void rg_gui_draw_list_cull_hidden(RgGuiContext* ctx, RgGuiDrawList* lis
 
 RGINLINE void rg_gui_end_frame(RgGuiContext* ctx)
 {
+	RG_GUI_PROF_BEGIN(prof_state);
 	rg_gui_end_frame_state(ctx);
+	RG_GUI_PROF_END(prof_state, "rg_gui_end_frame: state");
 
+	RG_GUI_PROF_BEGIN(prof_dock);
 	rg_gui_dock_drag_handle(ctx);
+	RG_GUI_PROF_END(prof_dock, "rg_gui_end_frame: dock drag");
 
+	RG_GUI_PROF_BEGIN(prof_merge);
 	rg_gui_diagnostics_update_draw_high_water(ctx, &ctx->draw_list, &ctx->overlay_list);
 	ctx->overlay_start = ctx->draw_list.count;
 	if (ctx->overlay_list.count > 0u)
@@ -11506,6 +11526,8 @@ RGINLINE void rg_gui_end_frame(RgGuiContext* ctx)
 			ctx->draw_list.count += copy_count;
 		}
 	}
+	RG_GUI_PROF_END(prof_merge, "rg_gui_end_frame: overlay merge");
+	RG_GUI_PROF_BEGIN(prof_lift);
 	/* Backdrop lift: when asked, the first command, if an opaque rectangle
 	 * covering the caller's render target, becomes the clear color and leaves
 	 * the list at once, so the list, and any signature taken from it, is the
@@ -11529,7 +11551,10 @@ RGINLINE void rg_gui_end_frame(RgGuiContext* ctx)
 			if (ctx->overlay_start) ctx->overlay_start--;
 		}
 	}
+	RG_GUI_PROF_END(prof_lift, "rg_gui_end_frame: backdrop lift");
+	RG_GUI_PROF_BEGIN(prof_cull);
 	rg_gui_draw_list_cull_hidden(ctx, &ctx->draw_list, &ctx->overlay_start, &ctx->overlay_list, &ctx->cull_pace);
+	RG_GUI_PROF_END(prof_cull, "rg_gui_end_frame: cull hidden");
 
 	if (ctx->text_buffer_used > ctx->diagnostics.text_buffer_high_water)
 	{

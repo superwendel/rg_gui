@@ -307,7 +307,14 @@ median, p90, and calls per frame, plus two per-frame totals, `frame: SDL
 calls except the fence wait` and `frame: library exclusive`, each summed
 within the frame before its median is taken (a sum of the per-slot medians
 is a different number); a stage's total minus the SDL calls inside it is the
-library's own time. Run it with `--offscreen` so presentation does
+library's own time. Inside the library, `rg_gui_end_frame` reports its
+stages as slots nested in its total (`rg_gui_end_frame: state`, `dock
+drag`, `overlay merge`, `backdrop lift`, and `cull hidden`, the last split
+again into `cull hidden: clips forward`, `decide backward`, and `write
+back`) through the `RG_GUI_PROF_BEGIN` and `RG_GUI_PROF_END` hooks in
+`src/rg_gui.h`, which `prof_core.h` defines and every other build compiles
+away; a total's exclusive time is then what lies outside its stages. Run it
+with `--offscreen` so presentation does
 not pace the loop, pinned to one core (`taskset -c 3`, or
 `start "" /b /wait /affinity 8` on Windows), and record the load: the
 numbers are wall times. See
@@ -332,6 +339,15 @@ start "" /b /wait /affinity 8 cmd /c "rg_gui_demo_full_profile.exe --offscreen -
 `out/windows-profile/dump-d3d12` is the reference a raw-D3D12 replay would
 compare against. `SDL_GetTicksNS` on Windows is the performance counter, so
 the sub-microsecond slots are at its resolution.
+
+`build.bat demo_profile_clang` builds the same profiled showcase with
+clang-cl (the "C++ Clang tools for Windows" component of Visual Studio) as
+`rg_gui_demo_full_profile_clang.exe`: the same flags, the dependency
+headers as system headers the way `build.sh` has them, and compiler-rt
+linked for the 128-bit division `rg_core` uses under clang. Running the two
+builds back to back on one machine tells the compiler's code from the
+machine and its power plan; the runs under `out/windows-profile/balanced/`
+did that for change 18's `rg_gui_end_frame` question.
 
 ### Matched raw-Vulkan replay
 

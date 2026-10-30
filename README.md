@@ -206,6 +206,7 @@ build.bat test_gpu_device
 build.bat test_demo_lifecycle
 build.bat demo
 build.bat demo_profile
+build.bat demo_profile_clang
 build.bat demo_smoke
 build.bat test_release
 ```
@@ -220,6 +221,7 @@ build.bat test_release
   text-input cleanup, and final destruction with actual SDL GPU windows.
 - `demo_profile` builds the full showcase with every SDL GPU call and renderer
   stage timed; see the [profiling guide](benchmarks/PROFILING.md#per-call-profile-of-the-cpu-stages).
+  `demo_profile_clang` builds the same with clang-cl, for comparing compilers.
 - `demo_smoke` builds all three demos, briefly opens their windows, and requires
   three actual main-window presentations from each. The tear-out smoke also
   creates a secondary native window and presents its viewport at least once.
