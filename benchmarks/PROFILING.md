@@ -330,12 +330,14 @@ what else was running) saved beside them under `out/windows-profile/`:
 ```bat
 build.bat demo_profile
 set SDL_GPU_DRIVER=direct3d12
-start "" /b /wait /affinity 8 cmd /c "rg_gui_demo_full_profile.exe --offscreen --scenario idle --frames 1200 --present immediate > out\windows-profile\d3d12-idle-1.txt 2>&1"
+start "" /b /wait /affinity 8 cmd /c "rg_gui_demo_full_profile.exe --offscreen --hidden --scenario idle --frames 1200 --present immediate > out\windows-profile\d3d12-idle-1.txt 2>&1"
 set SDL_GPU_DRIVER=vulkan
-start "" /b /wait /affinity 8 cmd /c "rg_gui_demo_full_profile.exe --offscreen --scenario idle --frames 1200 --present immediate > out\windows-profile\vulkan-idle-1.txt 2>&1"
+start "" /b /wait /affinity 8 cmd /c "rg_gui_demo_full_profile.exe --offscreen --hidden --scenario idle --frames 1200 --present immediate > out\windows-profile\vulkan-idle-1.txt 2>&1"
 ```
 
-`--dump-frame` works on either backend; the D3D12 dump under
+`--offscreen` alone still opens a focusable window, and a keystroke or click
+into it (Escape, the File menu) ends the run early with a short report;
+`--hidden` keeps the window off the screen. `--dump-frame` works on either backend; the D3D12 dump under
 `out/windows-profile/dump-d3d12` is the reference a raw-D3D12 replay would
 compare against. `SDL_GetTicksNS` on Windows is the performance counter, so
 the sub-microsecond slots are at its resolution.
@@ -347,7 +349,9 @@ headers as system headers the way `build.sh` has them, and compiler-rt
 linked for the 128-bit division `rg_core` uses under clang. Running the two
 builds back to back on one machine tells the compiler's code from the
 machine and its power plan; the runs under `out/windows-profile/balanced/`
-did that for change 18's `rg_gui_end_frame` question.
+did that for change 18's `rg_gui_end_frame` question, and the runs under
+`out/windows-profile/balanced-lift/` repeated them after the backdrop lift
+stopped shifting the list.
 
 `benchmarks/prototype/memmove_shift.c` is the small check behind the
 backdrop-lift finding of change 18: it times a runtime's `memmove`, a

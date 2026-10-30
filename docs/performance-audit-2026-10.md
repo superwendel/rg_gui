@@ -1222,9 +1222,25 @@ list through the struct each frame, so nothing else changes; the lift test
 (removed command, the rest as pushed) passes unchanged, the demos and host
 tests pass, and dumps of the same frame from the old and new builds differ
 only in the statistics panel's frame-time text, with identical geometry
-counts. On the laptop the lift span reads 0.0 us. The desktop rerun that
-confirms the 8.6 us gone is pending; expected is `rg_gui_end_frame` at
-about 6.7 us and the library's exclusive time at 14 to 17 us there.
+counts. On the laptop the lift span reads 0.0 us. The desktop rerun
+(`out/windows-profile/balanced-lift/`: the same twelve pinned runs on the
+Balanced plan, now with `--hidden` so that no keystroke reaches the
+window) confirms it. The lift span is 0.0 us under both compilers and
+`rg_gui_end_frame` is 6.3 to 6.7 us, the culling pass plus 0.2 us of
+bookkeeping; the library's exclusive time is 15.1 us (MSVC) and 13.8 us
+(clang-cl) on D3D12, 17.9 and 15.8 us on Vulkan, down from 22 to 26. The
+prototype on the desktop (`cl /O2`, pinned) puts the runtime's memmove for
+that shift at 8.50 us and `rep movsb` at 8.50 us, the same number, against
+1.10 us for the per-command copy loop (built with clang-cl, all three read
+8.30 us, the loop evidently turned back into the memmove call), which
+settles the runtime's path. A dump from the new build differs from the
+earlier D3D12 dump in 7,030 pixels, all inside x 1014 to 1250, y 73 to
+592, the statistics panel, with the vertex count four apart on the
+frame-time text. One consequence: on Vulkan the fence wait rose from 1 us
+to 7.5 to 12.3 us as the CPU frame fell to about 30 us, so the desktop's
+Vulkan frame is now paced by the GPU at about 40 us, while the D3D12 wait
+stayed at 5 us whatever the CPU frame did, a fixed cost of the wait there
+rather than pacing.
 
 ## Measured effect of the changes
 
@@ -1535,8 +1551,10 @@ hidden tab.
    remaining lever, and both mechanisms for it already ship. On a Windows
    desktop with a discrete GPU (change 18, 2026-10-28) the frame is
    CPU-bound instead, 71 us on Vulkan and 93 us on D3D12 on the Power saver
-   plan, 38 and 56 us on Balanced, and the library's own time (45 us, then
-   22 to 26) is the larger half of it.
+   plan, 38 and 56 us on Balanced, and about 40 and 44 us once the backdrop
+   lift stopped shifting the list, the Vulkan frame paced by the GPU from
+   then on; the library's own time (45 us, then 22 to 26, then 14 to 18)
+   was the larger half of it until that fix.
 5. **`rg_gui_end_frame` under MSVC.** Opened 2026-10-28 (change 18), closed
    2026-10-29: split into stages and rebuilt with clang-cl, the function is
    15 us on the Balanced plan under both compilers, the laptop's number. The
@@ -1547,9 +1565,10 @@ hidden tab.
    rectangle from the front of the list, 41 KB a frame, which the Windows
    runtime copies a byte per cycle for a sub-cache-line overlap. The lift
    now advances the list's base pointer instead and the next frame restores
-   it; 0.0 us on the laptop, the desktop confirmation pending. The culling
-   pass behind it is 6 us, 3 of them the backward decision pass, and is
-   now the whole of `rg_gui_end_frame`.
+   it; 0.0 us on the laptop and on the desktop, where `rg_gui_end_frame`
+   is 6.3 to 6.7 us under both compilers. The culling pass behind it is
+   6 us, 3 of them the backward decision pass, and is now the whole of
+   `rg_gui_end_frame`.
 7. **The D3D12 submit.** 35 us against 15 us for the same frame on NVIDIA
    Vulkan (change 18; 18 to 19 against 6 to 7 on Balanced), two thirds of
    the D3D12 backend's cost. Whether that is SDL_GPU's D3D12 backend or the
