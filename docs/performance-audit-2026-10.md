@@ -1205,6 +1205,27 @@ the remainder are 0.2 us together. Leaving the lifted command in place and
 having the renderers start one command later would remove the shift; it is
 now on the remaining list.
 
+**Why 8.6 us, and the fix (2026-10-29).** The same shift measured on the
+laptop takes 0.4 us through glibc's memmove, and the merged span that
+held it was 0.8 us, so the desktop's 8.6 us is not the copy's size but a
+path: 41 KB in 8.6 us at the desktop's clock is one byte per cycle, which
+is what `rep movsb` degrades to when the source and destination overlap by
+less than a cache line, and the Windows C runtime's memmove evidently
+takes that path (the runtime's source was not read; the number matches).
+`benchmarks/prototype/memmove_shift.c` makes the comparison on either
+platform: on the laptop, glibc's memmove 0.39 us, `rep movsb` 12.07 us for
+the same 40 KB shift, one byte per cycle there too. The lift no longer
+shifts anything: it advances the draw list's base pointer past the lifted
+command and shortens the count and capacity by one, and the next
+`rg_gui_begin_frame_ex` moves the pointer back. Every consumer reads the
+list through the struct each frame, so nothing else changes; the lift test
+(removed command, the rest as pushed) passes unchanged, the demos and host
+tests pass, and dumps of the same frame from the old and new builds differ
+only in the statistics panel's frame-time text, with identical geometry
+counts. On the laptop the lift span reads 0.0 us. The desktop rerun that
+confirms the 8.6 us gone is pending; expected is `rg_gui_end_frame` at
+about 6.7 us and the library's exclusive time at 14 to 17 us there.
+
 ## Measured effect of the changes
 
 Extended CPU suite, `benchmarks/run.py compare`, five alternating process
@@ -1520,12 +1541,15 @@ hidden tab.
    2026-10-29: split into stages and rebuilt with clang-cl, the function is
    15 us on the Balanced plan under both compilers, the laptop's number. The
    27.7 us was the Power saver plan. What the split found is the next item.
-6. **The backdrop lift's shift.** 8.6 us of the desktop's 15 us
-   `rg_gui_end_frame` (change 18 follow-up), on both compilers, is the
-   `memmove` that drops the lifted backdrop rectangle from the front of the
-   list: about 41 KB moved every frame. Leaving the command in place and
-   starting the renderers one command later would remove it. The culling
-   pass behind it is 6 us, 3 of them the backward decision pass.
+6. **The backdrop lift's shift.** Found 2026-10-29 (change 18 follow-up),
+   fixed the same day: 8.6 us of the desktop's 15 us `rg_gui_end_frame`,
+   on both compilers, was the `memmove` that dropped the lifted backdrop
+   rectangle from the front of the list, 41 KB a frame, which the Windows
+   runtime copies a byte per cycle for a sub-cache-line overlap. The lift
+   now advances the list's base pointer instead and the next frame restores
+   it; 0.0 us on the laptop, the desktop confirmation pending. The culling
+   pass behind it is 6 us, 3 of them the backward decision pass, and is
+   now the whole of `rg_gui_end_frame`.
 7. **The D3D12 submit.** 35 us against 15 us for the same frame on NVIDIA
    Vulkan (change 18; 18 to 19 against 6 to 7 on Balanced), two thirds of
    the D3D12 backend's cost. Whether that is SDL_GPU's D3D12 backend or the

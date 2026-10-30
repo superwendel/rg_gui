@@ -72,6 +72,12 @@ between 0.x releases.
 
 ### Changed
 
+- The backdrop lift no longer shifts the draw list down by one command to
+  drop the lifted rectangle; it advances the list's base pointer for the rest
+  of the frame and `rg_gui_begin_frame_ex` restores it. The shift was a 41 KB
+  `memmove` every frame, which the Windows C runtime copied a byte per cycle
+  (8.6 us on an i7-12700KF; audit change 18). `benchmarks/prototype/memmove_shift.c`
+  compares a runtime's memmove with `rep movsb` and a copy loop for that shift.
 - `rg_gui_end_frame` now culls hidden draws: a rectangle that lies under a later
   opaque rectangle is dropped, and a large one that an opaque rectangle mostly
   covers is replaced by its visible remainder. Text, images, and triangles are

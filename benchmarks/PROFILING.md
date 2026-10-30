@@ -349,6 +349,11 @@ builds back to back on one machine tells the compiler's code from the
 machine and its power plan; the runs under `out/windows-profile/balanced/`
 did that for change 18's `rg_gui_end_frame` question.
 
+`benchmarks/prototype/memmove_shift.c` is the small check behind the
+backdrop-lift finding of change 18: it times a runtime's `memmove`, a
+`rep movsb` string copy, and a copy loop shifting a 41 KB list of 56-byte
+commands down by one, and builds with `gcc -O2` or `cl /O2` alone.
+
 ### Matched raw-Vulkan replay
 
 To separate what SDL_GPU adds from what the driver charges for the same
