@@ -1,0 +1,41 @@
+Microsoft Windows [Version 10.0.26200.9711]
+--- Win32_VideoController Name, DriverVersion (wmic is not installed on this Windows build; CIM equivalents) ---
+NVIDIA GeForce RTX 2060  32.0.16.1088
+--- Win32_Processor Name, NumberOfCores ---
+12th Gen Intel(R) Core(TM) i7-12700KF  cores=12  logical=20  maxclock=3600MHz
+--- powercfg /getactivescheme ---
+Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+--- system ---
+Machine: Micro-Star International Co., Ltd. MS-7D96, PCSystemType=1 (1 = desktop), 31.8 GB RAM
+Battery: none; desktop on mains power
+OS: Microsoft Windows 11 Pro build 26200
+SDL: 3.4.10 (SDL3_DIR=C:\libs\SDL3-3.4.10; SDL3.dll beside the executables)
+Compilers: Microsoft (R) C/C++ Optimizing Compiler Version 19.44.35219 for x64 (build.bat demo_profile: cl /std:c11 /W4 /WX /O2 /DNDEBUG); clang version 19.1.5 at C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\clang-cl.exe (build.bat demo_profile_clang: the same flags, the dependency headers via /imsvc, /clang:-rtlib=compiler-rt)
+Profiled build: rg_gui_end_frame is split into stage slots (state; dock drag; overlay merge; backdrop lift; cull hidden, itself split into clips forward, decide backward, write back), eight more timed scopes per frame than the Power saver runs under out\windows-profile\ had.
+Affinity: start /affinity 8 = logical CPU 3, the second SMT thread of P-core 1 (i7-12700KF: CPUs 0-15 are P-core threads, 16-19 E-cores)
+Vulkan ICD: NVIDIA nv-vk64.json
+Power plan: Balanced, set by the user before these runs (the earlier runs under out\windows-profile\ were on Power saver)
+Runs: three rounds, in each: MSVC D3D12, clang-cl D3D12, MSVC Vulkan, clang-cl Vulkan (msvc-d3d12-idle-N, clangcl-d3d12-idle-N, msvc-vulkan-idle-N, clangcl-vulkan-idle-N), offscreen, 1200 frames, present immediate
+Run time: 2026-10-29 19:57:58 to 19:58:05 local
+Report: the 'frame:' rows are per-frame sums (SDL calls except the fence wait; library exclusive) with the median taken over frames; stage slots are nested, so a total's excl is its own time outside its stages
+--- before the runs : total CPU 10.3% over 4 s; processes using more than 0.05 s CPU in that window (seconds) ---
+  AWCC.UCSubAgent  0.2
+  codex  0.19
+  powershell  0.16
+  WindowsTerminal  0.11
+  claude  0.09
+  brave  0.08
+  Discord  0.06
+  windows open: ApplicationFrameHost, brave, GitHubDesktop, SystemSettings, TextInputHost, WindowsTerminal
+--- after the runs : total CPU 7% over 4 s; processes using more than 0.05 s CPU in that window (seconds) ---
+  codex  0.25
+  claude  0.19
+  Discord  0.08
+  codex  0.08
+  AWCC.UCSubAgent  0.08
+  codex  0.06
+  codex  0.06
+  codex  0.06
+  codex  0.06
+  codex  0.06
+  windows open: ApplicationFrameHost, brave, GitHubDesktop, SystemSettings, TextInputHost, WindowsTerminal

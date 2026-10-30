@@ -1156,6 +1156,55 @@ runs would see on Balanced; and background work, moderate, during the
 runs. The ordering of the lines would not change under any of them, the
 sizes might.
 
+**Follow-up on 2026-10-29: the plan, not the compiler.** The profiled
+build gained stage hooks (`RG_GUI_PROF_BEGIN` and `RG_GUI_PROF_END` in
+`src/rg_gui.h`, compiled away in every other build) that split
+`rg_gui_end_frame` into its stages and the culling pass into its three
+passes, and `build.bat demo_profile_clang` builds the same showcase with
+clang-cl 19. The desktop's plan was switched to Balanced and the runs
+repeated for both compilers: three rounds, D3D12 and Vulkan interleaved,
+pinned as before, on a quiet machine (CPU 7 to 10 percent, nothing
+compiling); the files are under `out/windows-profile/balanced/`. Medians
+of the rounds, in microseconds, the first column being the table above:
+
+| Idle frame, desktop | Power saver, MSVC | Balanced, MSVC | Balanced, clang-cl |
+| --- | ---: | ---: | ---: |
+| `rg_gui_end_frame` total | 27.7 to 27.8 | 15.3 to 15.5 | 14.9 to 15.3 |
+| of which backdrop lift | | 8.6 to 8.7 | 8.6 to 8.7 |
+| of which cull hidden | | 6.5 to 6.6 | 6.1 to 6.3 |
+| cull hidden: decide backward | | 3.2 to 3.3 | 3.2 |
+| cull hidden: write back | | 2.2 to 2.3 | 2.0 to 2.1 |
+| cull hidden: clips forward | | 0.9 | 0.8 |
+| state, dock drag, overlay merge, remainder | | 0.2 | 0.2 |
+| `rg_gui_gpu_prepare` | 9.9 to 10.2 | 5.5 to 5.8 | 4.6 |
+| frame: library exclusive, Vulkan / D3D12 | 45.4 / 43.6 | 26.1 / 24.6 | 25.0 / 22.3 |
+| frame: SDL calls except the fence wait, Vulkan / D3D12 | 24.0 / 47.0 | 10.8 / 26.3 | 12.8 / 25.0 |
+| submit with fence, Vulkan / D3D12 | 15.1 / 34.7 | 5.9 / 19.0 | 7.0 / 18.0 |
+| fence wait, Vulkan / D3D12 | 1.9 / 2.8 | 1.1 / 5.4 | 1.3 / 5.2 |
+| wrapper overhead per wrapped call, ns | 96 to 135 | 59 to 73 | 53 to 67 |
+
+The open item closes: `rg_gui_end_frame` is 15 us on Balanced under both
+compilers, within half a microsecond of each other and of the laptop's
+14.8, so the 27.7 was the Power saver plan's clock, not MSVC's code. The
+compiler is worth 1 to 2 us of the library's 22 to 26 (clang-cl's
+`rg_gui_gpu_prepare` is 4.6 against MSVC's 5.5 to 5.8); the plan was worth
+half of everything, library and SDL alike, and the wrapper's own cost fell
+with it, so the table above is a Power saver measurement. On Balanced the
+desktop's CPU frame is about 38 us on Vulkan and 56 us on D3D12, still
+CPU-bound (fence wait 1 to 5 us), and the D3D12 submit is still two and a
+half to three times the Vulkan one.
+
+What the split found instead: the largest stage of `rg_gui_end_frame` is
+not the culling pass but the backdrop lift, 8.6 to 8.7 us of the 15 on
+both compilers. It is the one `memmove` that shifts the whole list down by
+one command to drop the lifted rectangle from the front, about 735
+commands of 56 bytes, 41 KB, every frame. The culling pass is 6.1 to 6.6
+us: the backward decision pass 3.2, the write-back 2.0 to 2.3, the clip
+pass 0.8 to 0.9. The overlay merge, the state and dock bookkeeping, and
+the remainder are 0.2 us together. Leaving the lifted command in place and
+having the renderers start one command later would remove the shift; it is
+now on the remaining list.
+
 ## Measured effect of the changes
 
 Extended CPU suite, `benchmarks/run.py compare`, five alternating process
@@ -1464,21 +1513,25 @@ hidden tab.
    cost, and the present path; not presenting unchanged frames is the
    remaining lever, and both mechanisms for it already ship. On a Windows
    desktop with a discrete GPU (change 18, 2026-10-28) the frame is
-   CPU-bound instead, 71 us on Vulkan and 93 us on D3D12, and the library's
-   own 45 us is the larger half of it.
-5. **`rg_gui_end_frame` under MSVC.** Open since 2026-10-28 (change 18).
-   The function takes 14.8 us on the Linux laptop and 27.7 us on a much
-   faster Windows desktop, while preparation and staging halve as expected.
-   In the idle frame it is the hidden-draw culling pass plus bookkeeping.
-   Split it in the profiled build and rebuild once with clang-cl to tell
-   MSVC's code for the culling loops from the desktop's power plan; at 27 us
-   it is 30 to 40 percent of that machine's CPU frame, and the largest
-   unexplained item in it.
-6. **The D3D12 submit.** 35 us against 15 us for the same frame on NVIDIA
-   Vulkan (change 18), two thirds of the D3D12 backend's cost. Whether that
-   is SDL_GPU's D3D12 backend or the driver needs a raw-D3D12 replay of the
-   dumped frame, which the D3D12 dump under `out/windows-profile/` is the
-   reference for; on D3D12 the submit is the only SDL_GPU line above 4 us.
+   CPU-bound instead, 71 us on Vulkan and 93 us on D3D12 on the Power saver
+   plan, 38 and 56 us on Balanced, and the library's own time (45 us, then
+   22 to 26) is the larger half of it.
+5. **`rg_gui_end_frame` under MSVC.** Opened 2026-10-28 (change 18), closed
+   2026-10-29: split into stages and rebuilt with clang-cl, the function is
+   15 us on the Balanced plan under both compilers, the laptop's number. The
+   27.7 us was the Power saver plan. What the split found is the next item.
+6. **The backdrop lift's shift.** 8.6 us of the desktop's 15 us
+   `rg_gui_end_frame` (change 18 follow-up), on both compilers, is the
+   `memmove` that drops the lifted backdrop rectangle from the front of the
+   list: about 41 KB moved every frame. Leaving the command in place and
+   starting the renderers one command later would remove it. The culling
+   pass behind it is 6 us, 3 of them the backward decision pass.
+7. **The D3D12 submit.** 35 us against 15 us for the same frame on NVIDIA
+   Vulkan (change 18; 18 to 19 against 6 to 7 on Balanced), two thirds of
+   the D3D12 backend's cost. Whether that is SDL_GPU's D3D12 backend or the
+   driver needs a raw-D3D12 replay of the dumped frame, which the D3D12
+   dump under `out/windows-profile/` is the reference for; on D3D12 the
+   submit is the only SDL_GPU line above 4 us.
 ## Verified and left alone
 
 - A direct Vulkan backend issuing the same call sequence, measured on
@@ -1491,8 +1544,9 @@ hidden tab.
   different frame structure was not measured. The replay stays in
   `benchmarks/prototype/` for other drivers and platforms, where the split
   may differ: on a Windows desktop (change 18) the whole SDL_GPU Vulkan
-  path is 24 us on NVIDIA, so the layer's share there is at most that, and
-  the open backend question on that machine is the D3D12 submit.
+  path is 24 us on NVIDIA on the Power saver plan and 11 us on Balanced, so
+  the layer's share there is at most that, and the open backend question on
+  that machine is the D3D12 submit.
 - Text length in the draw command, tried on 2026-10-23 and not adopted.
   Recording the byte length at push time removes the renderer's `strlen` for
   each changing text command, an expected saving of about 2 us per 128 changing
