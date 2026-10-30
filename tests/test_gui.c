@@ -639,7 +639,7 @@ static int test_hidden_draw_culling(void)
 	for (u32 iteration = 0u; iteration < 3000u; iteration++)
 	{
 		const u32 count = 8u + cull_test_random(&state) % 53u;
-		const int far = cull_test_random(&state) % 8u == 0u;
+		const int far_shifted = cull_test_random(&state) % 8u == 0u; /* not `far`: an empty macro in the Windows headers rg_core includes */
 		const int offset = cull_test_random(&state) % 4u != 0u;
 		const f32 ox = offset ? cull_test_coord(&state, -3.0f, 3.0f) : 0.0f;
 		const f32 oy = offset ? cull_test_coord(&state, -3.0f, 3.0f) : 0.0f;
@@ -655,7 +655,7 @@ static int test_hidden_draw_culling(void)
 				                               cull_test_coord(&state, 0.0f, 240.0f), cull_test_coord(&state, 0.0f, 240.0f));
 				if (cull_test_random(&state) % 10u == 0u) c.w = -cull_test_coord(&state, 0.0f, 2.0f);
 				if (cull_test_random(&state) % 10u == 0u) c.h = -cull_test_coord(&state, 0.0f, 2.0f);
-				if (far) { const f32 shift = cull_test_far_shift(&state); c.x = c.x - shift; c.w = c.w + shift; }
+				if (far_shifted) { const f32 shift = cull_test_far_shift(&state); c.x = c.x - shift; c.w = c.w + shift; }
 				cmd.type = RG_GUI_CMD_CLIP_PUSH;
 				cmd.data.clip.rect = c;
 				depth++;
@@ -679,7 +679,7 @@ static int test_hidden_draw_culling(void)
 				RgGuiRect r = rg_gui_make_rect(cull_test_coord(&state, -20.0f, 260.0f), cull_test_coord(&state, -20.0f, 260.0f),
 				                               cull_test_coord(&state, big ? 100.0f : 0.0f, big ? 290.0f : 80.0f),
 				                               cull_test_coord(&state, big ? 100.0f : 0.0f, big ? 290.0f : 80.0f));
-				if (far) { const f32 shift = cull_test_far_shift(&state); r.x = r.x - shift; r.w = r.w + shift; }
+				if (far_shifted) { const f32 shift = cull_test_far_shift(&state); r.x = r.x - shift; r.w = r.w + shift; }
 				const u32 alpha = cull_test_random(&state) % 100u < 45u ? 255u : cull_test_random(&state) % 255u;
 				cmd.type = RG_GUI_CMD_RECT;
 				cmd.data.rect.rect = r;
@@ -705,7 +705,7 @@ static int test_hidden_draw_culling(void)
 		if (memcmp(expected, actual, sizeof(expected)))
 		{
 			fprintf(stderr, "hidden-draw culling: iteration %u changed pixels (%u commands, overlay at %u, offset %g %g, far %d, culled %u, split %u)\n",
-			        iteration, count, overlay_start, (double)ox, (double)oy, far, culled, split);
+			        iteration, count, overlay_start, (double)ox, (double)oy, far_shifted, culled, split);
 			return 0;
 		}
 		u32 j = 0u;
@@ -724,7 +724,7 @@ static int test_hidden_draw_culling(void)
 		total_split += split;
 		total_commands += count;
 		total_kept += after.count;
-		far_split += far ? split : 0u;
+		far_split += far_shifted ? split : 0u;
 		offset_culled += offset ? culled : 0u;
 	}
 	if (total_culled < 2000u || total_split < 200u || far_split < 10u || offset_culled < 1500u)

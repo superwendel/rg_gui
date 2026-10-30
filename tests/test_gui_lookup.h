@@ -206,10 +206,10 @@ static int test_text_lookup(void)
         RgGuiTextLookup* big_lookup = (RgGuiTextLookup*)malloc(sizeof(*big_lookup));
         LOOKUP_TEST_CHECK(big_lookup && rg_gui_text_lookup_init(big_lookup, &big));
 #if RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS > 0
-        LOOKUP_TEST_CHECK(big_lookup->glyph_table_enabled == (count <= RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS / 2u));
+        LOOKUP_TEST_CHECK((big_lookup->glyph_table_enabled != 0) == (count <= RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS / 2u));
 #endif
 #if RG_GUI_TEXT_LOOKUP_KERNING_SLOTS > 0
-        LOOKUP_TEST_CHECK(big_lookup->kerning_table_enabled == (count <= RG_GUI_TEXT_LOOKUP_KERNING_SLOTS / 2u));
+        LOOKUP_TEST_CHECK((big_lookup->kerning_table_enabled != 0) == (count <= RG_GUI_TEXT_LOOKUP_KERNING_SLOTS / 2u));
 #endif
         for (u32 cp = 0u; cp < 32u + count * 3u + 8u; cp++)
             LOOKUP_TEST_CHECK(rg_gui_text_lookup_glyph(big_lookup, cp) == rg_text_find_glyph(&big, cp));
