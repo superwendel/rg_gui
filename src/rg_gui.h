@@ -1,7 +1,7 @@
 // rg_gui - Immediate-mode UI helpers
 //
 // Part of the Reverse Gravity (rg_) libraries.
-// Single-header C11/GNU11 UI core with draw-list output and SDL3 input integration.
+// Single-header C11/GNU11 UI core with draw-list output over rg_input state (RgKey / RgMod).
 //
 // USAGE:
 //   #include "rg_gui.h"
@@ -60,7 +60,7 @@
 //   RG_GUI_LABEL_COPY and RG_GUI_COPY_DYNAMIC_TEXT must be 1 if defined.
 //
 // NOTES:
-//   - Requires rg_input.h (SDL3) for input state.
+//   - Requires rg_input.h (rg_input_core types; SDL3 for clipboard and key names until rg_gui_sdl.h).
 //   - Requires rg_text.h for font measurement and renderer cache identity.
 //   - Ordinary label and dynamic-value APIs snapshot text in the current frame.
 //     Use rg_gui_label_static for constant labels to skip text copies.
@@ -1514,7 +1514,7 @@ typedef struct RgGuiViewport
 	RgGuiId active_id;
 	RgGuiId scroll_owner;
 	RgGuiId key_repeat_owner;
-	SDL_Scancode key_repeat_key;
+	RgKey key_repeat_key;
 	f32 key_repeat_hold_time;
 	f32 key_repeat_repeat_time;
 	RgGuiId menu_bar_id;
@@ -1547,7 +1547,7 @@ typedef struct RgGuiViewportStackEntry
 	int prev_mouse_released;
 	f32 prev_mouse_wheel;
 	const RgInputEventQueue* prev_input_events;
-	SDL_WindowID prev_input_window_id;
+	RgWindowId prev_input_window_id;
 	RgGuiId prev_input_event_focus_id;
 	RgGuiId prev_input_events_processed_id;
 	RgGuiId prev_input_events_changed_id;
@@ -1572,7 +1572,7 @@ typedef struct RgGuiViewportStackEntry
 	int prev_tab_wrap;
 	int prev_tab_found_focus;
 	RgGuiId prev_key_repeat_owner;
-	SDL_Scancode prev_key_repeat_key;
+	RgKey prev_key_repeat_key;
 	f32 prev_key_repeat_hold_time;
 	f32 prev_key_repeat_repeat_time;
 	RgGuiId prev_menu_bar_id;
@@ -1651,7 +1651,7 @@ typedef struct RgGuiContext
 
 	const RgInputState* input;
 	const RgInputEventQueue* input_events;
-	SDL_WindowID input_window_id;
+	RgWindowId input_window_id;
 	RgGuiId input_event_focus_id;
 	RgGuiId input_events_processed_id;
 	int input_window_focused_at_frame_start;
@@ -1704,7 +1704,7 @@ typedef struct RgGuiContext
 	int tab_wrap;
 	int tab_found_focus;
 	RgGuiId key_repeat_owner;
-	SDL_Scancode key_repeat_key;
+	RgKey key_repeat_key;
 	f32 key_repeat_hold_time;
 	f32 key_repeat_repeat_time;
 	RgGuiId menu_bar_id;
@@ -1832,7 +1832,7 @@ typedef enum RgGuiContextMenuFlags
 
 typedef struct RgGuiShortcut
 {
-	SDL_Scancode key;
+	RgKey key;
 	u32 mods;
 } RgGuiShortcut;
 
@@ -1991,7 +1991,7 @@ RGINLINE void rg_gui_begin_frame(RgGuiContext* ctx, const RgInputState* input, f
  */
 RGINLINE void rg_gui_begin_frame_ex(RgGuiContext* ctx, const RgInputState* input,
                                     const RgInputEventQueue* events,
-                                    SDL_WindowID window_id, f32 delta_time);
+                                    RgWindowId window_id, f32 delta_time);
 
 /**
  * @brief Return platform-facing cursor, text-input, and IME caret requests
@@ -2324,7 +2324,7 @@ RGINLINE RgGuiViewport* rg_gui_viewport_begin_ex(RgGuiContext* ctx, RgGuiId id, 
 RGINLINE RgGuiViewport* rg_gui_viewport_begin_ordered_ex(
     RgGuiContext* ctx, RgGuiId id, RgGuiRect bounds,
     const RgInputState* input, const RgInputEventQueue* events,
-    SDL_WindowID window_id, rg_vec2 origin);
+    RgWindowId window_id, rg_vec2 origin);
 
 /**
  * @brief End a viewport begun with rg_gui_viewport_begin
@@ -4270,10 +4270,10 @@ RGINLINE int rg_gui_input_has_ctrl(const RgInputState* input)
 		return 0;
 	}
 
-	return rg_input_is_key_down(input, SDL_SCANCODE_LCTRL) ||
-	       rg_input_is_key_down(input, SDL_SCANCODE_RCTRL) ||
-	       rg_input_is_key_down(input, SDL_SCANCODE_LGUI) ||
-	       rg_input_is_key_down(input, SDL_SCANCODE_RGUI);
+	return rg_input_is_key_down(input, RG_KEY_LCTRL) ||
+	       rg_input_is_key_down(input, RG_KEY_RCTRL) ||
+	       rg_input_is_key_down(input, RG_KEY_LGUI) ||
+	       rg_input_is_key_down(input, RG_KEY_RGUI);
 }
 
 RGINLINE int rg_gui_input_has_shift(const RgInputState* input)
@@ -4283,8 +4283,8 @@ RGINLINE int rg_gui_input_has_shift(const RgInputState* input)
 		return 0;
 	}
 
-	return rg_input_is_key_down(input, SDL_SCANCODE_LSHIFT) ||
-	       rg_input_is_key_down(input, SDL_SCANCODE_RSHIFT);
+	return rg_input_is_key_down(input, RG_KEY_LSHIFT) ||
+	       rg_input_is_key_down(input, RG_KEY_RSHIFT);
 }
 
 RGINLINE int rg_gui_input_has_alt(const RgInputState* input)
@@ -4294,8 +4294,8 @@ RGINLINE int rg_gui_input_has_alt(const RgInputState* input)
 		return 0;
 	}
 
-	return rg_input_is_key_down(input, SDL_SCANCODE_LALT) ||
-	       rg_input_is_key_down(input, SDL_SCANCODE_RALT);
+	return rg_input_is_key_down(input, RG_KEY_LALT) ||
+	       rg_input_is_key_down(input, RG_KEY_RALT);
 }
 
 RGINLINE int rg_gui_i64_clamp_to_int(i64 value, int min_value, int max_value)
@@ -4527,43 +4527,43 @@ RGINLINE int rg_gui_ascii_is_space(char c)
 	return (c == ' ' || c == '\t' || c == '\n' || c == '\r') ? 1 : 0;
 }
 
-RGINLINE SDL_Scancode rg_gui_scancode_from_ascii(char c)
+RGINLINE RgKey rg_gui_scancode_from_ascii(char c)
 {
 	if (c >= 'a' && c <= 'z')
 	{
-		return (SDL_Scancode)(SDL_SCANCODE_A + (c - 'a'));
+		return (RgKey)(RG_KEY_A + (c - 'a'));
 	}
 	if (c >= '0' && c <= '9')
 	{
 		if (c == '0')
 		{
-			return SDL_SCANCODE_0;
+			return RG_KEY_0;
 		}
-		return (SDL_Scancode)(SDL_SCANCODE_1 + (c - '1'));
+		return (RgKey)(RG_KEY_1 + (c - '1'));
 	}
-	return SDL_SCANCODE_UNKNOWN;
+	return RG_KEY_UNKNOWN;
 }
 
-RGINLINE int rg_gui_scancode_is_modifier(SDL_Scancode scancode)
+RGINLINE int rg_gui_scancode_is_modifier(RgKey scancode)
 {
-	return scancode == SDL_SCANCODE_LCTRL ||
-	       scancode == SDL_SCANCODE_RCTRL ||
-	       scancode == SDL_SCANCODE_LSHIFT ||
-	       scancode == SDL_SCANCODE_RSHIFT ||
-	       scancode == SDL_SCANCODE_LALT ||
-	       scancode == SDL_SCANCODE_RALT ||
-	       scancode == SDL_SCANCODE_LGUI ||
-	       scancode == SDL_SCANCODE_RGUI;
+	return scancode == RG_KEY_LCTRL ||
+	       scancode == RG_KEY_RCTRL ||
+	       scancode == RG_KEY_LSHIFT ||
+	       scancode == RG_KEY_RSHIFT ||
+	       scancode == RG_KEY_LALT ||
+	       scancode == RG_KEY_RALT ||
+	       scancode == RG_KEY_LGUI ||
+	       scancode == RG_KEY_RGUI;
 }
 
-RGINLINE SDL_Scancode rg_gui_find_pressed_scancode(const RgInputState* input)
+RGINLINE RgKey rg_gui_find_pressed_scancode(const RgInputState* input)
 {
 	if (!input)
 	{
-		return SDL_SCANCODE_UNKNOWN;
+		return RG_KEY_UNKNOWN;
 	}
 
-	int scancode_count = (int)SDL_SCANCODE_COUNT;
+	int scancode_count = (int)RG_KEY_COUNT;
 	if (scancode_count <= 0)
 	{
 		scancode_count = 512;
@@ -4571,17 +4571,17 @@ RGINLINE SDL_Scancode rg_gui_find_pressed_scancode(const RgInputState* input)
 
 	for (int scancode = 1; scancode < scancode_count; scancode++)
 	{
-		SDL_Scancode key = (SDL_Scancode)scancode;
+		RgKey key = (RgKey)scancode;
 		if (rg_input_is_key_pressed(input, key) && !rg_gui_scancode_is_modifier(key))
 		{
 			return key;
 		}
 	}
 
-	return SDL_SCANCODE_UNKNOWN;
+	return RG_KEY_UNKNOWN;
 }
 
-RGINLINE RgGuiShortcut rg_gui_shortcut_make(SDL_Scancode key, u32 mods)
+RGINLINE RgGuiShortcut rg_gui_shortcut_make(RgKey key, u32 mods)
 {
 	RgGuiShortcut shortcut;
 	shortcut.key = key;
@@ -4607,28 +4607,28 @@ RGINLINE u32 rg_gui_shortcut_mods_from_input(const RgInputState* input)
 	return mods;
 }
 
-RGINLINE const char* rg_gui_scancode_name(SDL_Scancode scancode, char* buffer, size_t buffer_size)
+RGINLINE const char* rg_gui_scancode_name(RgKey scancode, char* buffer, size_t buffer_size)
 {
 	if (!buffer || buffer_size == 0u)
 	{
 		return "";
 	}
 
-	if (scancode >= SDL_SCANCODE_A && scancode <= SDL_SCANCODE_Z)
+	if (scancode >= RG_KEY_A && scancode <= RG_KEY_Z)
 	{
-		buffer[0] = (char)('A' + (scancode - SDL_SCANCODE_A));
+		buffer[0] = (char)('A' + (scancode - RG_KEY_A));
 		buffer[1] = '\0';
 		return buffer;
 	}
 
-	if (scancode >= SDL_SCANCODE_1 && scancode <= SDL_SCANCODE_9)
+	if (scancode >= RG_KEY_1 && scancode <= RG_KEY_9)
 	{
-		buffer[0] = (char)('1' + (scancode - SDL_SCANCODE_1));
+		buffer[0] = (char)('1' + (scancode - RG_KEY_1));
 		buffer[1] = '\0';
 		return buffer;
 	}
 
-	if (scancode == SDL_SCANCODE_0)
+	if (scancode == RG_KEY_0)
 	{
 		buffer[0] = '0';
 		buffer[1] = '\0';
@@ -4647,7 +4647,7 @@ RGINLINE const char* rg_gui_scancode_name(SDL_Scancode scancode, char* buffer, s
 
 RGINLINE const char* rg_gui_shortcut_to_text(RgGuiShortcut shortcut, char* buffer, size_t buffer_size)
 {
-	if (!buffer || buffer_size == 0u || shortcut.key == SDL_SCANCODE_UNKNOWN)
+	if (!buffer || buffer_size == 0u || shortcut.key == RG_KEY_UNKNOWN)
 	{
 		return NULL;
 	}
@@ -4705,7 +4705,7 @@ RGINLINE const char* rg_gui_shortcut_to_text(RgGuiShortcut shortcut, char* buffe
 
 RGINLINE int rg_gui_shortcut_triggered(RgGuiContext* ctx, RgGuiShortcut shortcut, u32 flags)
 {
-	if (!ctx || !ctx->input || shortcut.key == SDL_SCANCODE_UNKNOWN)
+	if (!ctx || !ctx->input || shortcut.key == RG_KEY_UNKNOWN)
 	{
 		return 0;
 	}
@@ -4765,14 +4765,14 @@ RGINLINE int rg_gui_shortcut_index(RgGuiContext* ctx, const RgGuiShortcut* short
 
 RGINLINE int rg_gui_shortcut_undo(RgGuiContext* ctx, u32 flags)
 {
-	RgGuiShortcut undo_shortcut = rg_gui_shortcut_make(SDL_SCANCODE_Z, RG_GUI_SHORTCUT_MOD_CTRL);
+	RgGuiShortcut undo_shortcut = rg_gui_shortcut_make(RG_KEY_Z, RG_GUI_SHORTCUT_MOD_CTRL);
 	return rg_gui_shortcut_triggered(ctx, undo_shortcut, flags);
 }
 
 RGINLINE int rg_gui_shortcut_redo(RgGuiContext* ctx, u32 flags)
 {
-	RgGuiShortcut redo_shortcut = rg_gui_shortcut_make(SDL_SCANCODE_Y, RG_GUI_SHORTCUT_MOD_CTRL);
-	RgGuiShortcut redo_alt = rg_gui_shortcut_make(SDL_SCANCODE_Z,
+	RgGuiShortcut redo_shortcut = rg_gui_shortcut_make(RG_KEY_Y, RG_GUI_SHORTCUT_MOD_CTRL);
+	RgGuiShortcut redo_alt = rg_gui_shortcut_make(RG_KEY_Z,
 	                                              RG_GUI_SHORTCUT_MOD_CTRL | RG_GUI_SHORTCUT_MOD_SHIFT);
 	return rg_gui_shortcut_triggered(ctx, redo_shortcut, flags) ||
 	       rg_gui_shortcut_triggered(ctx, redo_alt, flags);
@@ -5578,7 +5578,7 @@ RGINLINE int rg_gui_int_step_clamped(int value, i64 step, int repeats,
 	return rg_gui_i64_clamp_to_int(next, min_value, max_value);
 }
 
-RGINLINE int rg_gui_key_repeat(RgGuiContext* ctx, RgGuiId owner, SDL_Scancode key)
+RGINLINE int rg_gui_key_repeat(RgGuiContext* ctx, RgGuiId owner, RgKey key)
 {
 	if (!ctx || !ctx->input)
 	{
@@ -5602,7 +5602,7 @@ RGINLINE int rg_gui_key_repeat(RgGuiContext* ctx, RgGuiId owner, SDL_Scancode ke
 		if (!down && owner == ctx->key_repeat_owner && key == ctx->key_repeat_key)
 		{
 			ctx->key_repeat_owner = 0u;
-			ctx->key_repeat_key = SDL_SCANCODE_UNKNOWN;
+			ctx->key_repeat_key = RG_KEY_UNKNOWN;
 			ctx->key_repeat_hold_time = 0.0f;
 			ctx->key_repeat_repeat_time = 0.0f;
 		}
@@ -5693,47 +5693,47 @@ RGINLINE int rg_gui_nav_list_move(RgGuiContext* ctx, RgGuiId owner, int count, i
 	int moved = 0;
 	int dir = 0;
 
-	if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP) ||
-	    rg_input_is_key_down(ctx->input, SDL_SCANCODE_DOWN))
+	if (rg_input_is_key_down(ctx->input, RG_KEY_UP) ||
+	    rg_input_is_key_down(ctx->input, RG_KEY_DOWN))
 	{
-		SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP)
-		                       ? SDL_SCANCODE_UP
-		                       : SDL_SCANCODE_DOWN;
+		RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_UP)
+		                       ? RG_KEY_UP
+		                       : RG_KEY_DOWN;
 		int repeats = rg_gui_key_repeat(ctx, owner, key);
 		if (repeats > 0)
 		{
 			target = rg_gui_int_step_clamped(target, 1, repeats,
-			                                 key == SDL_SCANCODE_UP ? -1 : 1,
+			                                 key == RG_KEY_UP ? -1 : 1,
 			                                 0, count - 1);
 			moved = 1;
-			dir = (key == SDL_SCANCODE_UP) ? -1 : 1;
+			dir = (key == RG_KEY_UP) ? -1 : 1;
 		}
 	}
 
-	if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_PAGEUP) ||
-	    rg_input_is_key_down(ctx->input, SDL_SCANCODE_PAGEDOWN))
+	if (rg_input_is_key_down(ctx->input, RG_KEY_PAGEUP) ||
+	    rg_input_is_key_down(ctx->input, RG_KEY_PAGEDOWN))
 	{
-		SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_PAGEUP)
-		                       ? SDL_SCANCODE_PAGEUP
-		                       : SDL_SCANCODE_PAGEDOWN;
+		RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_PAGEUP)
+		                       ? RG_KEY_PAGEUP
+		                       : RG_KEY_PAGEDOWN;
 		int repeats = rg_gui_key_repeat(ctx, owner, key);
 		if (repeats > 0)
 		{
 			target = rg_gui_int_step_clamped(target, (i64)visible, repeats,
-			                                 key == SDL_SCANCODE_PAGEUP ? -1 : 1,
+			                                 key == RG_KEY_PAGEUP ? -1 : 1,
 			                                 0, count - 1);
 			moved = 1;
-			dir = (key == SDL_SCANCODE_PAGEUP) ? -1 : 1;
+			dir = (key == RG_KEY_PAGEUP) ? -1 : 1;
 		}
 	}
 
-	if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_HOME))
+	if (rg_input_is_key_pressed(ctx->input, RG_KEY_HOME))
 	{
 		target = 0;
 		moved = 1;
 		dir = 1;
 	}
-	if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_END))
+	if (rg_input_is_key_pressed(ctx->input, RG_KEY_END))
 	{
 		target = count - 1;
 		moved = 1;
@@ -8108,7 +8108,7 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 
 	if (has_ctrl)
 	{
-		if (!read_only && rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_Z))
+		if (!read_only && rg_input_is_key_pressed(ctx->input, RG_KEY_Z))
 		{
 			if (has_shift)
 			{
@@ -8134,7 +8134,7 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 			}
 		}
 
-		if (!read_only && rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_Y))
+		if (!read_only && rg_input_is_key_pressed(ctx->input, RG_KEY_Y))
 		{
 			if (rg_gui_text_edit_redo(edit))
 			{
@@ -8146,18 +8146,18 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 			}
 		}
 
-		if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_A))
+		if (rg_input_is_key_pressed(ctx->input, RG_KEY_A))
 		{
 			rg_gui_text_edit_select_all(edit);
 			edit->dirty = 1;
 		}
 
-		if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_C))
+		if (rg_input_is_key_pressed(ctx->input, RG_KEY_C))
 		{
 			rg_gui_text_edit_copy_selection(edit);
 		}
 
-		if (!read_only && rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_X))
+		if (!read_only && rg_input_is_key_pressed(ctx->input, RG_KEY_X))
 		{
 			if (rg_gui_text_edit_copy_selection(edit))
 			{
@@ -8165,7 +8165,7 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 			}
 		}
 
-		if (!read_only && rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_V))
+		if (!read_only && rg_input_is_key_pressed(ctx->input, RG_KEY_V))
 		{
 			char* clip = SDL_GetClipboardText();
 			if (clip && clip[0])
@@ -8185,7 +8185,7 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 		changed |= rg_gui_text_edit_insert_filtered(ctx, edit, ctx->input->text_input_buffer, filter_flags);
 	}
 
-	if (!read_only && has_ctrl && rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_BACKSPACE))
+	if (!read_only && has_ctrl && rg_input_is_key_pressed(ctx->input, RG_KEY_BACKSPACE))
 	{
 		if (rg_gui_text_edit_has_selection(edit))
 		{
@@ -8204,8 +8204,8 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 	}
 	else if (!read_only)
 	{
-		int backspace_pressed = rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_BACKSPACE);
-		int backspace_down = rg_input_is_key_down(ctx->input, SDL_SCANCODE_BACKSPACE);
+		int backspace_pressed = rg_input_is_key_pressed(ctx->input, RG_KEY_BACKSPACE);
+		int backspace_down = rg_input_is_key_down(ctx->input, RG_KEY_BACKSPACE);
 		if (backspace_pressed)
 		{
 			changed |= rg_gui_text_edit_delete_back(edit);
@@ -8257,7 +8257,7 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 		}
 	}
 
-	if (!read_only && has_ctrl && rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_DELETE))
+	if (!read_only && has_ctrl && rg_input_is_key_pressed(ctx->input, RG_KEY_DELETE))
 	{
 		if (rg_gui_text_edit_has_selection(edit))
 		{
@@ -8272,12 +8272,12 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 			}
 		}
 	}
-	else if (!read_only && rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_DELETE))
+	else if (!read_only && rg_input_is_key_pressed(ctx->input, RG_KEY_DELETE))
 	{
 		changed |= rg_gui_text_edit_delete_forward(edit);
 	}
 
-	if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_LEFT))
+	if (rg_input_is_key_pressed(ctx->input, RG_KEY_LEFT))
 	{
 		size_t cursor = edit->cursor;
 		if (has_ctrl)
@@ -8291,7 +8291,7 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 		rg_gui_text_edit_set_cursor(edit, cursor, has_shift ? 1 : 0);
 	}
 
-	if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RIGHT))
+	if (rg_input_is_key_pressed(ctx->input, RG_KEY_RIGHT))
 	{
 		size_t cursor = edit->cursor;
 		if (has_ctrl)
@@ -8305,7 +8305,7 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 		rg_gui_text_edit_set_cursor(edit, cursor, has_shift ? 1 : 0);
 	}
 
-	if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_HOME))
+	if (rg_input_is_key_pressed(ctx->input, RG_KEY_HOME))
 	{
 		size_t cursor = 0u;
 		if (allow_newline && !has_ctrl)
@@ -8323,7 +8323,7 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 		rg_gui_text_edit_set_cursor(edit, cursor, has_shift ? 1 : 0);
 	}
 
-	if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_END))
+	if (rg_input_is_key_pressed(ctx->input, RG_KEY_END))
 	{
 		size_t cursor = edit->length;
 		if (allow_newline && !has_ctrl)
@@ -8341,8 +8341,8 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 		rg_gui_text_edit_set_cursor(edit, cursor, has_shift ? 1 : 0);
 	}
 
-	if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RETURN) ||
-	    rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_KP_ENTER))
+	if (rg_input_is_key_pressed(ctx->input, RG_KEY_RETURN) ||
+	    rg_input_is_key_pressed(ctx->input, RG_KEY_KP_ENTER))
 	{
 		if (allow_newline && !read_only)
 		{
@@ -8354,7 +8354,7 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 		}
 	}
 
-	if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_ESCAPE))
+	if (rg_input_is_key_pressed(ctx->input, RG_KEY_ESCAPE))
 	{
 		ctx->focus_id = 0u;
 		rg_gui_text_edit_clear_preedit(edit);
@@ -8385,16 +8385,16 @@ RGINLINE int rg_gui_input_event_matches_window(const RgGuiContext* ctx,
 	       (ctx->input_window_id == 0u || event->window_id == ctx->input_window_id);
 }
 
-RGINLINE void rg_gui_input_state_set_modifiers(RgInputState* input, SDL_Keymod modifiers)
+RGINLINE void rg_gui_input_state_set_modifiers(RgInputState* input, RgMod modifiers)
 {
-	if ((modifiers & SDL_KMOD_LSHIFT) != 0) input->current_keyboard[SDL_SCANCODE_LSHIFT] = true;
-	if ((modifiers & SDL_KMOD_RSHIFT) != 0) input->current_keyboard[SDL_SCANCODE_RSHIFT] = true;
-	if ((modifiers & SDL_KMOD_LCTRL) != 0) input->current_keyboard[SDL_SCANCODE_LCTRL] = true;
-	if ((modifiers & SDL_KMOD_RCTRL) != 0) input->current_keyboard[SDL_SCANCODE_RCTRL] = true;
-	if ((modifiers & SDL_KMOD_LALT) != 0) input->current_keyboard[SDL_SCANCODE_LALT] = true;
-	if ((modifiers & SDL_KMOD_RALT) != 0) input->current_keyboard[SDL_SCANCODE_RALT] = true;
-	if ((modifiers & SDL_KMOD_LGUI) != 0) input->current_keyboard[SDL_SCANCODE_LGUI] = true;
-	if ((modifiers & SDL_KMOD_RGUI) != 0) input->current_keyboard[SDL_SCANCODE_RGUI] = true;
+	if ((modifiers & RG_MOD_LSHIFT) != 0) input->current_keyboard[RG_KEY_LSHIFT] = true;
+	if ((modifiers & RG_MOD_RSHIFT) != 0) input->current_keyboard[RG_KEY_RSHIFT] = true;
+	if ((modifiers & RG_MOD_LCTRL) != 0) input->current_keyboard[RG_KEY_LCTRL] = true;
+	if ((modifiers & RG_MOD_RCTRL) != 0) input->current_keyboard[RG_KEY_RCTRL] = true;
+	if ((modifiers & RG_MOD_LALT) != 0) input->current_keyboard[RG_KEY_LALT] = true;
+	if ((modifiers & RG_MOD_RALT) != 0) input->current_keyboard[RG_KEY_RALT] = true;
+	if ((modifiers & RG_MOD_LGUI) != 0) input->current_keyboard[RG_KEY_LGUI] = true;
+	if ((modifiers & RG_MOD_RGUI) != 0) input->current_keyboard[RG_KEY_RGUI] = true;
 }
 
 typedef void (*RgGuiTextEditOrderedKeyFn)(RgGuiContext* ctx,
@@ -8471,8 +8471,8 @@ RGINLINE int rg_gui_text_edit_process_ordered_with_key_ex(
 		else if (event->kind == RG_INPUT_EVENT_KEY_DOWN)
 		{
 			if (ordered_key &&
-			    (event->data.key.scancode == SDL_SCANCODE_UP ||
-			     event->data.key.scancode == SDL_SCANCODE_DOWN))
+			    (event->data.key.scancode == RG_KEY_UP ||
+			     event->data.key.scancode == RG_KEY_DOWN))
 			{
 				ordered_key(ctx, edit, event, ordered_key_user);
 				continue;
@@ -8481,7 +8481,7 @@ RGINLINE int rg_gui_text_edit_process_ordered_with_key_ex(
 			RgInputState event_input;
 			memset(&event_input, 0, sizeof(event_input));
 			rg_gui_input_state_set_modifiers(&event_input, event->modifiers);
-			if ((u32)event->data.key.scancode < SDL_SCANCODE_COUNT)
+			if ((u32)event->data.key.scancode < RG_KEY_COUNT)
 			{
 				event_input.current_keyboard[event->data.key.scancode] = true;
 			}
@@ -8496,7 +8496,7 @@ RGINLINE int rg_gui_text_edit_process_ordered_with_key_ex(
 			ctx->input = saved_input;
 		}
 		else if (event->kind == RG_INPUT_EVENT_KEY_UP &&
-		         event->data.key.scancode == SDL_SCANCODE_BACKSPACE)
+		         event->data.key.scancode == RG_KEY_BACKSPACE)
 		{
 			edit->backspace_hold_time = 0.0f;
 			edit->backspace_repeat_time = 0.0f;
@@ -9234,8 +9234,8 @@ static RG_NOINLINE void rg_gui_text_area_process_ordered_key(
 		return;
 	}
 
-	int direction = event->data.key.scancode == SDL_SCANCODE_UP ? -1 : 1;
-	int selecting = (event->modifiers & (SDL_KMOD_LSHIFT | SDL_KMOD_RSHIFT)) != 0;
+	int direction = event->data.key.scancode == RG_KEY_UP ? -1 : 1;
+	int selecting = (event->modifiers & (RG_MOD_LSHIFT | RG_MOD_RSHIFT)) != 0;
 	RgGuiTextAreaVisualLine fallback_lines[RG_GUI_TEXT_AREA_VISUAL_LINE_MAX];
 	RgGuiTextAreaVisualLine* lines = move->layout ? move->layout->lines : fallback_lines;
 	u32 line_count = move->layout
@@ -10667,7 +10667,7 @@ RGINLINE int rg_gui_init(RgGuiContext* ctx, RgArena* arena, const RgGuiInitDesc*
 	ctx->tab_wrap = 0;
 	ctx->tab_found_focus = 0;
 	ctx->key_repeat_owner = 0u;
-	ctx->key_repeat_key = SDL_SCANCODE_UNKNOWN;
+	ctx->key_repeat_key = RG_KEY_UNKNOWN;
 	ctx->key_repeat_hold_time = 0.0f;
 	ctx->key_repeat_repeat_time = 0.0f;
 	ctx->menu_bar_id = 0u;
@@ -10758,7 +10758,7 @@ RGINLINE void rg_gui_text_edit_update_blink(RgGuiContext* ctx)
 
 RGINLINE void rg_gui_begin_frame_ex(RgGuiContext* ctx, const RgInputState* input,
                                     const RgInputEventQueue* events,
-                                    SDL_WindowID window_id, f32 delta_time)
+                                    RgWindowId window_id, f32 delta_time)
 {
 	RG_GUI_ASSERT(ctx != NULL);
 	RG_GUI_ASSERT(input != NULL);
@@ -10912,7 +10912,7 @@ RGINLINE void rg_gui_begin_frame_ex(RgGuiContext* ctx, const RgInputState* input
 	}
 #endif
 
-	if (rg_input_is_key_pressed(input, SDL_SCANCODE_TAB))
+	if (rg_input_is_key_pressed(input, RG_KEY_TAB))
 	{
 		ctx->tab_dir = rg_gui_input_has_shift(input) ? -1 : 1;
 	}
@@ -12497,8 +12497,8 @@ RGINLINE int rg_gui_menu_bar(RgGuiContext* ctx, const char* const* labels, u32 c
 		{
 			const char* label = labels ? labels[i] : NULL;
 			char hot = rg_gui_label_hotkey(label);
-			SDL_Scancode sc = rg_gui_scancode_from_ascii(hot);
-			if (sc != SDL_SCANCODE_UNKNOWN && rg_input_is_key_pressed(ctx->input, sc))
+			RgKey sc = rg_gui_scancode_from_ascii(hot);
+			if (sc != RG_KEY_UNKNOWN && rg_input_is_key_pressed(ctx->input, sc))
 			{
 				active_index = (int)i;
 				open_state = 1;
@@ -12522,24 +12522,24 @@ RGINLINE int rg_gui_menu_bar(RgGuiContext* ctx, const char* const* labels, u32 c
 
 	if (focused && count > 0u)
 	{
-		int left_pressed = rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_LEFT);
-		int right_pressed = rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RIGHT);
-		int left_down = rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT);
-		int right_down = rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT);
-		SDL_Scancode key = SDL_SCANCODE_UNKNOWN;
+		int left_pressed = rg_input_is_key_pressed(ctx->input, RG_KEY_LEFT);
+		int right_pressed = rg_input_is_key_pressed(ctx->input, RG_KEY_RIGHT);
+		int left_down = rg_input_is_key_down(ctx->input, RG_KEY_LEFT);
+		int right_down = rg_input_is_key_down(ctx->input, RG_KEY_RIGHT);
+		RgKey key = RG_KEY_UNKNOWN;
 		if (nav_enabled)
 		{
 			if ((left_pressed || left_down) && !block_left)
 			{
-				key = SDL_SCANCODE_LEFT;
+				key = RG_KEY_LEFT;
 			}
 			else if ((right_pressed || right_down) && !block_right)
 			{
-				key = SDL_SCANCODE_RIGHT;
+				key = RG_KEY_RIGHT;
 			}
 		}
 
-		if (key != SDL_SCANCODE_UNKNOWN)
+		if (key != RG_KEY_UNKNOWN)
 		{
 			RgGuiId repeat_owner = menu_list_focused ? list_id : id;
 			int repeats = rg_gui_key_repeat(ctx, repeat_owner, key);
@@ -12548,7 +12548,7 @@ RGINLINE int rg_gui_menu_bar(RgGuiContext* ctx, const char* const* labels, u32 c
 				u32 move = (u32)repeats;
 				if (move >= count) move %= count;
 				u32 next = active_index < 0 ? 0u : (u32)active_index;
-				if (key == SDL_SCANCODE_LEFT)
+				if (key == RG_KEY_LEFT)
 				{
 					next = next >= move ? next - move : count - (move - next);
 				}
@@ -12565,10 +12565,10 @@ RGINLINE int rg_gui_menu_bar(RgGuiContext* ctx, const char* const* labels, u32 c
 		}
 
 		if (!open_state &&
-		    (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RETURN) ||
-		     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_KP_ENTER) ||
-		     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_SPACE) ||
-		     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_DOWN)))
+		    (rg_input_is_key_pressed(ctx->input, RG_KEY_RETURN) ||
+		     rg_input_is_key_pressed(ctx->input, RG_KEY_KP_ENTER) ||
+		     rg_input_is_key_pressed(ctx->input, RG_KEY_SPACE) ||
+		     rg_input_is_key_pressed(ctx->input, RG_KEY_DOWN)))
 		{
 			open_state = 1;
 			if (active_index < 0)
@@ -12578,7 +12578,7 @@ RGINLINE int rg_gui_menu_bar(RgGuiContext* ctx, const char* const* labels, u32 c
 			changed = 1;
 		}
 
-		if (open_state && rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_ESCAPE))
+		if (open_state && rg_input_is_key_pressed(ctx->input, RG_KEY_ESCAPE))
 		{
 			open_state = 0;
 			changed = 1;
@@ -15804,7 +15804,7 @@ RGINLINE void rg_gui_viewport_state_reset(RgGuiViewport* viewport)
 	viewport->active_id = 0u;
 	viewport->scroll_owner = 0u;
 	viewport->key_repeat_owner = 0u;
-	viewport->key_repeat_key = SDL_SCANCODE_UNKNOWN;
+	viewport->key_repeat_key = RG_KEY_UNKNOWN;
 	viewport->key_repeat_hold_time = 0.0f;
 	viewport->key_repeat_repeat_time = 0.0f;
 	viewport->menu_bar_id = 0u;
@@ -15938,7 +15938,7 @@ RGINLINE RgGuiViewport* rg_gui_viewport_find(RgGuiContext* ctx, RgGuiId id)
 RGINLINE RgGuiViewport* rg_gui_viewport_begin_ordered_ex(
     RgGuiContext* ctx, RgGuiId id, RgGuiRect bounds,
     const RgInputState* input, const RgInputEventQueue* events,
-    SDL_WindowID window_id, rg_vec2 origin)
+    RgWindowId window_id, rg_vec2 origin)
 {
 	if (!ctx || id == 0u || !ctx->viewports)
 	{
@@ -16114,7 +16114,7 @@ RGINLINE RgGuiViewport* rg_gui_viewport_begin_ordered_ex(
 		ctx->mouse_released = 0;
 		ctx->mouse_wheel = 0.0f;
 	}
-	if (ctx->input && rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_TAB))
+	if (ctx->input && rg_input_is_key_pressed(ctx->input, RG_KEY_TAB))
 	{
 		ctx->tab_dir = rg_gui_input_has_shift(ctx->input) ? -1 : 1;
 	}
@@ -16286,7 +16286,7 @@ RGINLINE void rg_gui_viewport_release(RgGuiContext* ctx, RgGuiId id)
 			viewport->active_id = 0u;
 			viewport->scroll_owner = 0u;
 			viewport->key_repeat_owner = 0u;
-			viewport->key_repeat_key = SDL_SCANCODE_UNKNOWN;
+			viewport->key_repeat_key = RG_KEY_UNKNOWN;
 			viewport->key_repeat_hold_time = 0.0f;
 			viewport->key_repeat_repeat_time = 0.0f;
 			viewport->menu_bar_id = 0u;
@@ -17952,9 +17952,9 @@ RGINLINE int rg_gui_button_internal(RgGuiContext* ctx, const char* label, const 
 	int pressed = 0;
 	int focused = enabled && (ctx->focus_id == id);
 	if (focused &&
-	    (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RETURN) ||
-	     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_KP_ENTER) ||
-	     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_SPACE)))
+	    (rg_input_is_key_pressed(ctx->input, RG_KEY_RETURN) ||
+	     rg_input_is_key_pressed(ctx->input, RG_KEY_KP_ENTER) ||
+	     rg_input_is_key_pressed(ctx->input, RG_KEY_SPACE)))
 	{
 		pressed = 1;
 	}
@@ -18188,9 +18188,9 @@ RGINLINE int rg_gui_image_button_ex_material(RgGuiContext* ctx, RgGuiTexture tex
 	int pressed = 0;
 	int focused = enabled && (ctx->focus_id == id);
 	if (focused &&
-	    (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RETURN) ||
-	     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_KP_ENTER) ||
-	     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_SPACE)))
+	    (rg_input_is_key_pressed(ctx->input, RG_KEY_RETURN) ||
+	     rg_input_is_key_pressed(ctx->input, RG_KEY_KP_ENTER) ||
+	     rg_input_is_key_pressed(ctx->input, RG_KEY_SPACE)))
 	{
 		pressed = 1;
 	}
@@ -18271,9 +18271,9 @@ RGINLINE int rg_gui_selectable_internal(RgGuiContext* ctx, const char* label, co
 	}
 
 	if (focused &&
-	    (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RETURN) ||
-	     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_KP_ENTER) ||
-	     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_SPACE)))
+	    (rg_input_is_key_pressed(ctx->input, RG_KEY_RETURN) ||
+	     rg_input_is_key_pressed(ctx->input, RG_KEY_KP_ENTER) ||
+	     rg_input_is_key_pressed(ctx->input, RG_KEY_SPACE)))
 	{
 		activated = 1;
 	}
@@ -18821,7 +18821,7 @@ RGINLINE u32 rg_gui_tree_node_internal(RgGuiContext* ctx, RgGuiTreeState* tree, 
 
 	if (focused)
 	{
-		if (has_children && rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RIGHT))
+		if (has_children && rg_input_is_key_pressed(ctx->input, RG_KEY_RIGHT))
 		{
 			if (!(*open))
 			{
@@ -18829,7 +18829,7 @@ RGINLINE u32 rg_gui_tree_node_internal(RgGuiContext* ctx, RgGuiTreeState* tree, 
 				result |= RG_GUI_TREE_NODE_RESULT_TOGGLE;
 			}
 		}
-		if (has_children && rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_LEFT))
+		if (has_children && rg_input_is_key_pressed(ctx->input, RG_KEY_LEFT))
 		{
 			if (*open)
 			{
@@ -18838,9 +18838,9 @@ RGINLINE u32 rg_gui_tree_node_internal(RgGuiContext* ctx, RgGuiTreeState* tree, 
 			}
 		}
 
-		if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RETURN) ||
-		    rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_KP_ENTER) ||
-		    rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_SPACE))
+		if (rg_input_is_key_pressed(ctx->input, RG_KEY_RETURN) ||
+		    rg_input_is_key_pressed(ctx->input, RG_KEY_KP_ENTER) ||
+		    rg_input_is_key_pressed(ctx->input, RG_KEY_SPACE))
 		{
 			result |= RG_GUI_TREE_NODE_RESULT_SELECTION;
 		}
@@ -19091,44 +19091,44 @@ RGINLINE u32 rg_gui_tree_virtual_multi_internal(RgGuiContext* ctx, RgGuiTreeStat
 		int target = (cursor >= 0) ? cursor : 0;
 		int moved = 0;
 
-		if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP) ||
-		    rg_input_is_key_down(ctx->input, SDL_SCANCODE_DOWN))
+		if (rg_input_is_key_down(ctx->input, RG_KEY_UP) ||
+		    rg_input_is_key_down(ctx->input, RG_KEY_DOWN))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP)
-			                       ? SDL_SCANCODE_UP
-			                       : SDL_SCANCODE_DOWN;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_UP)
+			                       ? RG_KEY_UP
+			                       : RG_KEY_DOWN;
 			int repeats = rg_gui_key_repeat(ctx, id, key);
 			if (repeats > 0)
 			{
 				target = rg_gui_int_step_clamped(target, 1, repeats,
-				                                 key == SDL_SCANCODE_UP ? -1 : 1,
+				                                 key == RG_KEY_UP ? -1 : 1,
 				                                 0, row_count_int - 1);
 				moved = 1;
 			}
 		}
 
-		if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_PAGEUP) ||
-		    rg_input_is_key_down(ctx->input, SDL_SCANCODE_PAGEDOWN))
+		if (rg_input_is_key_down(ctx->input, RG_KEY_PAGEUP) ||
+		    rg_input_is_key_down(ctx->input, RG_KEY_PAGEDOWN))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_PAGEUP)
-			                       ? SDL_SCANCODE_PAGEUP
-			                       : SDL_SCANCODE_PAGEDOWN;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_PAGEUP)
+			                       ? RG_KEY_PAGEUP
+			                       : RG_KEY_PAGEDOWN;
 			int repeats = rg_gui_key_repeat(ctx, id, key);
 			if (repeats > 0)
 			{
 				target = rg_gui_int_step_clamped(target, (i64)visible_rows, repeats,
-				                                 key == SDL_SCANCODE_PAGEUP ? -1 : 1,
+				                                 key == RG_KEY_PAGEUP ? -1 : 1,
 				                                 0, row_count_int - 1);
 				moved = 1;
 			}
 		}
 
-		if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_HOME))
+		if (rg_input_is_key_pressed(ctx->input, RG_KEY_HOME))
 		{
 			target = 0;
 			moved = 1;
 		}
-		if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_END))
+		if (rg_input_is_key_pressed(ctx->input, RG_KEY_END))
 		{
 			target = row_count_int - 1;
 			moved = 1;
@@ -19173,13 +19173,13 @@ RGINLINE u32 rg_gui_tree_virtual_multi_internal(RgGuiContext* ctx, RgGuiTreeStat
 		}
 
 		if (cursor >= 0 &&
-		    (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_LEFT) ||
-		     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RIGHT)))
+		    (rg_input_is_key_pressed(ctx->input, RG_KEY_LEFT) ||
+		     rg_input_is_key_pressed(ctx->input, RG_KEY_RIGHT)))
 		{
 			RgGuiTreeItem focus_item = {0};
 			if (get_item(user, (u32)cursor, &focus_item) && focus_item.open)
 			{
-				if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RIGHT))
+				if (rg_input_is_key_pressed(ctx->input, RG_KEY_RIGHT))
 				{
 					if (!(*focus_item.open))
 					{
@@ -19195,9 +19195,9 @@ RGINLINE u32 rg_gui_tree_virtual_multi_internal(RgGuiContext* ctx, RgGuiTreeStat
 			}
 		}
 
-		if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RETURN) ||
-		    rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_KP_ENTER) ||
-		    rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_SPACE))
+		if (rg_input_is_key_pressed(ctx->input, RG_KEY_RETURN) ||
+		    rg_input_is_key_pressed(ctx->input, RG_KEY_KP_ENTER) ||
+		    rg_input_is_key_pressed(ctx->input, RG_KEY_SPACE))
 		{
 			if (cursor < 0 && row_count > 0u)
 			{
@@ -19365,9 +19365,9 @@ RGINLINE int rg_gui_checkbox_internal(RgGuiContext* ctx, const char* label, int*
 	}
 
 	if (focused &&
-	    (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RETURN) ||
-	     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_KP_ENTER) ||
-	     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_SPACE)))
+	    (rg_input_is_key_pressed(ctx->input, RG_KEY_RETURN) ||
+	     rg_input_is_key_pressed(ctx->input, RG_KEY_KP_ENTER) ||
+	     rg_input_is_key_pressed(ctx->input, RG_KEY_SPACE)))
 	{
 		*value = !(*value);
 		changed = 1;
@@ -19454,9 +19454,9 @@ RGINLINE int rg_gui_radio_internal(RgGuiContext* ctx, const char* label, int* va
 	}
 
 	if (focused &&
-	    (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RETURN) ||
-	     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_KP_ENTER) ||
-	     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_SPACE)))
+	    (rg_input_is_key_pressed(ctx->input, RG_KEY_RETURN) ||
+	     rg_input_is_key_pressed(ctx->input, RG_KEY_KP_ENTER) ||
+	     rg_input_is_key_pressed(ctx->input, RG_KEY_SPACE)))
 	{
 		if (!selected)
 		{
@@ -20130,11 +20130,11 @@ RGINLINE int rg_gui_text_area(RgGuiContext* ctx, RgGuiTextAreaState* area, char*
 		changed |= rg_gui_text_edit_process_ex(ctx, ctx->text_edit_state, NULL, 0, 1, 0u);
 
 		if (!ctx->input_events &&
-		    (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_UP) ||
-		     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_DOWN)))
+		    (rg_input_is_key_pressed(ctx->input, RG_KEY_UP) ||
+		     rg_input_is_key_pressed(ctx->input, RG_KEY_DOWN)))
 		{
 			int selecting = rg_gui_input_has_shift(ctx->input) ? 1 : 0;
-			int direction = rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_UP) ? -1 : 1;
+			int direction = rg_input_is_key_pressed(ctx->input, RG_KEY_UP) ? -1 : 1;
 			u32 move_line_count =
 			    rg_gui_text_area_ensure_layout(ctx, &layout, buffer, ctx->text_edit_state->length,
 			                                   ctx->text_edit_state->content_version, wrap_width);
@@ -20449,9 +20449,9 @@ RGINLINE int rg_gui_keybind_internal(RgGuiContext* ctx, const char* label, RgGui
 	}
 
 	if (focused &&
-	    (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RETURN) ||
-	     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_KP_ENTER) ||
-	     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_SPACE)))
+	    (rg_input_is_key_pressed(ctx->input, RG_KEY_RETURN) ||
+	     rg_input_is_key_pressed(ctx->input, RG_KEY_KP_ENTER) ||
+	     rg_input_is_key_pressed(ctx->input, RG_KEY_SPACE)))
 	{
 		ctx->active_id = id;
 		capturing = 1;
@@ -20464,17 +20464,17 @@ RGINLINE int rg_gui_keybind_internal(RgGuiContext* ctx, const char* label, RgGui
 
 	if (capturing && ctx->input)
 	{
-		if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_ESCAPE))
+		if (rg_input_is_key_pressed(ctx->input, RG_KEY_ESCAPE))
 		{
 			ctx->active_id = 0u;
 			capturing = 0;
 		}
-		else if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_BACKSPACE) ||
-		         rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_DELETE))
+		else if (rg_input_is_key_pressed(ctx->input, RG_KEY_BACKSPACE) ||
+		         rg_input_is_key_pressed(ctx->input, RG_KEY_DELETE))
 		{
-			if (shortcut->key != SDL_SCANCODE_UNKNOWN || shortcut->mods != 0u)
+			if (shortcut->key != RG_KEY_UNKNOWN || shortcut->mods != 0u)
 			{
-				shortcut->key = SDL_SCANCODE_UNKNOWN;
+				shortcut->key = RG_KEY_UNKNOWN;
 				shortcut->mods = 0u;
 				changed = 1;
 			}
@@ -20483,8 +20483,8 @@ RGINLINE int rg_gui_keybind_internal(RgGuiContext* ctx, const char* label, RgGui
 		}
 		else
 		{
-			SDL_Scancode pressed = rg_gui_find_pressed_scancode(ctx->input);
-			if (pressed != SDL_SCANCODE_UNKNOWN)
+			RgKey pressed = rg_gui_find_pressed_scancode(ctx->input);
+			if (pressed != RG_KEY_UNKNOWN)
 			{
 				u32 mods = rg_gui_shortcut_mods_from_input(ctx->input);
 				if (shortcut->key != pressed || shortcut->mods != mods)
@@ -22279,12 +22279,12 @@ RGINLINE int rg_gui_slider_range_float_internal(RgGuiContext* ctx, const char* l
 	if (enabled && ctx->active_id != min_id && ctx->focus_id == min_id && range > 0.0f)
 	{
 		f32 step = range * 0.01f;
-		if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT) ||
-		    rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP))
+		if (rg_input_is_key_down(ctx->input, RG_KEY_LEFT) ||
+		    rg_input_is_key_down(ctx->input, RG_KEY_UP))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT)
-			                       ? SDL_SCANCODE_LEFT
-			                       : SDL_SCANCODE_UP;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_LEFT)
+			                       ? RG_KEY_LEFT
+			                       : RG_KEY_UP;
 			int repeats = rg_gui_key_repeat(ctx, min_id, key);
 			if (repeats > 0)
 			{
@@ -22298,12 +22298,12 @@ RGINLINE int rg_gui_slider_range_float_internal(RgGuiContext* ctx, const char* l
 				}
 			}
 		}
-		else if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT) ||
-		         rg_input_is_key_down(ctx->input, SDL_SCANCODE_DOWN))
+		else if (rg_input_is_key_down(ctx->input, RG_KEY_RIGHT) ||
+		         rg_input_is_key_down(ctx->input, RG_KEY_DOWN))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT)
-			                       ? SDL_SCANCODE_RIGHT
-			                       : SDL_SCANCODE_DOWN;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_RIGHT)
+			                       ? RG_KEY_RIGHT
+			                       : RG_KEY_DOWN;
 			int repeats = rg_gui_key_repeat(ctx, min_id, key);
 			if (repeats > 0)
 			{
@@ -22322,12 +22322,12 @@ RGINLINE int rg_gui_slider_range_float_internal(RgGuiContext* ctx, const char* l
 	if (enabled && ctx->active_id != max_id && ctx->focus_id == max_id && range > 0.0f)
 	{
 		f32 step = range * 0.01f;
-		if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT) ||
-		    rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP))
+		if (rg_input_is_key_down(ctx->input, RG_KEY_LEFT) ||
+		    rg_input_is_key_down(ctx->input, RG_KEY_UP))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT)
-			                       ? SDL_SCANCODE_LEFT
-			                       : SDL_SCANCODE_UP;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_LEFT)
+			                       ? RG_KEY_LEFT
+			                       : RG_KEY_UP;
 			int repeats = rg_gui_key_repeat(ctx, max_id, key);
 			if (repeats > 0)
 			{
@@ -22341,12 +22341,12 @@ RGINLINE int rg_gui_slider_range_float_internal(RgGuiContext* ctx, const char* l
 				}
 			}
 		}
-		else if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT) ||
-		         rg_input_is_key_down(ctx->input, SDL_SCANCODE_DOWN))
+		else if (rg_input_is_key_down(ctx->input, RG_KEY_RIGHT) ||
+		         rg_input_is_key_down(ctx->input, RG_KEY_DOWN))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT)
-			                       ? SDL_SCANCODE_RIGHT
-			                       : SDL_SCANCODE_DOWN;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_RIGHT)
+			                       ? RG_KEY_RIGHT
+			                       : RG_KEY_DOWN;
 			int repeats = rg_gui_key_repeat(ctx, max_id, key);
 			if (repeats > 0)
 			{
@@ -22730,12 +22730,12 @@ RGINLINE int rg_gui_slider_range_double_internal(RgGuiContext* ctx, const char* 
 	if (enabled && ctx->active_id != min_id && ctx->focus_id == min_id && range > 0.0)
 	{
 		f64 step = range * 0.01;
-		if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT) ||
-		    rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP))
+		if (rg_input_is_key_down(ctx->input, RG_KEY_LEFT) ||
+		    rg_input_is_key_down(ctx->input, RG_KEY_UP))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT)
-			                       ? SDL_SCANCODE_LEFT
-			                       : SDL_SCANCODE_UP;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_LEFT)
+			                       ? RG_KEY_LEFT
+			                       : RG_KEY_UP;
 			int repeats = rg_gui_key_repeat(ctx, min_id, key);
 			if (repeats > 0)
 			{
@@ -22749,12 +22749,12 @@ RGINLINE int rg_gui_slider_range_double_internal(RgGuiContext* ctx, const char* 
 				}
 			}
 		}
-		else if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT) ||
-		         rg_input_is_key_down(ctx->input, SDL_SCANCODE_DOWN))
+		else if (rg_input_is_key_down(ctx->input, RG_KEY_RIGHT) ||
+		         rg_input_is_key_down(ctx->input, RG_KEY_DOWN))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT)
-			                       ? SDL_SCANCODE_RIGHT
-			                       : SDL_SCANCODE_DOWN;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_RIGHT)
+			                       ? RG_KEY_RIGHT
+			                       : RG_KEY_DOWN;
 			int repeats = rg_gui_key_repeat(ctx, min_id, key);
 			if (repeats > 0)
 			{
@@ -22773,12 +22773,12 @@ RGINLINE int rg_gui_slider_range_double_internal(RgGuiContext* ctx, const char* 
 	if (enabled && ctx->active_id != max_id && ctx->focus_id == max_id && range > 0.0)
 	{
 		f64 step = range * 0.01;
-		if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT) ||
-		    rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP))
+		if (rg_input_is_key_down(ctx->input, RG_KEY_LEFT) ||
+		    rg_input_is_key_down(ctx->input, RG_KEY_UP))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT)
-			                       ? SDL_SCANCODE_LEFT
-			                       : SDL_SCANCODE_UP;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_LEFT)
+			                       ? RG_KEY_LEFT
+			                       : RG_KEY_UP;
 			int repeats = rg_gui_key_repeat(ctx, max_id, key);
 			if (repeats > 0)
 			{
@@ -22792,12 +22792,12 @@ RGINLINE int rg_gui_slider_range_double_internal(RgGuiContext* ctx, const char* 
 				}
 			}
 		}
-		else if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT) ||
-		         rg_input_is_key_down(ctx->input, SDL_SCANCODE_DOWN))
+		else if (rg_input_is_key_down(ctx->input, RG_KEY_RIGHT) ||
+		         rg_input_is_key_down(ctx->input, RG_KEY_DOWN))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT)
-			                       ? SDL_SCANCODE_RIGHT
-			                       : SDL_SCANCODE_DOWN;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_RIGHT)
+			                       ? RG_KEY_RIGHT
+			                       : RG_KEY_DOWN;
 			int repeats = rg_gui_key_repeat(ctx, max_id, key);
 			if (repeats > 0)
 			{
@@ -23183,12 +23183,12 @@ RGINLINE int rg_gui_slider_range_int_internal(RgGuiContext* ctx, const char* lab
 
 	if (enabled && ctx->active_id != min_id && ctx->focus_id == min_id && range != 0)
 	{
-		if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT) ||
-		    rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP))
+		if (rg_input_is_key_down(ctx->input, RG_KEY_LEFT) ||
+		    rg_input_is_key_down(ctx->input, RG_KEY_UP))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT)
-			                       ? SDL_SCANCODE_LEFT
-			                       : SDL_SCANCODE_UP;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_LEFT)
+			                       ? RG_KEY_LEFT
+			                       : RG_KEY_UP;
 			int repeats = rg_gui_key_repeat(ctx, min_id, key);
 			if (repeats > 0)
 			{
@@ -23203,12 +23203,12 @@ RGINLINE int rg_gui_slider_range_int_internal(RgGuiContext* ctx, const char* lab
 				}
 			}
 		}
-		else if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT) ||
-		         rg_input_is_key_down(ctx->input, SDL_SCANCODE_DOWN))
+		else if (rg_input_is_key_down(ctx->input, RG_KEY_RIGHT) ||
+		         rg_input_is_key_down(ctx->input, RG_KEY_DOWN))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT)
-			                       ? SDL_SCANCODE_RIGHT
-			                       : SDL_SCANCODE_DOWN;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_RIGHT)
+			                       ? RG_KEY_RIGHT
+			                       : RG_KEY_DOWN;
 			int repeats = rg_gui_key_repeat(ctx, min_id, key);
 			if (repeats > 0)
 			{
@@ -23227,12 +23227,12 @@ RGINLINE int rg_gui_slider_range_int_internal(RgGuiContext* ctx, const char* lab
 
 	if (enabled && ctx->active_id != max_id && ctx->focus_id == max_id && range != 0)
 	{
-		if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT) ||
-		    rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP))
+		if (rg_input_is_key_down(ctx->input, RG_KEY_LEFT) ||
+		    rg_input_is_key_down(ctx->input, RG_KEY_UP))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT)
-			                       ? SDL_SCANCODE_LEFT
-			                       : SDL_SCANCODE_UP;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_LEFT)
+			                       ? RG_KEY_LEFT
+			                       : RG_KEY_UP;
 			int repeats = rg_gui_key_repeat(ctx, max_id, key);
 			if (repeats > 0)
 			{
@@ -23247,12 +23247,12 @@ RGINLINE int rg_gui_slider_range_int_internal(RgGuiContext* ctx, const char* lab
 				}
 			}
 		}
-		else if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT) ||
-		         rg_input_is_key_down(ctx->input, SDL_SCANCODE_DOWN))
+		else if (rg_input_is_key_down(ctx->input, RG_KEY_RIGHT) ||
+		         rg_input_is_key_down(ctx->input, RG_KEY_DOWN))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT)
-			                       ? SDL_SCANCODE_RIGHT
-			                       : SDL_SCANCODE_DOWN;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_RIGHT)
+			                       ? RG_KEY_RIGHT
+			                       : RG_KEY_DOWN;
 			int repeats = rg_gui_key_repeat(ctx, max_id, key);
 			if (repeats > 0)
 			{
@@ -23536,12 +23536,12 @@ RGINLINE int rg_gui_slider_int_internal(RgGuiContext* ctx, const char* label, in
 			{
 				step = 1;
 			}
-			if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT) ||
-			    rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP))
+			if (rg_input_is_key_down(ctx->input, RG_KEY_LEFT) ||
+			    rg_input_is_key_down(ctx->input, RG_KEY_UP))
 			{
-				SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT)
-				                       ? SDL_SCANCODE_LEFT
-				                       : SDL_SCANCODE_UP;
+				RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_LEFT)
+				                       ? RG_KEY_LEFT
+				                       : RG_KEY_UP;
 				int repeats = rg_gui_key_repeat(ctx, id, key);
 				if (repeats > 0)
 				{
@@ -23554,12 +23554,12 @@ RGINLINE int rg_gui_slider_int_internal(RgGuiContext* ctx, const char* label, in
 					}
 				}
 			}
-			else if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT) ||
-			         rg_input_is_key_down(ctx->input, SDL_SCANCODE_DOWN))
+			else if (rg_input_is_key_down(ctx->input, RG_KEY_RIGHT) ||
+			         rg_input_is_key_down(ctx->input, RG_KEY_DOWN))
 			{
-				SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT)
-				                       ? SDL_SCANCODE_RIGHT
-				                       : SDL_SCANCODE_DOWN;
+				RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_RIGHT)
+				                       ? RG_KEY_RIGHT
+				                       : RG_KEY_DOWN;
 				int repeats = rg_gui_key_repeat(ctx, id, key);
 				if (repeats > 0)
 				{
@@ -23745,12 +23745,12 @@ RGINLINE int rg_gui_slider_float_internal(RgGuiContext* ctx, const char* label, 
 		if (range > 0.0f)
 		{
 			f32 step = range * 0.01f;
-			if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT) ||
-			    rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP))
+			if (rg_input_is_key_down(ctx->input, RG_KEY_LEFT) ||
+			    rg_input_is_key_down(ctx->input, RG_KEY_UP))
 			{
-				SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT)
-				                       ? SDL_SCANCODE_LEFT
-				                       : SDL_SCANCODE_UP;
+				RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_LEFT)
+				                       ? RG_KEY_LEFT
+				                       : RG_KEY_UP;
 				int repeats = rg_gui_key_repeat(ctx, id, key);
 				if (repeats > 0)
 				{
@@ -23764,12 +23764,12 @@ RGINLINE int rg_gui_slider_float_internal(RgGuiContext* ctx, const char* label, 
 					}
 				}
 			}
-			else if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT) ||
-			         rg_input_is_key_down(ctx->input, SDL_SCANCODE_DOWN))
+			else if (rg_input_is_key_down(ctx->input, RG_KEY_RIGHT) ||
+			         rg_input_is_key_down(ctx->input, RG_KEY_DOWN))
 			{
-				SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT)
-				                       ? SDL_SCANCODE_RIGHT
-				                       : SDL_SCANCODE_DOWN;
+				RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_RIGHT)
+				                       ? RG_KEY_RIGHT
+				                       : RG_KEY_DOWN;
 				int repeats = rg_gui_key_repeat(ctx, id, key);
 				if (repeats > 0)
 				{
@@ -24094,12 +24094,12 @@ RGINLINE int rg_gui_slider_double_internal(RgGuiContext* ctx, const char* label,
 		if (range > 0.0)
 		{
 			f64 step = range * 0.01;
-			if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT) ||
-			    rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP))
+			if (rg_input_is_key_down(ctx->input, RG_KEY_LEFT) ||
+			    rg_input_is_key_down(ctx->input, RG_KEY_UP))
 			{
-				SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT)
-				                       ? SDL_SCANCODE_LEFT
-				                       : SDL_SCANCODE_UP;
+				RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_LEFT)
+				                       ? RG_KEY_LEFT
+				                       : RG_KEY_UP;
 				int repeats = rg_gui_key_repeat(ctx, id, key);
 				if (repeats > 0)
 				{
@@ -24113,12 +24113,12 @@ RGINLINE int rg_gui_slider_double_internal(RgGuiContext* ctx, const char* label,
 					}
 				}
 			}
-			else if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT) ||
-			         rg_input_is_key_down(ctx->input, SDL_SCANCODE_DOWN))
+			else if (rg_input_is_key_down(ctx->input, RG_KEY_RIGHT) ||
+			         rg_input_is_key_down(ctx->input, RG_KEY_DOWN))
 			{
-				SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT)
-				                       ? SDL_SCANCODE_RIGHT
-				                       : SDL_SCANCODE_DOWN;
+				RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_RIGHT)
+				                       ? RG_KEY_RIGHT
+				                       : RG_KEY_DOWN;
 				int repeats = rg_gui_key_repeat(ctx, id, key);
 				if (repeats > 0)
 				{
@@ -24372,12 +24372,12 @@ RGINLINE int rg_gui_stepper_float_internal(RgGuiContext* ctx, const char* label,
 
 	if (enabled && !input_active && (ctx->focus_id == id || ctx->focus_id == input_id))
 	{
-		if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT) ||
-		    rg_input_is_key_down(ctx->input, SDL_SCANCODE_DOWN))
+		if (rg_input_is_key_down(ctx->input, RG_KEY_LEFT) ||
+		    rg_input_is_key_down(ctx->input, RG_KEY_DOWN))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT)
-			                       ? SDL_SCANCODE_LEFT
-			                       : SDL_SCANCODE_DOWN;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_LEFT)
+			                       ? RG_KEY_LEFT
+			                       : RG_KEY_DOWN;
 			int repeats = rg_gui_key_repeat(ctx, id, key);
 			if (repeats > 0)
 			{
@@ -24391,12 +24391,12 @@ RGINLINE int rg_gui_stepper_float_internal(RgGuiContext* ctx, const char* label,
 				}
 			}
 		}
-		else if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT) ||
-		         rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP))
+		else if (rg_input_is_key_down(ctx->input, RG_KEY_RIGHT) ||
+		         rg_input_is_key_down(ctx->input, RG_KEY_UP))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT)
-			                       ? SDL_SCANCODE_RIGHT
-			                       : SDL_SCANCODE_UP;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_RIGHT)
+			                       ? RG_KEY_RIGHT
+			                       : RG_KEY_UP;
 			int repeats = rg_gui_key_repeat(ctx, id, key);
 			if (repeats > 0)
 			{
@@ -24654,12 +24654,12 @@ RGINLINE int rg_gui_stepper_int_internal(RgGuiContext* ctx, const char* label, i
 
 	if (enabled && !input_active && (ctx->focus_id == id || ctx->focus_id == input_id))
 	{
-		if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT) ||
-		    rg_input_is_key_down(ctx->input, SDL_SCANCODE_DOWN))
+		if (rg_input_is_key_down(ctx->input, RG_KEY_LEFT) ||
+		    rg_input_is_key_down(ctx->input, RG_KEY_DOWN))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT)
-			                       ? SDL_SCANCODE_LEFT
-			                       : SDL_SCANCODE_DOWN;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_LEFT)
+			                       ? RG_KEY_LEFT
+			                       : RG_KEY_DOWN;
 			int repeats = rg_gui_key_repeat(ctx, id, key);
 			if (repeats > 0)
 			{
@@ -24672,12 +24672,12 @@ RGINLINE int rg_gui_stepper_int_internal(RgGuiContext* ctx, const char* label, i
 				}
 			}
 		}
-		else if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT) ||
-		         rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP))
+		else if (rg_input_is_key_down(ctx->input, RG_KEY_RIGHT) ||
+		         rg_input_is_key_down(ctx->input, RG_KEY_UP))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT)
-			                       ? SDL_SCANCODE_RIGHT
-			                       : SDL_SCANCODE_UP;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_RIGHT)
+			                       ? RG_KEY_RIGHT
+			                       : RG_KEY_UP;
 			int repeats = rg_gui_key_repeat(ctx, id, key);
 			if (repeats > 0)
 			{
@@ -25808,8 +25808,8 @@ RGINLINE int rg_gui_curve_editor(RgGuiContext* ctx, const char* label, rg_vec2* 
 
 	if (focused && selected && *selected >= 0 && !(flags & RG_GUI_CURVE_NO_REMOVE) &&
 	    ctx->input &&
-	    (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_DELETE) ||
-	     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_BACKSPACE)))
+	    (rg_input_is_key_pressed(ctx->input, RG_KEY_DELETE) ||
+	     rg_input_is_key_pressed(ctx->input, RG_KEY_BACKSPACE)))
 	{
 		int remove_index = *selected;
 		if (remove_index >= 0 && (u32)remove_index < count)
@@ -26204,7 +26204,7 @@ RGINLINE int rg_gui_gradient_editor(RgGuiContext* ctx, const char* label, RgGuiG
 	}
 
 	if (focused && selected && *selected >= 0 && !(flags & RG_GUI_GRADIENT_NO_REMOVE) &&
-	    ctx->input && (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_DELETE) || rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_BACKSPACE)) &&
+	    ctx->input && (rg_input_is_key_pressed(ctx->input, RG_KEY_DELETE) || rg_input_is_key_pressed(ctx->input, RG_KEY_BACKSPACE)) &&
 	    count > 2u)
 	{
 		int remove_index = *selected;
@@ -29664,19 +29664,19 @@ RGINLINE int rg_gui_tabs(RgGuiContext* ctx, const char* const* labels, u32 count
 
 	if (focused && count > 0u)
 	{
-		if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT) ||
-		    rg_input_is_key_down(ctx->input, SDL_SCANCODE_RIGHT))
+		if (rg_input_is_key_down(ctx->input, RG_KEY_LEFT) ||
+		    rg_input_is_key_down(ctx->input, RG_KEY_RIGHT))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_LEFT)
-			                       ? SDL_SCANCODE_LEFT
-			                       : SDL_SCANCODE_RIGHT;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_LEFT)
+			                       ? RG_KEY_LEFT
+			                       : RG_KEY_RIGHT;
 			int repeats = rg_gui_key_repeat(ctx, id, key);
 			if (repeats > 0)
 			{
 				u32 move = (u32)repeats;
 				if (move >= count) move %= count;
 				u32 next = active_index;
-				if (key == SDL_SCANCODE_LEFT)
+				if (key == RG_KEY_LEFT)
 				{
 					next = next >= move ? next - move : count - (move - next);
 				}
@@ -31525,7 +31525,7 @@ RGINLINE int rg_gui_menu_popup_icons_ex(RgGuiContext* ctx, const char* const* it
 	int enabled = !rg_gui_is_disabled(ctx);
 
 	int open_state = *open ? 1 : 0;
-	if (enabled && ctx->input && rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_ESCAPE))
+	if (enabled && ctx->input && rg_input_is_key_pressed(ctx->input, RG_KEY_ESCAPE))
 	{
 		open_state = 0;
 	}
@@ -31758,8 +31758,8 @@ RGINLINE int rg_gui_menu_popup_icons_ex(RgGuiContext* ctx, const char* const* it
 			}
 		}
 
-		if (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RETURN) ||
-		    rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_KP_ENTER))
+		if (rg_input_is_key_pressed(ctx->input, RG_KEY_RETURN) ||
+		    rg_input_is_key_pressed(ctx->input, RG_KEY_KP_ENTER))
 		{
 			if (sel >= 0 && count > 0u)
 			{
@@ -33812,14 +33812,14 @@ RGINLINE int rg_gui_dropdown(RgGuiContext* ctx, const char* const* items, u32 co
 	}
 
 	if (focused &&
-	    (rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_RETURN) ||
-	     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_KP_ENTER) ||
-	     rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_SPACE)))
+	    (rg_input_is_key_pressed(ctx->input, RG_KEY_RETURN) ||
+	     rg_input_is_key_pressed(ctx->input, RG_KEY_KP_ENTER) ||
+	     rg_input_is_key_pressed(ctx->input, RG_KEY_SPACE)))
 	{
 		open_state = !open_state;
 	}
 
-	if (focused && rg_input_is_key_pressed(ctx->input, SDL_SCANCODE_ESCAPE))
+	if (focused && rg_input_is_key_pressed(ctx->input, RG_KEY_ESCAPE))
 	{
 		open_state = 0;
 	}
@@ -33850,12 +33850,12 @@ RGINLINE int rg_gui_dropdown(RgGuiContext* ctx, const char* const* items, u32 co
 	int changed = 0;
 	if (focused && count > 0u)
 	{
-		if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP) ||
-		    rg_input_is_key_down(ctx->input, SDL_SCANCODE_DOWN))
+		if (rg_input_is_key_down(ctx->input, RG_KEY_UP) ||
+		    rg_input_is_key_down(ctx->input, RG_KEY_DOWN))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_UP)
-			                       ? SDL_SCANCODE_UP
-			                       : SDL_SCANCODE_DOWN;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_UP)
+			                       ? RG_KEY_UP
+			                       : RG_KEY_DOWN;
 			int repeats = rg_gui_key_repeat(ctx, id, key);
 			if (repeats > 0)
 			{
@@ -33864,18 +33864,18 @@ RGINLINE int rg_gui_dropdown(RgGuiContext* ctx, const char* const* items, u32 co
 					sel = 0;
 				}
 				sel = rg_gui_int_step_clamped(sel, 1, repeats,
-				                              key == SDL_SCANCODE_UP ? -1 : 1,
+				                              key == RG_KEY_UP ? -1 : 1,
 				                              0, count_int - 1);
 				changed = 1;
 			}
 		}
 
-		if (rg_input_is_key_down(ctx->input, SDL_SCANCODE_PAGEUP) ||
-		    rg_input_is_key_down(ctx->input, SDL_SCANCODE_PAGEDOWN))
+		if (rg_input_is_key_down(ctx->input, RG_KEY_PAGEUP) ||
+		    rg_input_is_key_down(ctx->input, RG_KEY_PAGEDOWN))
 		{
-			SDL_Scancode key = rg_input_is_key_down(ctx->input, SDL_SCANCODE_PAGEUP)
-			                       ? SDL_SCANCODE_PAGEUP
-			                       : SDL_SCANCODE_PAGEDOWN;
+			RgKey key = rg_input_is_key_down(ctx->input, RG_KEY_PAGEUP)
+			                       ? RG_KEY_PAGEUP
+			                       : RG_KEY_PAGEDOWN;
 			int repeats = rg_gui_key_repeat(ctx, id, key);
 			if (repeats > 0)
 			{
@@ -33884,7 +33884,7 @@ RGINLINE int rg_gui_dropdown(RgGuiContext* ctx, const char* const* items, u32 co
 					sel = 0;
 				}
 				sel = rg_gui_int_step_clamped(sel, (i64)page_step, repeats,
-				                              key == SDL_SCANCODE_PAGEUP ? -1 : 1,
+				                              key == RG_KEY_PAGEUP ? -1 : 1,
 				                              0, count_int - 1);
 				changed = 1;
 			}
