@@ -20,6 +20,7 @@
 #include "test_gui_text_capture.h"
 #include "test_gui_text_area_cache.h"
 #include "test_gui_viewport_storage.h"
+#include "test_gui_text_provider.h"
 
 static int nearly_equal(f32 a, f32 b)
 {
@@ -1887,7 +1888,7 @@ int main(void)
 	    !test_viewport_and_input_router(&gui) || !test_viewport_storage(&font) ||
 	    !test_incremental_text_wrapping() || !test_text_area_layout_edits(&gui) ||
 	    !test_text_lookup() || !test_text_lifetimes(&font) || !test_text_mouse_capture(&font) ||
-	    !test_text_area_cache())
+	    !test_text_area_cache() || !test_text_provider())
 	{
 		free(memory);
 		return 1;

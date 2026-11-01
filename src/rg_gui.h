@@ -451,6 +451,46 @@ typedef struct RgGuiTextLookup
 #endif
 } RgGuiTextLookup;
 
+/**
+ * Text provider: the one layout primitive behind measuring, wrapping, caret placement and
+ * renderer quad building. `layout` walks `text` at `scale`, calls `emit` for every glyph in
+ * source (cluster) order with positions relative to the text origin, and returns the widest
+ * line in pixels. `emit` may be NULL to measure only; it returns 0 to stop early. `scale` is
+ * style.text_height / line_height(user, 1.0f). NULL on the init descriptors keeps the
+ * bitmap-font path over the font and lookup, the previous behavior; rg_gui_text_bitmap_layout
+ * is that path written as a provider. A provider with an atlas that changes reports it
+ * through atlas_generation; the renderer drops its glyph cache when the value changes.
+ */
+typedef struct RgGuiTextGlyph
+{
+	f32 x, y, w, h;      /* quad in pixels, relative to the text origin */
+	u16 u0, v0, u1, v1;  /* atlas texels */
+	f32 pen_x;           /* pen position of this glyph on its line, kerning applied */
+	f32 advance;         /* pen advance after this glyph */
+	u32 cluster;         /* first source byte of the glyph's cluster */
+	u32 line;            /* zero-based hard line index */
+	u32 ink;             /* nonzero when the quad covers texels */
+} RgGuiTextGlyph;
+
+typedef int (*RgGuiTextEmitFn)(void* user, const RgGuiTextGlyph* glyph);
+
+typedef struct RgGuiTextProvider
+{
+	void* user;
+	f32 (*layout)(void* user, const char* text, size_t length, f32 scale, RgGuiTextEmitFn emit, void* emit_user);
+	f32 (*line_height)(void* user, f32 scale);
+	u32 (*atlas_generation)(void* user); /* Optional; NULL means the atlas never changes. */
+	u32 atlas_width;
+	u32 atlas_height;
+} RgGuiTextProvider;
+
+/** State of the bitmap-font provider; the renderer owns one, the context builds one per call. */
+typedef struct RgGuiTextBitmapProvider
+{
+	const RgTextFont* font;
+	const RgGuiTextLookup* lookup; /* NULL or a table for another font: plain font search. */
+} RgGuiTextBitmapProvider;
+
 #if RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS > 0
 typedef char RgGuiTextLookupGlyphSlotsMustBePowerOfTwo[
     (RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS & (RG_GUI_TEXT_LOOKUP_GLYPH_SLOTS - 1u)) == 0u ? 1 : -1];
@@ -1773,6 +1813,7 @@ typedef struct RgGuiContext
 	RgGuiId input_events_submit_id;
 	RgGuiDiagnostics diagnostics;
 	const RgGuiTextLookup* text_lookup;
+	RgGuiTextProvider text_provider; /* Zero: bitmap text over font and text_lookup. */
 #if defined(RG_GUI_ENABLE_VIEWPORTS)
 	RgGuiViewportStorageCallback viewport_storage;
 	void* viewport_storage_user;
@@ -1814,6 +1855,9 @@ typedef struct RgGuiInitDesc
 	u32 menu_width_cache_size;
 	u32 tab_scroll_cache_size;
 	const RgGuiTextLookup* text_lookup; // Optional; ignored when its font differs from font.
+	/* Optional; copied by rg_gui_init. NULL selects the bitmap provider over font and
+	 * text_lookup. With a provider, font may be NULL. */
+	const RgGuiTextProvider* text_provider;
 	/* Nonzero keeps every pushed command in the draw list. By default end-of-frame
 	 * drops rectangles that lie under a later opaque rectangle and splits large
 	 * ones into their visible parts; see rg_gui_draw_list_cull_hidden. */
@@ -4158,13 +4202,134 @@ RGINLINE i32 rg_gui_text_find_kerning(const RgGuiContext* ctx, u32 left, u32 rig
 	return rg_text_find_kerning(font, left, right);
 }
 
-RGINLINE f32 rg_gui_text_base_scale(const RgGuiContext* ctx)
+/* The bitmap-font layout: codepoint glyphs, pair kerning, hard breaks at CR, LF and CRLF.
+ * Matches rg_text_measure and rg_text_build_quads for the same font. */
+RGINLINE f32 rg_gui_text_bitmap_layout(void* user, const char* text, size_t length, f32 scale,
+                                       RgGuiTextEmitFn emit, void* emit_user)
 {
-	if (!ctx || !ctx->font || ctx->font->metrics.line_height <= 0)
+	const RgGuiTextBitmapProvider* provider = (const RgGuiTextBitmapProvider*)user;
+	const RgTextFont* font = provider->font;
+	const RgGuiTextLookup* lookup = provider->lookup;
+	if (!font || !text || length == 0u || scale == 0.0f)
 	{
 		return 0.0f;
 	}
-	return ctx->style.text_height / (f32)ctx->font->metrics.line_height;
+
+	f32 max_width = 0.0f;
+	f32 line_width = 0.0f;
+	f32 line_y = 0.0f;
+	u32 line = 0u;
+	size_t offset = 0u;
+	const RgTextGlyph* previous = NULL;
+	while (offset < length)
+	{
+		size_t cluster = offset;
+		u32 cp = rg_text_decode_utf8(text, length, &offset);
+		if (cp == '\r' || cp == '\n')
+		{
+			if (cp == '\r' && offset < length && text[offset] == '\n') offset++;
+			if (line_width > max_width) max_width = line_width;
+			line_width = 0.0f;
+			line_y += (f32)font->metrics.line_height * scale;
+			line++;
+			previous = NULL;
+			continue;
+		}
+		const RgTextGlyph* glyph = lookup ? rg_gui_text_lookup_glyph(lookup, cp) : rg_text_find_glyph(font, cp);
+		if (!glyph)
+		{
+			previous = NULL;
+			continue;
+		}
+		if (previous)
+		{
+			i32 kerning = lookup ? rg_gui_text_lookup_kerning(lookup, previous->codepoint, glyph->codepoint)
+			                     : rg_text_find_kerning(font, previous->codepoint, glyph->codepoint);
+			line_width += (f32)kerning * scale;
+		}
+		if (emit)
+		{
+			RgGuiTextGlyph out;
+			out.x = line_width + (f32)glyph->x_offset * scale;
+			out.y = line_y + (f32)glyph->y_offset * scale;
+			out.w = (f32)glyph->w * scale;
+			out.h = (f32)glyph->h * scale;
+			out.u0 = (u16)glyph->x;
+			out.v0 = (u16)glyph->y;
+			out.u1 = (u16)(glyph->x + glyph->w);
+			out.v1 = (u16)(glyph->y + glyph->h);
+			out.pen_x = line_width;
+			out.advance = (f32)glyph->x_advance * scale;
+			out.cluster = (u32)cluster;
+			out.line = line;
+			out.ink = glyph->w > 0 && glyph->h > 0;
+			if (!emit(emit_user, &out))
+			{
+				break;
+			}
+		}
+		line_width += (f32)glyph->x_advance * scale;
+		previous = glyph;
+	}
+	return line_width > max_width ? line_width : max_width;
+}
+
+RGINLINE f32 rg_gui_text_bitmap_line_height(void* user, f32 scale)
+{
+	const RgGuiTextBitmapProvider* provider = (const RgGuiTextBitmapProvider*)user;
+	return provider->font ? (f32)provider->font->metrics.line_height * scale : 0.0f;
+}
+
+/** The default provider over a bitmap font; `lookup` is used only when built for `font`. */
+RGINLINE RgGuiTextProvider rg_gui_text_bitmap_provider_init(RgGuiTextBitmapProvider* storage, const RgTextFont* font,
+                                                            const RgGuiTextLookup* lookup)
+{
+	RgGuiTextProvider provider;
+	memset(&provider, 0, sizeof(provider));
+	storage->font = font;
+	storage->lookup = lookup && font && lookup->font == font ? lookup : NULL;
+	provider.user = storage;
+	provider.layout = rg_gui_text_bitmap_layout;
+	provider.line_height = rg_gui_text_bitmap_line_height;
+	provider.atlas_width = font ? font->metrics.atlas_width : 0u;
+	provider.atlas_height = font ? font->metrics.atlas_height : 0u;
+	return provider;
+}
+
+RGINLINE f32 rg_gui_text_base_scale(const RgGuiContext* ctx)
+{
+	if (!ctx)
+	{
+		return 0.0f;
+	}
+	f32 base = ctx->text_provider.line_height ? ctx->text_provider.line_height(ctx->text_provider.user, 1.0f)
+	           : ctx->font ? (f32)ctx->font->metrics.line_height : 0.0f;
+	return base > 0.0f ? ctx->style.text_height / base : 0.0f;
+}
+
+/** Nonzero when the context can measure text: a provider or a bitmap font. */
+RGINLINE int rg_gui_text_available(const RgGuiContext* ctx)
+{
+	return ctx && (ctx->text_provider.layout || ctx->font);
+}
+
+/** Lay out `text` through the context's provider, or the bitmap path over its font and lookup. */
+RGINLINE f32 rg_gui_text_layout(const RgGuiContext* ctx, const char* text, size_t length,
+                                RgGuiTextEmitFn emit, void* emit_user)
+{
+	if (!ctx || !text || length == 0u)
+	{
+		return 0.0f;
+	}
+	f32 scale = rg_gui_text_base_scale(ctx);
+	if (ctx->text_provider.layout)
+	{
+		return ctx->text_provider.layout(ctx->text_provider.user, text, length, scale, emit, emit_user);
+	}
+	RgGuiTextBitmapProvider bitmap;
+	bitmap.font = ctx->font;
+	bitmap.lookup = ctx->text_lookup && ctx->text_lookup->font == ctx->font ? ctx->text_lookup : NULL;
+	return rg_gui_text_bitmap_layout(&bitmap, text, length, scale, emit, emit_user);
 }
 
 RGINLINE u32 rg_gui_text_scale_bits(const RgGuiContext* ctx)
@@ -7836,7 +8001,7 @@ RGINLINE size_t rg_gui_text_edit_pick_cursor(const RgGuiContext* ctx, const char
 		return 0u;
 	}
 
-	if (ctx->font)
+	if (rg_gui_text_available(ctx))
 	{
 		size_t low = 0u;
 		size_t high = length;
@@ -8638,7 +8803,7 @@ RGINLINE size_t rg_gui_text_area_pick_column(const RgGuiContext* ctx, const char
 		return 0u;
 	}
 
-	if (ctx->font)
+	if (rg_gui_text_available(ctx))
 	{
 		size_t low = 0u;
 		size_t high = line_len;
@@ -8700,6 +8865,35 @@ RGINLINE size_t rg_gui_text_area_pick_column(const RgGuiContext* ctx, const char
 	return 0u;
 }
 
+typedef struct RgGuiTextWrapScan
+{
+	f32 wrap_width;
+	f32 line_width;     /* width after the latest glyph on its hard line */
+	f32 previous_lines; /* widest completed hard line */
+	u32 line;
+	u32 overflowed;
+	size_t overflow;    /* range-relative cluster byte of the first glyph that does not fit */
+} RgGuiTextWrapScan;
+
+RGINLINE int rg_gui_text_wrap_scan_emit(void* user, const RgGuiTextGlyph* glyph)
+{
+	RgGuiTextWrapScan* scan = (RgGuiTextWrapScan*)user;
+	if (glyph->line != scan->line)
+	{
+		if (scan->line_width > scan->previous_lines) scan->previous_lines = scan->line_width;
+		scan->line = glyph->line;
+	}
+	scan->line_width = glyph->pen_x + glyph->advance;
+	f32 width = scan->line_width > scan->previous_lines ? scan->line_width : scan->previous_lines;
+	if (width <= scan->wrap_width)
+	{
+		return 1;
+	}
+	scan->overflow = glyph->cluster;
+	scan->overflowed = 1u;
+	return 0;
+}
+
 RGINLINE size_t rg_gui_text_area_wrap_line_end(const RgGuiContext* ctx, const char* buffer,
                                                size_t start, size_t hard_end, f32 wrap_width)
 {
@@ -8708,76 +8902,36 @@ RGINLINE size_t rg_gui_text_area_wrap_line_end(const RgGuiContext* ctx, const ch
 		return start;
 	}
 
-	if (wrap_width <= 0.0f)
+	// Nothing fits in a non-positive or NaN width: one character still advances.
+	if (!(wrap_width > 0.0f))
 	{
 		return rg_gui_utf8_next_boundary(buffer, hard_end, start);
 	}
 
-	size_t best = start;
-	size_t last_space = start;
-	int has_space = 0;
-	f32 scale = rg_gui_text_base_scale(ctx);
-	f32 line_width = 0.0f;
-	f32 max_width = 0.0f;
-	const RgTextGlyph* previous = NULL;
-	size_t offset = start;
-	size_t candidate = start;
-	for (size_t i = start; i < hard_end; i = candidate)
+	RgGuiTextWrapScan scan;
+	memset(&scan, 0, sizeof(scan));
+	scan.wrap_width = wrap_width;
+	rg_gui_text_layout(ctx, buffer + start, hard_end - start, rg_gui_text_wrap_scan_emit, &scan);
+	if (!scan.overflowed)
+	{
+		return hard_end;
+	}
+
+	// The boundary before the first glyph that does not fit ends the widest fitting
+	// prefix. Break after the last blank at or before it when there is one.
+	size_t best = rg_gui_utf8_boundary_before_or_at(buffer, hard_end, start + scan.overflow);
+	for (size_t i = best; i > start; i--)
 	{
 		if (buffer[i] == ' ' || buffer[i] == '\t')
 		{
-			last_space = i;
-			has_space = 1;
+			return i + 1u;
 		}
-
-		candidate = rg_gui_utf8_next_boundary(buffer, hard_end, i);
-		// Accumulate the same operations as rg_text_measure without remeasuring
-		// each growing prefix. Decode up to the GUI boundary, including malformed
-		// byte sequences that produce more than one replacement glyph.
-		while (ctx->font && scale != 0.0f && offset < candidate)
-		{
-			u32 cp = rg_text_decode_utf8(buffer, candidate, &offset);
-			if (cp == '\r' || cp == '\n')
-			{
-				if (cp == '\r' && offset < candidate && buffer[offset] == '\n') offset++;
-				if (line_width > max_width) max_width = line_width;
-				line_width = 0.0f;
-				previous = NULL;
-				continue;
-			}
-			const RgTextGlyph* glyph = rg_gui_text_find_glyph(ctx, cp);
-			if (!glyph)
-			{
-				previous = NULL;
-				continue;
-			}
-			if (previous)
-			{
-				line_width += (f32)rg_gui_text_find_kerning(
-				    ctx, previous->codepoint, glyph->codepoint) * scale;
-			}
-			line_width += (f32)glyph->x_advance * scale;
-			previous = glyph;
-		}
-		f32 width = line_width > max_width ? line_width : max_width;
-		if (width <= wrap_width)
-		{
-			best = candidate;
-			continue;
-		}
-
-		if (has_space && last_space > start)
-		{
-			return last_space + 1u;
-		}
-		if (best > start)
-		{
-			return best;
-		}
-		return candidate;
 	}
-
-	return hard_end;
+	if (best > start)
+	{
+		return best;
+	}
+	return rg_gui_utf8_next_boundary(buffer, hard_end, start);
 }
 
 RGINLINE u32 rg_gui_text_area_build_visual_lines(const RgGuiContext* ctx,
@@ -8866,6 +9020,7 @@ typedef struct RgGuiTextAreaCacheKey
     const RgTextFont* font;
     const RgGuiTextLookup* lookup;
     const RgTextFont* lookup_font;
+    const void* provider_user;
     const RgTextGlyph* glyphs;
     const RgTextKerning* kernings;
     u32 glyph_count, kerning_count, fallback_codepoint, font_lookup_flags;
@@ -8919,6 +9074,7 @@ RGINLINE RgGuiTextAreaCacheKey rg_gui_text_area_cache_key(const RgGuiContext* ct
     key.font = ctx->font;
     key.lookup = ctx->text_lookup;
     key.lookup_font = ctx->text_lookup ? ctx->text_lookup->font : NULL;
+    key.provider_user = ctx->text_provider.user;
     if (ctx->font)
     {
         key.glyphs = ctx->font->glyphs;
@@ -9560,53 +9716,7 @@ RGINLINE int rg_gui_format_double(char* buffer, size_t buffer_size, f64 value, i
 
 RGINLINE f32 rg_gui_text_measure_prefix(const RgGuiContext* ctx, const char* text, size_t length)
 {
-	if (!ctx || !text || length == 0u)
-	{
-		return 0.0f;
-	}
-
-	f32 scale = rg_gui_text_base_scale(ctx);
-	const RgGuiTextLookup* lookup = ctx->text_lookup;
-	if (!lookup || lookup->font != ctx->font)
-	{
-		return rg_text_measure(ctx->font, text, length, scale).width;
-	}
-	if (!ctx->font || scale == 0.0f)
-	{
-		return 0.0f;
-	}
-
-	f32 max_width = 0.0f;
-	f32 line_width = 0.0f;
-	size_t offset = 0u;
-	const RgTextGlyph* previous = NULL;
-	while (offset < length)
-	{
-		u32 cp = rg_text_decode_utf8(text, length, &offset);
-		if (cp == '\r' || cp == '\n')
-		{
-			if (cp == '\r' && offset < length && text[offset] == '\n') offset++;
-			if (line_width > max_width) max_width = line_width;
-			line_width = 0.0f;
-			previous = NULL;
-			continue;
-		}
-		const RgTextGlyph* glyph = rg_gui_text_lookup_glyph(lookup, cp);
-		if (!glyph)
-		{
-			previous = NULL;
-			continue;
-		}
-		if (previous)
-		{
-			i32 kerning = rg_gui_text_lookup_kerning(lookup, previous->codepoint, glyph->codepoint);
-			line_width += (f32)kerning * scale;
-		}
-		line_width += (f32)glyph->x_advance * scale;
-		previous = glyph;
-	}
-	if (line_width > max_width) max_width = line_width;
-	return max_width;
+	return rg_gui_text_layout(ctx, text, length, NULL, NULL);
 }
 
 RGINLINE f32 rg_gui_text_measure_range(RgGuiContext* ctx, const char* text, size_t start, size_t end)
@@ -10084,7 +10194,7 @@ RGINLINE size_t rg_gui_text_end_for_width(RgGuiContext* ctx, const char* text, s
 		return start;
 	}
 
-	if (ctx->font)
+	if (rg_gui_text_available(ctx))
 	{
 		start = rg_gui_utf8_boundary_before_or_at(text, length, start);
 		f32 base = rg_gui_text_measure_prefix(ctx, text, start);
@@ -10214,7 +10324,7 @@ RGINLINE void rg_gui_text_edit_update_view(RgGuiContext* ctx, RgGuiTextEditState
 	f32 rel = cursor_width - start_width;
 	if (rel > available)
 	{
-		if (ctx->font)
+		if (rg_gui_text_available(ctx))
 		{
 			size_t low = 0u;
 			size_t high = cursor;
@@ -10340,9 +10450,20 @@ RGINLINE u32 rg_gui_next_pow2_u32(u32 value)
 
 RGINLINE int rg_gui_init_desc_resolve(const RgGuiInitDesc* desc, RgGuiInitDesc* out)
 {
-	if (!desc || !out || !desc->font || !desc->font->glyphs || desc->font->glyph_count == 0u ||
-	    desc->font->metrics.line_height <= 0 || desc->font->metrics.atlas_width == 0u ||
-	    desc->font->metrics.atlas_height == 0u)
+	if (!desc || !out)
+	{
+		return 0;
+	}
+	if (desc->text_provider)
+	{
+		if (!desc->text_provider->layout || !desc->text_provider->line_height)
+		{
+			return 0;
+		}
+	}
+	else if (!desc->font || !desc->font->glyphs || desc->font->glyph_count == 0u ||
+	         desc->font->metrics.line_height <= 0 || desc->font->metrics.atlas_width == 0u ||
+	         desc->font->metrics.atlas_height == 0u)
 	{
 		return 0;
 	}
@@ -10350,6 +10471,7 @@ RGINLINE int rg_gui_init_desc_resolve(const RgGuiInitDesc* desc, RgGuiInitDesc* 
 	memset(out, 0, sizeof(*out));
 	out->font = desc->font;
 	out->text_lookup = desc->text_lookup;
+	out->text_provider = desc->text_provider;
 	out->keep_hidden_draws = desc->keep_hidden_draws;
 	out->max_draw_cmds = desc->max_draw_cmds ? desc->max_draw_cmds : RG_GUI_MAX_DRAW_CMDS;
 	out->text_buffer_size = desc->text_buffer_size ? desc->text_buffer_size : RG_GUI_TEXT_BUFFER_SIZE;
@@ -10512,6 +10634,8 @@ RGINLINE int rg_gui_init(RgGuiContext* ctx, RgArena* arena, const RgGuiInitDesc*
 	ctx->text_buffer_used = 0u;
 	ctx->font = init.font;
 	ctx->text_lookup = init.text_lookup;
+	memset(&ctx->text_provider, 0, sizeof(ctx->text_provider));
+	if (init.text_provider) ctx->text_provider = *init.text_provider;
 	ctx->ime_callback = init.ime_callback;
 	ctx->ime_callback_user = init.ime_callback_user;
 	memset(&ctx->platform, 0, sizeof(ctx->platform));
@@ -10682,10 +10806,10 @@ RGINLINE int rg_gui_init(RgGuiContext* ctx, RgArena* arena, const RgGuiInitDesc*
 #endif
 
 	ctx->style = rg_gui_style_default();
-	RgTextSize reference_glyph = rg_text_measure(ctx->font, "M", 1u, rg_gui_text_base_scale(ctx));
-	if (reference_glyph.width > 0.0f)
+	f32 reference_width = rg_gui_text_measure_prefix(ctx, "M", 1u);
+	if (reference_width > 0.0f)
 	{
-		ctx->style.char_width = reference_glyph.width;
+		ctx->style.char_width = reference_width;
 	}
 	memset(ctx->arrow_icons, 0, sizeof(ctx->arrow_icons));
 	memset(&ctx->close_icon, 0, sizeof(ctx->close_icon));
@@ -20028,7 +20152,7 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 			f32 base = rg_gui_text_measure_prefix(ctx, render_buffer, display_start);
 			f32 cursor_x = text_pos.x +
 			               rg_gui_text_measure_prefix(ctx, render_buffer, render_cursor) - base;
-			if (ctx->font)
+			if (rg_gui_text_available(ctx))
 			{
 				if (preedit_length == 0u)
 				{

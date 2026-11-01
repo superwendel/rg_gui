@@ -56,6 +56,9 @@ typedef struct RgGuiRendererBaseInitDesc
 	const RgTextFont* font;
 	RgGuiRendererBaseLimits limits;
 	const RgGuiTextLookup* text_lookup;
+	/* Optional; copied. NULL selects the bitmap provider over font and text_lookup.
+	 * With a provider, font and text_lookup are unused and may be NULL. */
+	const RgGuiTextProvider* text_provider;
 } RgGuiRendererBaseInitDesc;
 
 /** Compact renderer-facing glyph record. RGBA occupies low-to-high bytes. */
@@ -220,6 +223,9 @@ typedef struct RgGuiRendererBaseContext
 	const i32* ascii_kerning;
 	/* Borrowed or arena-owned table backing the ASCII pointers above. */
 	const RgGuiTextLookup* lookup;
+	RgGuiTextProvider provider;
+	RgGuiTextBitmapProvider bitmap_provider;
+	u32 atlas_generation;
 	u32 run_count;
 	u32 hash_slot_mask;
 	size_t text_used;
@@ -377,9 +383,19 @@ RGINLINE int rg_gui_renderer_base_font_supported(const RgTextFont* font)
 	return 1;
 }
 
+RGINLINE int rg_gui_renderer_base_provider_supported(const RgGuiTextProvider* provider)
+{
+	return provider && provider->layout && provider->line_height &&
+	       provider->atlas_width != 0u && provider->atlas_height != 0u &&
+	       provider->atlas_width <= UINT16_MAX && provider->atlas_height <= UINT16_MAX;
+}
+
 static int rg_gui_renderer_base_init(RgGuiRendererBaseContext* ctx, RgArena* arena, const RgGuiRendererBaseInitDesc* desc)
 {
-	if (!ctx || !arena || !arena->memory || !desc || !rg_gui_renderer_base_font_supported(desc->font))
+	int use_bitmap = desc && !desc->text_provider;
+	if (!ctx || !arena || !arena->memory || !desc ||
+	    (use_bitmap ? !rg_gui_renderer_base_font_supported(desc->font)
+	                : !rg_gui_renderer_base_provider_supported(desc->text_provider)))
 	{
 		if (ctx) memset(ctx, 0, sizeof(*ctx));
 		return 0;
@@ -387,8 +403,8 @@ static int rg_gui_renderer_base_init(RgGuiRendererBaseContext* ctx, RgArena* are
 
 	size_t arena_used = arena->used;
 	RgGuiRendererBaseLimits limits = rg_gui_renderer_base_limits_resolve(&desc->limits);
-	const RgGuiTextLookup* lookup = desc->text_lookup;
-	int own_lookup = !lookup || lookup->font != desc->font;
+	const RgGuiTextLookup* lookup = use_bitmap ? desc->text_lookup : NULL;
+	int own_lookup = use_bitmap && (!lookup || lookup->font != desc->font);
 	if (rg_gui_renderer_base_memory_required_internal(&limits, own_lookup) == SIZE_MAX)
 	{
 		memset(ctx, 0, sizeof(*ctx));
@@ -422,10 +438,19 @@ static int rg_gui_renderer_base_init(RgGuiRendererBaseContext* ctx, RgArena* are
 	ctx->ascii_glyphs = lookup ? lookup->ascii_glyphs : NULL;
 	ctx->ascii_kerning = lookup ? lookup->ascii_kerning : NULL;
 	ctx->lookup = lookup;
+	if (use_bitmap)
+	{
+		ctx->provider = rg_gui_text_bitmap_provider_init(&ctx->bitmap_provider, desc->font, lookup);
+	}
+	else
+	{
+		ctx->provider = *desc->text_provider;
+	}
+	ctx->atlas_generation = ctx->provider.atlas_generation ? ctx->provider.atlas_generation(ctx->provider.user) : 0u;
 
 	if (!ctx->runs || !ctx->run_generations || !ctx->hash_slots ||
 	    !ctx->cache_text || !ctx->cache_quads ||
-	    !ctx->frame_instances || !ctx->frame_batches || !ctx->ascii_glyphs || !ctx->ascii_kerning)
+	    !ctx->frame_instances || !ctx->frame_batches || (use_bitmap && (!ctx->ascii_glyphs || !ctx->ascii_kerning)))
 	{
 		arena->used = arena_used;
 		memset(ctx, 0, sizeof(*ctx));
@@ -474,6 +499,16 @@ RGINLINE void rg_gui_renderer_base_clear_cache(RgGuiRendererBaseContext* ctx)
 	}
 }
 
+/** Nonzero once per change of the provider's atlas generation; cached quads are stale then. */
+RGINLINE int rg_gui_renderer_base_atlas_changed(RgGuiRendererBaseContext* ctx)
+{
+	if (!ctx->provider.atlas_generation) return 0;
+	u32 generation = ctx->provider.atlas_generation(ctx->provider.user);
+	if (generation == ctx->atlas_generation) return 0;
+	ctx->atlas_generation = generation;
+	return 1;
+}
+
 RGINLINE void rg_gui_renderer_base_begin_frame(RgGuiRendererBaseContext* ctx)
 {
 	if (!ctx || !ctx->initialized)
@@ -507,12 +542,11 @@ RGINLINE void rg_gui_renderer_base_begin_frame(RgGuiRendererBaseContext* ctx)
 	ctx->stats.frame_dropped_glyphs = 0u;
 	ctx->stats.frame_upload_bytes = 0u;
 	ctx->frame_index++;
+	if (rg_gui_renderer_base_atlas_changed(ctx))
+	{
+		rg_gui_renderer_base_clear_cache_internal(ctx, 1);
+	}
 	rg_gui_renderer_base_sync_cache_stats(ctx);
-}
-
-RGINLINE const RgTextGlyph* rg_gui_renderer_base_find_glyph(const RgGuiRendererBaseContext* ctx, u32 cp)
-{
-	return rg_gui_text_lookup_glyph(ctx->lookup, cp);
 }
 
 RGINLINE u32 rg_gui_renderer_base_u32_add_saturate(u32 left, u32 right)
@@ -525,31 +559,53 @@ RGINLINE u64 rg_gui_renderer_base_u64_add_saturate(u64 left, u64 right)
 	return right > UINT64_MAX - left ? UINT64_MAX : left + right;
 }
 
-RGINLINE i32 rg_gui_renderer_base_find_kerning(const RgGuiRendererBaseContext* ctx, u32 left, u32 right)
+RGINLINE void rg_gui_renderer_base_quad_from_glyph(RgGuiRendererBaseCachedQuad* quad, const RgGuiTextGlyph* glyph)
 {
-	return rg_gui_text_lookup_kerning(ctx->lookup, left, right);
+	quad->x = glyph->x;
+	quad->y = glyph->y;
+	quad->w = glyph->w;
+	quad->h = glyph->h;
+	quad->u0 = glyph->u0;
+	quad->v0 = glyph->v0;
+	quad->u1 = glyph->u1;
+	quad->v1 = glyph->v1;
 }
 
-RGINLINE u32 rg_gui_renderer_base_count_quads(const RgGuiRendererBaseContext* ctx, const char* text, size_t text_size)
+RGINLINE int rg_gui_renderer_base_count_emit(void* user, const RgGuiTextGlyph* glyph)
 {
-	size_t offset = 0u;
+	u32* count = (u32*)user;
+	if (!glyph->ink) return 1;
+	if (*count == UINT32_MAX) return 0;
+	(*count)++;
+	return 1;
+}
+
+/** Number of quads `text` produces at `scale`: glyphs with ink only. */
+RGINLINE u32 rg_gui_renderer_base_count_quads(const RgGuiRendererBaseContext* ctx, const char* text, size_t text_size, f32 scale)
+{
 	u32 count = 0u;
-	while (offset < text_size)
+	if (!text || text_size == 0u || scale == 0.0f)
 	{
-		u32 cp = rg_text_decode_utf8(text, text_size, &offset);
-		if (cp == '\r' || cp == '\n')
-		{
-			if (cp == '\r' && offset < text_size && text[offset] == '\n') offset++;
-			continue;
-		}
-		const RgTextGlyph* glyph = rg_gui_renderer_base_find_glyph(ctx, cp);
-		if (glyph && glyph->w > 0 && glyph->h > 0)
-		{
-			if (count == UINT32_MAX) return UINT32_MAX;
-			count++;
-		}
+		return 0u;
 	}
+	ctx->provider.layout(ctx->provider.user, text, text_size, scale, rg_gui_renderer_base_count_emit, &count);
 	return count;
+}
+
+typedef struct RgGuiRendererBaseQuadWriter
+{
+	RgGuiRendererBaseCachedQuad* output;
+	u32 count;
+	u32 capacity;
+} RgGuiRendererBaseQuadWriter;
+
+RGINLINE int rg_gui_renderer_base_quad_emit(void* user, const RgGuiTextGlyph* glyph)
+{
+	RgGuiRendererBaseQuadWriter* writer = (RgGuiRendererBaseQuadWriter*)user;
+	if (!glyph->ink) return 1;
+	if (writer->count == writer->capacity) return 0;
+	rg_gui_renderer_base_quad_from_glyph(&writer->output[writer->count++], glyph);
+	return 1;
 }
 
 RGINLINE u32 rg_gui_renderer_base_build_cached(const RgGuiRendererBaseContext* ctx, const char* text,
@@ -560,54 +616,43 @@ RGINLINE u32 rg_gui_renderer_base_build_cached(const RgGuiRendererBaseContext* c
 	{
 		return 0u;
 	}
-
-	size_t offset = 0u;
-	f32 line_y = 0.0f;
-	f32 pen_x = 0.0f;
-	u32 count = 0u;
-	const RgTextGlyph* previous = NULL;
-	while (offset < text_size && count < capacity)
-	{
-		u32 cp = rg_text_decode_utf8(text, text_size, &offset);
-		if (cp == '\r' || cp == '\n')
-		{
-			if (cp == '\r' && offset < text_size && text[offset] == '\n') offset++;
-			line_y += (f32)ctx->font->metrics.line_height * scale;
-			pen_x = 0.0f;
-			previous = NULL;
-			continue;
-		}
-
-		const RgTextGlyph* glyph = rg_gui_renderer_base_find_glyph(ctx, cp);
-		if (!glyph)
-		{
-			previous = NULL;
-			continue;
-		}
-		if (previous)
-		{
-			pen_x += (f32)rg_gui_renderer_base_find_kerning(ctx, previous->codepoint, glyph->codepoint) * scale;
-		}
-		if (glyph->w > 0 && glyph->h > 0)
-		{
-			RgGuiRendererBaseCachedQuad* quad = &output[count++];
-			quad->x = pen_x + (f32)glyph->x_offset * scale;
-			quad->y = line_y + (f32)glyph->y_offset * scale;
-			quad->w = (f32)glyph->w * scale;
-			quad->h = (f32)glyph->h * scale;
-			quad->u0 = (u16)glyph->x;
-			quad->v0 = (u16)glyph->y;
-			quad->u1 = (u16)(glyph->x + glyph->w);
-			quad->v1 = (u16)(glyph->y + glyph->h);
-		}
-
-		pen_x += (f32)glyph->x_advance * scale;
-		previous = glyph;
-	}
-	return count;
+	RgGuiRendererBaseQuadWriter writer;
+	writer.output = output;
+	writer.count = 0u;
+	writer.capacity = capacity;
+	ctx->provider.layout(ctx->provider.user, text, text_size, scale, rg_gui_renderer_base_quad_emit, &writer);
+	return writer.count;
 }
 
 #if defined(RG_GUI_RENDERER_TEST_REFERENCE)
+typedef struct RgGuiRendererBaseInstanceWriter
+{
+	RgGuiRendererBaseInstance* output;
+	rg_vec2 position;
+	u32 color;
+	u32 count;
+	u32 capacity;
+} RgGuiRendererBaseInstanceWriter;
+
+RGINLINE int rg_gui_renderer_base_instance_emit(void* user, const RgGuiTextGlyph* glyph)
+{
+	RgGuiRendererBaseInstanceWriter* writer = (RgGuiRendererBaseInstanceWriter*)user;
+	if (!glyph->ink) return 1;
+	if (writer->count == writer->capacity) return 0;
+	RgGuiRendererBaseInstance* instance = &writer->output[writer->count++];
+	instance->x = writer->position.x + glyph->x;
+	instance->y = writer->position.y + glyph->y;
+	instance->w = glyph->w;
+	instance->h = glyph->h;
+	instance->u0 = glyph->u0;
+	instance->v0 = glyph->v0;
+	instance->u1 = glyph->u1;
+	instance->v1 = glyph->v1;
+	instance->color = writer->color;
+	instance->padding = 0u;
+	return 1;
+}
+
 RGINLINE u32 rg_gui_renderer_base_build_instances(const RgGuiRendererBaseContext* ctx, const char* text,
                                                   size_t text_size, f32 scale, rg_vec2 position,
                                                   u32 color, RgGuiRendererBaseInstance* output,
@@ -617,53 +662,14 @@ RGINLINE u32 rg_gui_renderer_base_build_instances(const RgGuiRendererBaseContext
 	{
 		return 0u;
 	}
-
-	size_t offset = 0u;
-	f32 line_y = 0.0f;
-	f32 pen_x = 0.0f;
-	u32 count = 0u;
-	const RgTextGlyph* previous = NULL;
-	while (offset < text_size && count < capacity)
-	{
-		u32 cp = rg_text_decode_utf8(text, text_size, &offset);
-		if (cp == '\r' || cp == '\n')
-		{
-			if (cp == '\r' && offset < text_size && text[offset] == '\n') offset++;
-			line_y += (f32)ctx->font->metrics.line_height * scale;
-			pen_x = 0.0f;
-			previous = NULL;
-			continue;
-		}
-
-		const RgTextGlyph* glyph = rg_gui_renderer_base_find_glyph(ctx, cp);
-		if (!glyph)
-		{
-			previous = NULL;
-			continue;
-		}
-		if (previous)
-		{
-			pen_x += (f32)rg_gui_renderer_base_find_kerning(ctx, previous->codepoint, glyph->codepoint) * scale;
-		}
-		if (glyph->w > 0 && glyph->h > 0)
-		{
-			RgGuiRendererBaseInstance* instance = &output[count++];
-			instance->x = position.x + pen_x + (f32)glyph->x_offset * scale;
-			instance->y = position.y + line_y + (f32)glyph->y_offset * scale;
-			instance->w = (f32)glyph->w * scale;
-			instance->h = (f32)glyph->h * scale;
-			instance->u0 = (u16)glyph->x;
-			instance->v0 = (u16)glyph->y;
-			instance->u1 = (u16)(glyph->x + glyph->w);
-			instance->v1 = (u16)(glyph->y + glyph->h);
-			instance->color = color;
-			instance->padding = 0u;
-		}
-
-		pen_x += (f32)glyph->x_advance * scale;
-		previous = glyph;
-	}
-	return count;
+	RgGuiRendererBaseInstanceWriter writer;
+	writer.output = output;
+	writer.position = position;
+	writer.color = color;
+	writer.count = 0u;
+	writer.capacity = capacity;
+	ctx->provider.layout(ctx->provider.user, text, text_size, scale, rg_gui_renderer_base_instance_emit, &writer);
+	return writer.count;
 }
 #endif
 
@@ -844,7 +850,7 @@ static RgGuiRendererBaseRunResult rg_gui_renderer_base_get_run(RgGuiRendererBase
 	{
 		text_size = strlen(text);
 	}
-	u32 quad_count = scale == 0.0f ? 0u : rg_gui_renderer_base_count_quads(ctx, text, text_size);
+	u32 quad_count = rg_gui_renderer_base_count_quads(ctx, text, text_size, scale);
 	ctx->stats.frame_laid_out_glyphs = rg_gui_renderer_base_u32_add_saturate(
 	    ctx->stats.frame_laid_out_glyphs, quad_count);
 	ctx->stats.total_laid_out_glyphs = rg_gui_renderer_base_u64_add_saturate(
@@ -1330,6 +1336,9 @@ typedef struct RgGuiRendererInitDesc
 	 * Keep the table, font, and its arrays alive and unchanged while in use.
 	 * Null or a different font selects a private table allocated in the arena. */
 	const RgGuiTextLookup* text_lookup;
+	/* Optional; copied. NULL selects the bitmap provider over font and text_lookup.
+	 * With a provider, font and text_lookup are unused and may be NULL. */
+	const RgGuiTextProvider* text_provider;
 } RgGuiRendererInitDesc;
 
 typedef struct RgGuiRendererRange
@@ -1437,8 +1446,8 @@ RGINLINE size_t rg_gui_renderer_memory_required(const RgGuiRendererLimits* suppl
  * validated by init. Use the same descriptor and immutable table when initializing. */
 RGINLINE size_t rg_gui_renderer_memory_required_ex(const RgGuiRendererInitDesc* desc)
 {
-	if (!desc || !desc->font) return SIZE_MAX;
-	int own_lookup = !desc->text_lookup || desc->text_lookup->font != desc->font;
+	if (!desc || (!desc->font && !desc->text_provider)) return SIZE_MAX;
+	int own_lookup = !desc->text_provider && (!desc->text_lookup || desc->text_lookup->font != desc->font);
 	return rg_gui_renderer_memory_required_internal(&desc->limits, desc->page_quads, own_lookup);
 }
 
@@ -1478,6 +1487,7 @@ RGINLINE int rg_gui_renderer_init(RgGuiRenderer* ctx, RgArena* arena,
 	core_desc.font = desc->font;
 	core_desc.limits = limits;
 	core_desc.text_lookup = desc->text_lookup;
+	core_desc.text_provider = desc->text_provider;
 	if (!rg_gui_renderer_base_init(&ctx->core, arena, &core_desc)) return 0;
 
 	ctx->page_quads = page_quads;
@@ -1595,6 +1605,32 @@ RGINLINE void rg_gui_renderer_mark_pages_dirty(RgGuiRenderer* ctx, u32 first_pag
 	}
 }
 
+typedef struct RgGuiRendererPageWriter
+{
+	const RgGuiRenderer* ctx;
+	u32 page;
+	u32 page_offset;
+	u32 count;
+	u32 capacity;
+} RgGuiRendererPageWriter;
+
+RGINLINE int rg_gui_renderer_page_emit(void* user, const RgGuiTextGlyph* glyph)
+{
+	RgGuiRendererPageWriter* writer = (RgGuiRendererPageWriter*)user;
+	const RgGuiRenderer* ctx = writer->ctx;
+	if (!glyph->ink) return 1;
+	if (writer->count == writer->capacity) return 0;
+	if (writer->page_offset == ctx->page_quads)
+	{
+		writer->page = ctx->page_next[writer->page];
+		writer->page_offset = 0u;
+	}
+	rg_gui_renderer_base_quad_from_glyph(
+	    &ctx->core.cache_quads[writer->page * ctx->page_quads + writer->page_offset++], glyph);
+	writer->count++;
+	return 1;
+}
+
 RGINLINE u32 rg_gui_renderer_build_pages(const RgGuiRenderer* ctx, const char* text,
                                          size_t text_size, f32 scale,
                                          u32 first_page, u32 capacity)
@@ -1607,57 +1643,14 @@ RGINLINE u32 rg_gui_renderer_build_pages(const RgGuiRenderer* ctx, const char* t
 		    &ctx->core, text, text_size, scale,
 		    ctx->core.cache_quads + first_page * ctx->page_quads, capacity);
 	}
-	size_t offset = 0u;
-	f32 line_y = 0.0f;
-	f32 pen_x = 0.0f;
-	u32 count = 0u;
-	const RgTextGlyph* previous = NULL;
-	u32 page = first_page;
-	u32 page_offset = 0u;
-	while (offset < text_size && count < capacity)
-	{
-		u32 cp = rg_text_decode_utf8(text, text_size, &offset);
-		if (cp == '\r' || cp == '\n')
-		{
-			if (cp == '\r' && offset < text_size && text[offset] == '\n') offset++;
-			line_y += (f32)ctx->core.font->metrics.line_height * scale;
-			pen_x = 0.0f;
-			previous = NULL;
-			continue;
-		}
-		const RgTextGlyph* glyph = rg_gui_renderer_base_find_glyph(&ctx->core, cp);
-		if (!glyph)
-		{
-			previous = NULL;
-			continue;
-		}
-		if (previous)
-		{
-			pen_x += (f32)rg_gui_renderer_base_find_kerning(&ctx->core, previous->codepoint, glyph->codepoint) * scale;
-		}
-		if (glyph->w > 0 && glyph->h > 0)
-		{
-			if (page_offset == ctx->page_quads)
-			{
-				page = ctx->page_next[page];
-				page_offset = 0u;
-			}
-			RgGuiRendererBaseCachedQuad* quad =
-			    &ctx->core.cache_quads[page * ctx->page_quads + page_offset++];
-			quad->x = pen_x + (f32)glyph->x_offset * scale;
-			quad->y = line_y + (f32)glyph->y_offset * scale;
-			quad->w = (f32)glyph->w * scale;
-			quad->h = (f32)glyph->h * scale;
-			quad->u0 = (u16)glyph->x;
-			quad->v0 = (u16)glyph->y;
-			quad->u1 = (u16)(glyph->x + glyph->w);
-			quad->v1 = (u16)(glyph->y + glyph->h);
-			count++;
-		}
-		pen_x += (f32)glyph->x_advance * scale;
-		previous = glyph;
-	}
-	return count;
+	RgGuiRendererPageWriter writer;
+	writer.ctx = ctx;
+	writer.page = first_page;
+	writer.page_offset = 0u;
+	writer.count = 0u;
+	writer.capacity = capacity;
+	ctx->core.provider.layout(ctx->core.provider.user, text, text_size, scale, rg_gui_renderer_page_emit, &writer);
+	return writer.count;
 }
 
 RGINLINE void rg_gui_renderer_rebuild_hash(RgGuiRenderer* ctx)
@@ -1821,7 +1814,7 @@ static RgGuiRendererBaseRunResult rg_gui_renderer_get_run(RgGuiRenderer* ctx, co
 	}
 	if (!built_optimistically)
 	{
-		quad_count = scale == 0.0f ? 0u : rg_gui_renderer_base_count_quads(core, text, text_size);
+		quad_count = rg_gui_renderer_base_count_quads(core, text, text_size, scale);
 		page_count = rg_gui_renderer_pages_required(ctx, quad_count);
 	}
 	core->stats.frame_laid_out_glyphs = rg_gui_renderer_base_u32_add_saturate(
@@ -1910,7 +1903,9 @@ RGINLINE void rg_gui_renderer_clear_cache(RgGuiRenderer* ctx)
 RGINLINE void rg_gui_renderer_begin_frame(RgGuiRenderer* ctx)
 {
 	if (!ctx || !ctx->initialized) return;
+	int atlas_changed = rg_gui_renderer_base_atlas_changed(&ctx->core);
 	rg_gui_renderer_base_begin_frame(&ctx->core);
+	if (atlas_changed) rg_gui_renderer_clear_cache(ctx);
 	ctx->dirty_page_count = 0u;
 	ctx->allocator_stats.frame_page_segments = 0u;
 	ctx->allocator_stats.frame_extra_segments = 0u;

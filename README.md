@@ -76,9 +76,17 @@ vertices read the cached glyphs directly on the GPU. The steady-state frontend a
 text-preparation paths use fixed-capacity storage selected at initialization;
 they do not grow their arenas during a frame.
 
-`rg_gui_init` requires a descriptor with a non-null font. Use
+`rg_gui_init` requires a descriptor with a non-null font, or a
+`RgGuiTextProvider` in `RgGuiInitDesc.text_provider`. Use
 `rg_gui_memory_required` with that same descriptor to allocate the frontend
 arena with sufficient capacity and alignment padding.
+
+A text provider replaces the bitmap font with one layout callback that emits
+positioned glyphs (`RgGuiTextGlyph`) for shaped or dynamically rasterized text;
+the renderer takes the same provider through `RgGuiRendererInitDesc.text_provider`
+and drops its glyph cache whenever the provider's atlas generation changes. With
+no provider, measuring, wrapping and quad building run the bitmap path
+(`rg_gui_text_bitmap_layout`) exactly as before.
 
 Changing text can opt into a shared `RgGuiTextLookup` through
 `RgGuiInitDesc.text_lookup`. It costs about 97 KiB per font and accelerates

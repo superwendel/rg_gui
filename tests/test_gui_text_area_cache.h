@@ -3,7 +3,7 @@
 #define TEST_GUI_TEXT_AREA_CACHE_H
 
 typedef char EditorCacheKeyHasNoPadding[
-    sizeof(RgGuiTextAreaCacheKey)==5*sizeof(void*)+10*sizeof(u32) ? 1 : -1];
+    sizeof(RgGuiTextAreaCacheKey)==6*sizeof(void*)+10*sizeof(u32) ? 1 : -1];
 static unsigned text_area_cache_checks;
 #define TEXT_AREA_CACHE_CHECK(value) do { ++text_area_cache_checks; if (!(value)) { \
     fprintf(stderr,"editor-cache check failed at %d: %s\n",__LINE__,#value);exit(1); } } while(0)

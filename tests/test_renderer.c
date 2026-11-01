@@ -674,6 +674,110 @@ static void test_renderer_lookup_memory_alignment_and_rollback(void)
 	TEST_PASS();
 }
 
+typedef struct TestMonoProvider
+{
+	u32 generation;
+} TestMonoProvider;
+
+/* Six pixels per codepoint at scale 1, five-by-eight ink quads, blanks without ink. */
+static f32 test_mono_layout(void* user, const char* text, size_t length, f32 scale,
+                            RgGuiTextEmitFn emit, void* emit_user)
+{
+	(void)user;
+	f32 pen = 0.0f;
+	size_t offset = 0u;
+	while (offset < length)
+	{
+		size_t cluster = offset;
+		u32 cp = rg_text_decode_utf8(text, length, &offset);
+		RgGuiTextGlyph glyph;
+		memset(&glyph, 0, sizeof(glyph));
+		glyph.x = pen;
+		glyph.w = 5.0f * scale;
+		glyph.h = 8.0f * scale;
+		glyph.u1 = 5u;
+		glyph.v1 = 8u;
+		glyph.pen_x = pen;
+		glyph.advance = 6.0f * scale;
+		glyph.cluster = (u32)cluster;
+		glyph.ink = cp != ' ';
+		if (emit && !emit(emit_user, &glyph)) break;
+		pen += glyph.advance;
+	}
+	return pen;
+}
+
+static f32 test_mono_line_height(void* user, f32 scale)
+{
+	(void)user;
+	return 10.0f * scale;
+}
+
+static u32 test_mono_generation(void* user)
+{
+	return ((TestMonoProvider*)user)->generation;
+}
+
+static void test_renderer_text_provider(void)
+{
+	TestMonoProvider mono = {0};
+	RgGuiTextProvider provider = {0};
+	provider.user = &mono;
+	provider.layout = test_mono_layout;
+	provider.line_height = test_mono_line_height;
+	provider.atlas_generation = test_mono_generation;
+	provider.atlas_width = 16u;
+	provider.atlas_height = 16u;
+	RgGuiRendererInitDesc desc = {0};
+	desc.text_provider = &provider;
+	desc.limits = (RgGuiRendererLimits){4u, 8u, 256u, 32u, 32u, 4u, 0u};
+	desc.page_quads = 2u;
+	size_t size = rg_gui_renderer_memory_required_ex(&desc);
+	TEST_ASSERT(size != SIZE_MAX, "provider renderer bound without a font");
+	void* memory = malloc(size);
+	TEST_ASSERT(memory, "renderer storage");
+	RgArena arena = {(char*)memory, size, 0u, size};
+	RgGuiRenderer renderer;
+	TEST_ASSERT(rg_gui_renderer_init(&renderer, &arena, &desc), "provider renderer init without a font");
+	TEST_ASSERT(renderer.core.lookup == NULL && renderer.core.font == NULL, "no bitmap tables for a provider");
+
+	RgGuiDrawCmd cmd = test_text_cmd("ab cd", 10.0f, 20.0f, 2.0f, 1, 1, 1, 1);
+	RgGuiDrawList list = test_draw_list(&cmd, 1u);
+	rg_gui_renderer_begin_frame(&renderer);
+	TEST_ASSERT(rg_gui_renderer_prepare(&renderer, &list, list.count), "provider prepare");
+	const RgGuiRendererPrepared* prepared = rg_gui_renderer_prepared(&renderer);
+	TEST_ASSERT(prepared->glyph_count == 4u, "blanks produce no quads");
+	RgGuiRendererBaseInstance actual[4];
+	memset(actual, 0, sizeof(actual));
+	test_renderer_expand(&renderer, prepared, actual);
+	TEST_ASSERT(test_float_equal(actual[0].x, 10.0f) && test_float_equal(actual[0].y, 20.0f) &&
+	                test_float_equal(actual[0].w, 10.0f) && test_float_equal(actual[0].h, 16.0f),
+	            "first quad comes from the provider");
+	TEST_ASSERT(test_float_equal(actual[3].x, 10.0f + 4.0f * 12.0f) && actual[3].u1 == 5u && actual[3].v1 == 8u,
+	            "the blank advances the pen without a quad");
+	rg_gui_renderer_begin_frame(&renderer);
+	TEST_ASSERT(rg_gui_renderer_prepare(&renderer, &list, list.count) &&
+	                rg_gui_renderer_stats(&renderer)->frame_cache_hits == 1u,
+	            "warm hit through the provider");
+
+	u64 resets = rg_gui_renderer_stats(&renderer)->total_cache_resets;
+	mono.generation++;
+	rg_gui_renderer_begin_frame(&renderer);
+	TEST_ASSERT(rg_gui_renderer_stats(&renderer)->total_cache_resets == resets + 1u &&
+	                rg_gui_renderer_allocator_stats(&renderer)->allocated_pages == 0u,
+	            "a new atlas generation drops every cached run");
+	TEST_ASSERT(rg_gui_renderer_prepare(&renderer, &list, list.count) &&
+	                rg_gui_renderer_stats(&renderer)->frame_cache_misses == 1u,
+	            "text is laid out again after the atlas changed");
+	rg_gui_renderer_begin_frame(&renderer);
+	TEST_ASSERT(rg_gui_renderer_prepare(&renderer, &list, list.count) &&
+	                rg_gui_renderer_stats(&renderer)->frame_cache_hits == 1u &&
+	                rg_gui_renderer_stats(&renderer)->total_cache_resets == resets + 1u,
+	            "an unchanged generation keeps the cache");
+	free(memory);
+	TEST_PASS();
+}
+
 int main(int argc, char** argv)
 {
 	if (test_renderer_reference_main(argc, argv) != 0) return 1;
@@ -692,6 +796,7 @@ int main(int argc, char** argv)
 	test_renderer_optimistic_reclaim_and_tail_reuse();
 	test_renderer_shared_lookup_geometry_and_ownership();
 	test_renderer_lookup_memory_alignment_and_rollback();
+	test_renderer_text_provider();
 	printf("\nResults: %d passed, %d failed\n", g_tests_passed, g_tests_failed);
 	return g_tests_failed ? 1 : 0;
 }
