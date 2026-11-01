@@ -564,6 +564,7 @@ typedef struct RgGuiStyle
 	f32 key_repeat_fast_interval;
 	int value_decimals;
 	f32 disabled_alpha;
+	f32 tooltip_delay; // seconds of hover before a tooltip shows (0 = immediately)
 
 	rg_vec4 color_text;
 	rg_vec4 color_text_dim;
@@ -599,7 +600,8 @@ typedef enum RgGuiStyleVar
 	RG_GUI_STYLE_VAR_KEY_REPEAT_FAST_DELAY = 13,
 	RG_GUI_STYLE_VAR_KEY_REPEAT_FAST_INTERVAL = 14,
 	RG_GUI_STYLE_VAR_VALUE_DECIMALS = 15,
-	RG_GUI_STYLE_VAR_DISABLED_ALPHA = 16
+	RG_GUI_STYLE_VAR_DISABLED_ALPHA = 16,
+	RG_GUI_STYLE_VAR_TOOLTIP_DELAY = 17
 } RgGuiStyleVar;
 
 typedef enum RgGuiStyleColor
@@ -1509,6 +1511,7 @@ typedef struct RgGuiPlatformOutput
 	RgGuiRect ime_caret_rect;
 	int wants_text_input;
 	int ime_caret_valid;
+	int wants_redraw; // a timer is pending (tooltip delay): render another frame soon even without input
 } RgGuiPlatformOutput;
 
 /* Pacing of the hidden-draw culling pass on one draw list; see
@@ -1690,6 +1693,10 @@ typedef struct RgGuiContext
 	f32 mouse_wheel;
 	f32 mouse_wheel_x; // horizontal wheel this frame, positive = right
 	RgGuiMouseCursor mouse_cursor;
+	RgGuiId tooltip_id;       // hovered tooltip source, 0 when none
+	f32 tooltip_hover_time;
+	int tooltip_seen;         // a tooltip call hovered this frame
+	RgGuiRect display_bounds; // rg_gui_set_display_bounds; zero size = unclamped
 	int input_capture_active;
 	int input_capture_next;
 	u32 input_capture_depth;
@@ -2021,6 +2028,10 @@ RGINLINE void rg_gui_begin_frame_ex(RgGuiContext* ctx, const RgInputState* input
  * @brief Return platform-facing cursor, text-input, and IME caret requests
  */
 RGINLINE const RgGuiPlatformOutput* rg_gui_platform_output(const RgGuiContext* ctx);
+/**
+ * @brief Area tooltips must stay inside (the window client rect). Optional: zero size = unclamped.
+ */
+RGINLINE void rg_gui_set_display_bounds(RgGuiContext* ctx, RgGuiRect bounds);
 
 /**
  * @brief Initialize an input router for global-to-viewport input filtering
@@ -3844,6 +3855,7 @@ RGINLINE RgGuiStyle rg_gui_style_default(void)
 	style.key_repeat_fast_interval = 0.03f;
 	style.value_decimals = 3;
 	style.disabled_alpha = 0.55f;
+	style.tooltip_delay = 0.5f;
 
 	style.color_text = rg_gui_color(0.855f, 0.870f, 0.895f, 1.0f);
 	style.color_text_dim = rg_gui_color(0.620f, 0.640f, 0.675f, 1.0f);
@@ -4166,6 +4178,7 @@ RGINLINE f32* rg_gui_style_var_ptr(RgGuiStyle* style, RgGuiStyleVar var)
 		case RG_GUI_STYLE_VAR_KEY_REPEAT_FAST_DELAY: return &style->key_repeat_fast_delay;
 		case RG_GUI_STYLE_VAR_KEY_REPEAT_FAST_INTERVAL: return &style->key_repeat_fast_interval;
 		case RG_GUI_STYLE_VAR_DISABLED_ALPHA: return &style->disabled_alpha;
+		case RG_GUI_STYLE_VAR_TOOLTIP_DELAY: return &style->tooltip_delay;
 		case RG_GUI_STYLE_VAR_VALUE_DECIMALS:
 		default:
 			break;
@@ -10665,6 +10678,7 @@ RGINLINE int rg_gui_init(RgGuiContext* ctx, RgArena* arena, const RgGuiInitDesc*
 	ctx->window_focused = 1;
 	memset(&ctx->platform_output, 0, sizeof(ctx->platform_output));
 	ctx->platform_output.cursor = RG_GUI_CURSOR_DEFAULT;
+	ctx->tooltip_seen = 0;
 	ctx->mouse_pos = rg_vec2(0.0f, 0.0f);
 	ctx->mouse_pos_raw = rg_vec2(0.0f, 0.0f);
 	ctx->mouse_pos_global = rg_vec2(0.0f, 0.0f);
@@ -10676,6 +10690,10 @@ RGINLINE int rg_gui_init(RgGuiContext* ctx, RgArena* arena, const RgGuiInitDesc*
 	ctx->mouse_wheel = 0.0f;
 	ctx->mouse_wheel_x = 0.0f;
 	ctx->mouse_cursor = RG_GUI_CURSOR_DEFAULT;
+	ctx->tooltip_id = 0u;
+	ctx->tooltip_hover_time = 0.0f;
+	ctx->tooltip_seen = 0;
+	ctx->display_bounds = rg_gui_make_rect(0.0f, 0.0f, 0.0f, 0.0f);
 	ctx->input_capture_active = 0;
 	ctx->input_capture_next = 0;
 	ctx->input_capture_depth = 0u;
@@ -10847,6 +10865,7 @@ RGINLINE void rg_gui_begin_frame_ex(RgGuiContext* ctx, const RgInputState* input
 	ctx->time += delta_time;
 	memset(&ctx->platform_output, 0, sizeof(ctx->platform_output));
 	ctx->platform_output.cursor = RG_GUI_CURSOR_DEFAULT;
+	ctx->tooltip_seen = 0;
 
 	ctx->mouse_pos_raw = rg_vec2((f32)input->mouse_x, (f32)input->mouse_y);
 	ctx->mouse_pos = ctx->mouse_pos_raw;
@@ -11538,6 +11557,11 @@ RGINLINE void rg_gui_draw_list_cull_hidden(RgGuiContext* ctx, RgGuiDrawList* lis
 
 RGINLINE void rg_gui_end_frame(RgGuiContext* ctx)
 {
+	if (!ctx->tooltip_seen)
+	{
+		ctx->tooltip_id = 0u;
+		ctx->tooltip_hover_time = 0.0f;
+	}
 	RG_GUI_PROF_BEGIN(prof_state);
 	rg_gui_end_frame_state(ctx);
 	RG_GUI_PROF_END(prof_state, "rg_gui_end_frame: state");
@@ -12729,6 +12753,28 @@ RGINLINE void rg_gui_tooltip_ex(RgGuiContext* ctx, RgGuiRect rect, const char* t
 		return;
 	}
 
+	/* Hover delay: the timer restarts when the hovered source changes and is
+	 * cleared at end of frame when no tooltip was hovered. */
+	{
+		RgGuiId id = (RgGuiId)rg_hash_bytes(&rect, sizeof(rect), 0x746970u);
+		if (id == 0u) id = 1u;
+		if (ctx->tooltip_id != id)
+		{
+			ctx->tooltip_id = id;
+			ctx->tooltip_hover_time = 0.0f;
+		}
+		else if (!ctx->tooltip_seen)
+		{
+			ctx->tooltip_hover_time += ctx->delta_time;
+		}
+		ctx->tooltip_seen = 1;
+		if (ctx->tooltip_hover_time < ctx->style.tooltip_delay)
+		{
+			ctx->platform_output.wants_redraw = 1;
+			return;
+		}
+	}
+
 	size_t len = rg_gui_text_len_label(ctx, text, copy);
 	f32 text_w = rg_gui_text_measure_label(ctx, text, len, copy);
 	f32 pad = ctx->style.padding;
@@ -12741,6 +12787,16 @@ RGINLINE void rg_gui_tooltip_ex(RgGuiContext* ctx, RgGuiRect rect, const char* t
 	                                 ctx->mouse_pos.y + offset_y,
 	                                 w,
 	                                 h);
+	if (ctx->display_bounds.w > 0.0f && ctx->display_bounds.h > 0.0f)
+	{
+		/* Keep the tip on screen: slide left at the right edge, flip above
+		 * the cursor at the bottom edge. */
+		RgGuiRect b = ctx->display_bounds;
+		if (tip.x + tip.w > b.x + b.w) tip.x = b.x + b.w - tip.w;
+		if (tip.y + tip.h > b.y + b.h) tip.y = ctx->mouse_pos.y - offset_y - tip.h;
+		if (tip.x < b.x) tip.x = b.x;
+		if (tip.y < b.y) tip.y = b.y;
+	}
 
 	RgGuiDrawList* overlay = rg_gui_overlay_target(ctx);
 	rg_gui_push_rect_to(ctx, overlay, tip, ctx->style.color_panel);
@@ -34227,6 +34283,11 @@ RGINLINE RgGuiMouseCursor rg_gui_mouse_cursor(const RgGuiContext* ctx)
 		return RG_GUI_CURSOR_DEFAULT;
 	}
 	return ctx->mouse_cursor;
+}
+
+RGINLINE void rg_gui_set_display_bounds(RgGuiContext* ctx, RgGuiRect bounds)
+{
+	if (ctx) ctx->display_bounds = bounds;
 }
 
 RGINLINE const RgGuiPlatformOutput* rg_gui_platform_output(const RgGuiContext* ctx)
