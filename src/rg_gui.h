@@ -3876,6 +3876,28 @@ RGINLINE RgGuiStyle rg_gui_style_default(void)
 	return style;
 }
 
+/**
+ * @brief Copy of `base` with every length multiplied by `scale` (DPI scaling)
+ *
+ * Paddings, widths, borders and the text metrics scale; colors, timings and
+ * value_decimals do not. Override text_height / char_width afterwards from
+ * the font you actually use at that scale.
+ */
+RGINLINE RgGuiStyle rg_gui_style_scaled(RgGuiStyle base, f32 scale)
+{
+	base.text_height *= scale;
+	base.char_width *= scale;
+	base.padding *= scale;
+	base.inner_spacing *= scale;
+	base.label_width *= scale;
+	base.value_width *= scale;
+	base.scroll_bar_width *= scale;
+	base.slider_handle_width *= scale;
+	base.border_thickness *= scale;
+	base.focus_border_thickness *= scale;
+	return base;
+}
+
 RGINLINE u32 rg_gui_text_lookup_glyph_slot(u32 codepoint)
 {
 	u32 hash = codepoint * 0x9E3779B1u;

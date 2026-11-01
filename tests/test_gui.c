@@ -1683,6 +1683,89 @@ int main(void)
 		return 1;
 	}
 
+	/* L7 additions: wheel axes, splitter cursor, tooltip delay + clamp, scaled style. */
+	{
+		RgInputState input;
+		RgGuiStyle scaled;
+		RgGuiStyle saved = gui.style;
+		f32 split = 100.0f;
+		rg_input_init(&input);
+		input.mouse_x = 190;
+		input.mouse_y = 90;
+		input.mouse_scroll_x = 1.5f;
+		input.mouse_scroll_y = -2.0f;
+		rg_gui_begin_frame(&gui, &input, 0.016f);
+		if (gui.mouse_wheel_x != 1.5f || gui.mouse_wheel != -2.0f)
+		{
+			fprintf(stderr, "wheel axes were not copied into the context\n");
+			free(memory);
+			return 1;
+		}
+		rg_gui_set_display_bounds(&gui, rg_gui_make_rect(0.0f, 0.0f, 200.0f, 100.0f));
+		rg_gui_splitter_v(&gui, rg_gui_make_rect(185.0f, 0.0f, 10.0f, 100.0f), &split, 10.0f, 300.0f, rg_gui_id_str("split"));
+		if (gui.mouse_cursor != RG_GUI_CURSOR_RESIZE_H)
+		{
+			fprintf(stderr, "hovered splitter did not request the resize cursor\n");
+			free(memory);
+			return 1;
+		}
+		gui.style.tooltip_delay = 0.05f;
+		rg_gui_tooltip(&gui, rg_gui_make_rect(180.0f, 80.0f, 20.0f, 20.0f), "tip");
+		if (gui.overlay_list.count != 0u || !rg_gui_platform_output(&gui)->wants_redraw)
+		{
+			fprintf(stderr, "tooltip showed before its delay or did not ask for a redraw\n");
+			free(memory);
+			return 1;
+		}
+		rg_gui_end_frame(&gui);
+		rg_input_begin_frame(&input);
+		rg_gui_begin_frame(&gui, &input, 0.1f);
+		rg_gui_tooltip(&gui, rg_gui_make_rect(180.0f, 80.0f, 20.0f, 20.0f), "tip");
+		if (gui.overlay_list.count == 0u || gui.overlay_list.cmds[0].type != RG_GUI_CMD_RECT)
+		{
+			fprintf(stderr, "tooltip did not show after its delay\n");
+			free(memory);
+			return 1;
+		}
+		{
+			RgGuiRect tip = gui.overlay_list.cmds[0].data.rect.rect;
+			if (tip.x < 0.0f || tip.y < 0.0f || tip.x + tip.w > 200.0f || tip.y + tip.h > 100.0f)
+			{
+				fprintf(stderr, "tooltip was not clamped to the display bounds (%g %g %g %g)\n", tip.x, tip.y, tip.w, tip.h);
+				free(memory);
+				return 1;
+			}
+		}
+		rg_gui_end_frame(&gui);
+		rg_input_begin_frame(&input);
+		rg_gui_begin_frame(&gui, &input, 0.1f);
+		rg_gui_end_frame(&gui); /* nothing hovered: the timer resets */
+		if (gui.tooltip_id != 0u || gui.tooltip_hover_time != 0.0f)
+		{
+			fprintf(stderr, "tooltip timer did not reset when nothing was hovered\n");
+			free(memory);
+			return 1;
+		}
+		rg_gui_push_style_var(&gui, RG_GUI_STYLE_VAR_TOOLTIP_DELAY, 0.0f);
+		if (gui.style.tooltip_delay != 0.0f)
+		{
+			fprintf(stderr, "tooltip_delay style var push failed\n");
+			free(memory);
+			return 1;
+		}
+		rg_gui_pop_style_var(&gui, 1u);
+		scaled = rg_gui_style_scaled(rg_gui_style_default(), 2.0f);
+		if (gui.style.tooltip_delay != 0.05f || scaled.padding != 8.0f || scaled.scroll_bar_width != 16.0f ||
+		    scaled.text_height != 32.0f || scaled.cursor_blink_interval != 0.5f || scaled.value_decimals != 3 ||
+		    scaled.tooltip_delay != 0.5f)
+		{
+			fprintf(stderr, "rg_gui_style_scaled scaled the wrong fields\n");
+			free(memory);
+			return 1;
+		}
+		gui.style = saved;
+	}
+
 	char multiline_clipboard[] = "A\r\nM\rA\n";
 	rg_gui_text_edit_normalize_clipboard_text(multiline_clipboard, 1);
 	if (strcmp(multiline_clipboard, "A\nM\nA\n") != 0)
