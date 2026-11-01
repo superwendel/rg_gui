@@ -1561,6 +1561,7 @@ typedef struct RgGuiViewportStackEntry
 	int prev_mouse_pressed;
 	int prev_mouse_released;
 	f32 prev_mouse_wheel;
+	f32 prev_mouse_wheel_x;
 	const RgInputEventQueue* prev_input_events;
 	RgWindowId prev_input_window_id;
 	RgGuiId prev_input_event_focus_id;
@@ -1683,6 +1684,7 @@ typedef struct RgGuiContext
 	int mouse_pressed;
 	int mouse_released;
 	f32 mouse_wheel;
+	f32 mouse_wheel_x; // horizontal wheel this frame, positive = right
 	RgGuiMouseCursor mouse_cursor;
 	int input_capture_active;
 	int input_capture_next;
@@ -1782,6 +1784,7 @@ typedef struct RgGuiInputRouter
 	int left_down;
 	int left_pressed;
 	f32 mouse_wheel;
+	f32 mouse_wheel_x;
 	int press_claimed;
 	int capture_release_pending;
 } RgGuiInputRouter;
@@ -4354,6 +4357,7 @@ RGINLINE void rg_gui_input_router_begin(RgGuiInputRouter* router, const RgInputS
 	router->left_down = input ? rg_input_is_mouse_button_down(input, RG_MOUSE_BUTTON_LEFT) : 0;
 	router->left_pressed = input ? rg_input_is_mouse_button_pressed(input, RG_MOUSE_BUTTON_LEFT) : 0;
 	router->mouse_wheel = input ? input->mouse_scroll_y : 0.0f;
+	router->mouse_wheel_x = input ? input->mouse_scroll_x : 0.0f;
 	router->press_claimed = 0;
 	router->capture_release_pending = (!router->left_down && router->capture_viewport != 0u) ? 1 : 0;
 	router->mouse_focus_viewport = mouse_focus_viewport;
@@ -4477,6 +4481,7 @@ RGINLINE int rg_gui_input_router_route(RgGuiInputRouter* router, RgGuiId viewpor
 			router->last_valid[slot] = 1u;
 		}
 		out_input->mouse_scroll_y = router->mouse_wheel;
+		out_input->mouse_scroll_x = router->mouse_wheel_x;
 	}
 	else
 	{
@@ -4487,6 +4492,7 @@ RGINLINE int rg_gui_input_router_route(RgGuiInputRouter* router, RgGuiId viewpor
 		out_input->mouse_delta_x = 0;
 		out_input->mouse_delta_y = 0;
 		out_input->mouse_scroll_y = 0.0f;
+		out_input->mouse_scroll_x = 0.0f;
 		if (slot >= 0)
 		{
 			router->last_valid[slot] = 0u;
@@ -4498,6 +4504,7 @@ RGINLINE int rg_gui_input_router_route(RgGuiInputRouter* router, RgGuiId viewpor
 		memset(out_input->current_mouse, 0, sizeof(out_input->current_mouse));
 		memset(out_input->previous_mouse, 0, sizeof(out_input->previous_mouse));
 		out_input->mouse_scroll_y = 0.0f;
+		out_input->mouse_scroll_x = 0.0f;
 	}
 	else if (router->capture_viewport == 0u && router->mouse_focus_viewport != 0u &&
 	         router->mouse_focus_viewport != viewport_id && router->mouse_focus_inside)
@@ -4505,6 +4512,7 @@ RGINLINE int rg_gui_input_router_route(RgGuiInputRouter* router, RgGuiId viewpor
 		memset(out_input->current_mouse, 0, sizeof(out_input->current_mouse));
 		memset(out_input->previous_mouse, 0, sizeof(out_input->previous_mouse));
 		out_input->mouse_scroll_y = 0.0f;
+		out_input->mouse_scroll_x = 0.0f;
 	}
 
 	if (router->focus_viewport != viewport_id)
@@ -10662,6 +10670,7 @@ RGINLINE int rg_gui_init(RgGuiContext* ctx, RgArena* arena, const RgGuiInitDesc*
 	ctx->mouse_pressed = 0;
 	ctx->mouse_released = 0;
 	ctx->mouse_wheel = 0.0f;
+	ctx->mouse_wheel_x = 0.0f;
 	ctx->mouse_cursor = RG_GUI_CURSOR_DEFAULT;
 	ctx->input_capture_active = 0;
 	ctx->input_capture_next = 0;
@@ -10842,6 +10851,7 @@ RGINLINE void rg_gui_begin_frame_ex(RgGuiContext* ctx, const RgInputState* input
 	ctx->mouse_pressed = rg_input_is_mouse_button_pressed(input, RG_MOUSE_BUTTON_LEFT);
 	ctx->mouse_released = rg_input_is_mouse_button_released(input, RG_MOUSE_BUTTON_LEFT);
 	ctx->mouse_wheel = input->mouse_scroll_y;
+	ctx->mouse_wheel_x = input->mouse_scroll_x;
 	if (!ctx->window_focused)
 	{
 		ctx->mouse_down = 0;
@@ -10849,6 +10859,7 @@ RGINLINE void rg_gui_begin_frame_ex(RgGuiContext* ctx, const RgInputState* input
 		ctx->mouse_pressed = 0;
 		ctx->mouse_released = 0;
 		ctx->mouse_wheel = 0.0f;
+		ctx->mouse_wheel_x = 0.0f;
 	}
 	ctx->mouse_cursor = RG_GUI_CURSOR_DEFAULT;
 	ctx->viewport_id = 0u;
@@ -16008,6 +16019,7 @@ RGINLINE RgGuiViewport* rg_gui_viewport_begin_ordered_ex(
 	entry->prev_mouse_pressed = ctx->mouse_pressed;
 	entry->prev_mouse_released = ctx->mouse_released;
 	entry->prev_mouse_wheel = ctx->mouse_wheel;
+	entry->prev_mouse_wheel_x = ctx->mouse_wheel_x;
 	entry->prev_input_events = ctx->input_events;
 	entry->prev_input_window_id = ctx->input_window_id;
 	entry->prev_input_event_focus_id = ctx->input_event_focus_id;
@@ -16118,6 +16130,7 @@ RGINLINE RgGuiViewport* rg_gui_viewport_begin_ordered_ex(
 		ctx->mouse_pressed = rg_input_is_mouse_button_pressed(input, RG_MOUSE_BUTTON_LEFT);
 		ctx->mouse_released = rg_input_is_mouse_button_released(input, RG_MOUSE_BUTTON_LEFT);
 		ctx->mouse_wheel = input->mouse_scroll_y;
+		ctx->mouse_wheel_x = input->mouse_scroll_x;
 		if (ctx->input_capture_active)
 		{
 			ctx->mouse_pos = rg_gui_input_blocked_pos();
@@ -16133,6 +16146,7 @@ RGINLINE RgGuiViewport* rg_gui_viewport_begin_ordered_ex(
 		ctx->mouse_pressed = 0;
 		ctx->mouse_released = 0;
 		ctx->mouse_wheel = 0.0f;
+		ctx->mouse_wheel_x = 0.0f;
 	}
 	if (ctx->input && rg_input_is_key_pressed(ctx->input, RG_KEY_TAB))
 	{
@@ -16246,6 +16260,7 @@ RGINLINE void rg_gui_viewport_end(RgGuiContext* ctx, RgGuiViewport* viewport)
 	ctx->mouse_pressed = entry->prev_mouse_pressed;
 	ctx->mouse_released = entry->prev_mouse_released;
 	ctx->mouse_wheel = entry->prev_mouse_wheel;
+	ctx->mouse_wheel_x = entry->prev_mouse_wheel_x;
 	ctx->input_events = entry->prev_input_events;
 	ctx->input_window_id = entry->prev_input_window_id;
 	ctx->input_event_focus_id = entry->prev_input_event_focus_id;
@@ -32745,17 +32760,21 @@ RGINLINE u32 rg_gui_table_internal(RgGuiContext* ctx, RgGuiTableState* table, co
 	if (table->scroll_x < 0.0f) table->scroll_x = 0.0f;
 	if (table->scroll_x > max_scroll_x) table->scroll_x = max_scroll_x;
 
-	if (enabled && hovered && use_hscroll && ctx->input && ctx->mouse_wheel != 0.0f &&
-	    rg_gui_input_has_shift(ctx->input))
+	if (enabled && hovered && use_hscroll && ctx->input &&
+	    (ctx->mouse_wheel_x != 0.0f || (ctx->mouse_wheel != 0.0f && rg_gui_input_has_shift(ctx->input))))
 	{
-		int steps = rg_gui_wheel_steps(ctx->mouse_wheel);
+		/* A horizontal wheel (positive = right) scrolls right; shift + vertical
+		 * wheel keeps its convention (wheel up = left). */
+		int use_x = ctx->mouse_wheel_x != 0.0f;
+		int steps = rg_gui_wheel_steps(use_x ? -ctx->mouse_wheel_x : ctx->mouse_wheel);
 		if (steps != 0)
 		{
 			f32 step = ctx->style.text_height + ctx->style.padding * 2.0f;
 			table->scroll_x -= (f32)steps * step;
 			if (table->scroll_x < 0.0f) table->scroll_x = 0.0f;
 			if (table->scroll_x > max_scroll_x) table->scroll_x = max_scroll_x;
-			ctx->mouse_wheel = 0.0f;
+			if (use_x) ctx->mouse_wheel_x = 0.0f;
+			else ctx->mouse_wheel = 0.0f;
 		}
 	}
 
