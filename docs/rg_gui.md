@@ -9,7 +9,9 @@ The stack has three layers:
    and renders indexed geometry through SDL3 GPU.
 
 `rg_gui.h` uses `rg_text.h` for text measurement and retains the supplied
-`RgTextFont` pointer. SDL3 is required by the input layer. The GPU layer uses
+`RgTextFont` pointer. Input state comes from `rg_input_core.h`; `rg_gui.h` has no SDL
+dependency (`rg_gui_sdl.h` adds the SDL3 clipboard, cursor and IME glue and the
+`rg_input.h` event adapter). The GPU layer uses
 `rg_gpu.h` and stores an `SDL_GPUTexture*` in `RgGuiTexture` through
 `uintptr_t`.
 
@@ -286,6 +288,17 @@ state or set its own scissor.
 `RgGuiGpuStats.image_bind_calls`, `custom_image_draw_calls`, and
 `image_bind_failures` expose the callback decisions. Treat failures as a
 diagnostic condition in validation or telemetry builds.
+
+## Platform services
+
+`RgGuiInitDesc.platform` points at an optional `RgGuiPlatformServices`
+(clipboard set / get / free, UTF-8). `rg_gui_init` copies it; NULL disables
+copy and paste. SDL3 hosts pass `rg_gui_sdl_platform_services()`; other hosts
+supply their own three functions. `rg_gui_sdl.h` also carries the system
+cursors and the text-input / IME-area bookkeeping the demos use
+(`RgGuiSdlPlatform`, `rg_gui_sdl_apply_cursor`, `rg_gui_sdl_update_text_input`).
+`build.bat test_gui_no_sdl` compiles the core headers against a poisoned SDL
+include path to keep them SDL-free.
 
 ## Ordered input
 

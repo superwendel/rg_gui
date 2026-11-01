@@ -30,6 +30,7 @@ if /I "%TARGET%"=="test_release" goto test_release
 if /I "%TARGET%"=="test_assets" goto test_assets
 if /I "%TARGET%"=="test_no_string_ids" goto test_no_string_ids
 if /I "%TARGET%"=="test_gui" goto test_gui
+if /I "%TARGET%"=="test_gui_no_sdl" goto test_gui_no_sdl
 if /I "%TARGET%"=="test_demo_helpers" goto test_demo_helpers
 if /I "%TARGET%"=="test_renderer" goto test_renderer
 if /I "%TARGET%"=="test_gpu" goto test_gpu
@@ -144,6 +145,9 @@ if not errorlevel 0 exit /b 1
 call "%~f0" test_gui
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
+call "%~f0" test_gui_no_sdl
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
 call "%~f0" test_renderer
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
@@ -244,6 +248,18 @@ if not errorlevel 0 exit /b 1
 test_gui.exe
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
+exit /b 0
+
+
+:test_gui_no_sdl
+call :setup
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+echo Checking that rg_gui.h and rg_gui_renderer.h compile without SDL3 headers...
+cl /nologo /std:c11 /W4 /WX /O2 /D_CRT_SECURE_NO_WARNINGS /I "tests\poison" /I "%RG_CORE_DIR%\src" /I "%RG_TEXT_DIR%\src" /c tests\test_gui_no_sdl.c /Fo:test_gui_no_sdl.obj
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+echo rg_gui core headers are SDL-free.
 exit /b 0
 
 

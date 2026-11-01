@@ -248,8 +248,10 @@ int main(void)
 	glyph.w = 1;
 	glyph.h = 1;
 	glyph.x_advance = 8;
+	RgGuiPlatformServices sdl_services = rg_gui_sdl_platform_services();
 	RgGuiInitDesc gui_desc = {0};
 	gui_desc.font = &font;
+	gui_desc.platform = &sdl_services;
 	gui_desc.max_draw_cmds = 32u;
 	gui_desc.text_buffer_size = KB(1);
 	gui_desc.viewport_storage = lifecycle_viewport_storage_acquire;

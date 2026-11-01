@@ -728,8 +728,10 @@ int main(int argc, char** argv)
 	                          demo_font.atlas_width, demo_font.atlas_height);
 	if (!atlas) goto cleanup;
 
+	RgGuiPlatformServices sdl_services = rg_gui_sdl_platform_services();
 	RgGuiInitDesc gui_desc = {0};
 	gui_desc.font = &demo_font.font;
+	gui_desc.platform = &sdl_services;
 	gui_desc.text_lookup = &demo_font.text_lookup;
 	gui_desc.max_draw_cmds = 8192u;
 	gui_desc.text_buffer_size = KB(128);

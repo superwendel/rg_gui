@@ -1147,8 +1147,10 @@ int main(int argc, char** argv)
 	}
 
 	RgGuiContext gui;
+	RgGuiPlatformServices sdl_services = rg_gui_sdl_platform_services();
 	RgGuiInitDesc gui_desc = {0};
 	gui_desc.font = &demo_font.font;
+	gui_desc.platform = &sdl_services;
 	gui_desc.text_lookup = &demo_font.text_lookup;
 	gui_desc.max_draw_cmds = 16384u;
 	gui_desc.keep_hidden_draws = keep_hidden_draws;

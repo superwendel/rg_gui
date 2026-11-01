@@ -6,6 +6,7 @@
 #define RG_GUI_MENU_WIDTH_CACHE_SIZE 64u
 #define RG_GUI_ENABLE_VIEWPORTS 1
 #define RGINLINE static inline
+#include "../src/rg_input.h" /* SDL3 adapter: the text tests synthesize SDL events */
 #include "../src/rg_gui.h"
 
 #include <float.h>

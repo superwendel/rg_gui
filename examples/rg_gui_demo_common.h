@@ -90,177 +90,18 @@ typedef struct DemoFontAssets
 	u32 atlas_height;
 } DemoFontAssets;
 
-#define DEMO_PLATFORM_CURSOR_COUNT 5u
-
-typedef struct DemoPlatformState
-{
-	SDL_Cursor* cursors[DEMO_PLATFORM_CURSOR_COUNT];
-	SDL_Window* text_input_window;
-	RgGuiMouseCursor applied_cursor;
-	RgGuiRect ime_source_rect;
-	int ime_pixel_width;
-	int ime_pixel_height;
-	int cursor_applied;
-	int ime_area_valid;
-} DemoPlatformState;
-
-static SDL_SystemCursor demo_platform_sdl_cursor(RgGuiMouseCursor cursor)
-{
-	switch (cursor)
-	{
-		case RG_GUI_CURSOR_TEXT: return SDL_SYSTEM_CURSOR_TEXT;
-		case RG_GUI_CURSOR_MOVE: return SDL_SYSTEM_CURSOR_MOVE;
-		case RG_GUI_CURSOR_RESIZE_H: return SDL_SYSTEM_CURSOR_EW_RESIZE;
-		case RG_GUI_CURSOR_RESIZE_V: return SDL_SYSTEM_CURSOR_NS_RESIZE;
-		default: return SDL_SYSTEM_CURSOR_DEFAULT;
-	}
-}
-
-static void demo_platform_init(DemoPlatformState* state)
-{
-	memset(state, 0, sizeof(*state));
-	state->cursors[RG_GUI_CURSOR_DEFAULT] = SDL_GetDefaultCursor();
-	for (u32 i = (u32)RG_GUI_CURSOR_TEXT; i < DEMO_PLATFORM_CURSOR_COUNT; i++)
-	{
-		state->cursors[i] = SDL_CreateSystemCursor(
-		    demo_platform_sdl_cursor((RgGuiMouseCursor)i));
-		if (!state->cursors[i]) SDL_ClearError();
-	}
-}
-
-static int demo_platform_apply_cursor(DemoPlatformState* state,
-                                      const RgGuiPlatformOutput* output)
-{
-	RgGuiMouseCursor cursor = output ? output->cursor : RG_GUI_CURSOR_DEFAULT;
-	if ((u32)cursor >= DEMO_PLATFORM_CURSOR_COUNT) cursor = RG_GUI_CURSOR_DEFAULT;
-	if (state->cursor_applied && state->applied_cursor == cursor) return 1;
-
-	SDL_Cursor* sdl_cursor = state->cursors[cursor];
-	if (!sdl_cursor) sdl_cursor = state->cursors[RG_GUI_CURSOR_DEFAULT];
-	if (sdl_cursor && !SDL_SetCursor(sdl_cursor)) return 0;
-	state->applied_cursor = cursor;
-	state->cursor_applied = 1;
-	return 1;
-}
-
-static void demo_platform_process_event(DemoPlatformState* state,
-                                        const SDL_Event* event)
-{
-	if (!state->text_input_window || !event) return;
-	if (event->type != SDL_EVENT_WINDOW_RESIZED &&
-	    event->type != SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED &&
-	    event->type != SDL_EVENT_WINDOW_DISPLAY_CHANGED &&
-	    event->type != SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED)
-		return;
-	if (event->window.windowID == SDL_GetWindowID(state->text_input_window))
-		state->ime_area_valid = 0;
-}
-
-static void demo_platform_forget_text_window(DemoPlatformState* state,
-                                             RgInputState* input,
-                                             SDL_Window* window)
-{
-	if (!window || state->text_input_window != window) return;
-	SDL_SetTextInputArea(window, NULL, 0);
-	if (SDL_StopTextInput(window)) input->text_input_active = false;
-	state->text_input_window = NULL;
-	state->ime_area_valid = 0;
-}
-
-static int demo_platform_set_text_input(RgInputState* input,
-                                        SDL_Window* window, int enabled)
-{
-	if (!input || !window)
-	{
-		SDL_SetError("Text input requires an input state and SDL window");
-		return 0;
-	}
-	if (enabled)
-	{
-		if (!SDL_StartTextInput(window)) return 0;
-	}
-	else
-	{
-		if (!SDL_StopTextInput(window)) return 0;
-	}
-	input->text_input_active = enabled != 0;
-	return 1;
-}
-
-static int demo_platform_update_text_input(DemoPlatformState* state,
-                                           RgInputState* input,
-                                           SDL_Window* window,
-                                           const RgGuiPlatformOutput* output,
-                                           int pixel_width, int pixel_height)
-{
-	SDL_Window* desired = output && output->wants_text_input ? window : NULL;
-	if (state->text_input_window != desired)
-	{
-		if (state->text_input_window)
-		{
-			if (!SDL_SetTextInputArea(state->text_input_window, NULL, 0)) return 0;
-			state->ime_area_valid = 0;
-			if (!demo_platform_set_text_input(input, state->text_input_window, 0)) return 0;
-		}
-		state->text_input_window = NULL;
-		state->ime_area_valid = 0;
-		if (desired)
-		{
-			if (!demo_platform_set_text_input(input, desired, 1)) return 0;
-			state->text_input_window = desired;
-		}
-	}
-	if (!desired) return 1;
-
-	if (!output->ime_caret_valid)
-	{
-		if (state->ime_area_valid)
-		{
-			if (!SDL_SetTextInputArea(desired, NULL, 0)) return 0;
-			state->ime_area_valid = 0;
-		}
-		return 1;
-	}
-
-	RgGuiRect source = output->ime_caret_rect;
-	if (state->ime_area_valid && state->ime_pixel_width == pixel_width &&
-	    state->ime_pixel_height == pixel_height &&
-	    state->ime_source_rect.x == source.x && state->ime_source_rect.y == source.y &&
-	    state->ime_source_rect.w == source.w && state->ime_source_rect.h == source.h)
-		return 1;
-
-	int window_width = 0;
-	int window_height = 0;
-	if (pixel_width <= 0 || pixel_height <= 0 ||
-	    !SDL_GetWindowSize(desired, &window_width, &window_height) ||
-	    window_width <= 0 || window_height <= 0)
-		return 0;
-	f32 scale_x = (f32)window_width / (f32)pixel_width;
-	f32 scale_y = (f32)window_height / (f32)pixel_height;
-	int x0 = (int)SDL_floorf(source.x * scale_x);
-	int y0 = (int)SDL_floorf(source.y * scale_y);
-	int x1 = (int)SDL_ceilf((source.x + source.w) * scale_x);
-	int y1 = (int)SDL_ceilf((source.y + source.h) * scale_y);
-	SDL_Rect ime_rect = {x0, y0, x1 > x0 ? x1 - x0 : 1, y1 > y0 ? y1 - y0 : 1};
-	if (!SDL_SetTextInputArea(desired, &ime_rect, 0)) return 0;
-
-	state->ime_source_rect = source;
-	state->ime_pixel_width = pixel_width;
-	state->ime_pixel_height = pixel_height;
-	state->ime_area_valid = 1;
-	return 1;
-}
-
-static void demo_platform_destroy(DemoPlatformState* state, RgInputState* input)
-{
-	if (state->text_input_window)
-		demo_platform_forget_text_window(state, input, state->text_input_window);
-	if (state->cursors[RG_GUI_CURSOR_DEFAULT])
-		SDL_SetCursor(state->cursors[RG_GUI_CURSOR_DEFAULT]);
-	for (u32 i = (u32)RG_GUI_CURSOR_TEXT; i < DEMO_PLATFORM_CURSOR_COUNT; i++)
-		if (state->cursors[i]) SDL_DestroyCursor(state->cursors[i]);
-	memset(state, 0, sizeof(*state));
-}
+/* Cursor, clipboard and text-input glue now lives in rg_gui_sdl.h; these
+ * aliases keep the demo sources unchanged. */
+#include "../src/rg_gui_sdl.h"
+#define DEMO_PLATFORM_CURSOR_COUNT RG_GUI_SDL_CURSOR_COUNT
+typedef RgGuiSdlPlatform DemoPlatformState;
+#define demo_platform_init rg_gui_sdl_platform_init
+#define demo_platform_apply_cursor rg_gui_sdl_apply_cursor
+#define demo_platform_process_event rg_gui_sdl_process_event
+#define demo_platform_forget_text_window rg_gui_sdl_forget_text_window
+#define demo_platform_set_text_input rg_gui_sdl_set_text_input
+#define demo_platform_update_text_input rg_gui_sdl_update_text_input
+#define demo_platform_destroy rg_gui_sdl_platform_destroy
 
 static int demo_read_file(const char* path, void** out_data, size_t* out_size)
 {

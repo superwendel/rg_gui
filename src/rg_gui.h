@@ -60,7 +60,8 @@
 //   RG_GUI_LABEL_COPY and RG_GUI_COPY_DYNAMIC_TEXT must be 1 if defined.
 //
 // NOTES:
-//   - Requires rg_input.h (rg_input_core types; SDL3 for clipboard and key names until rg_gui_sdl.h).
+//   - Requires rg_input_core.h (rg_core) for input state; no SDL. rg_gui_sdl.h adds the
+//     SDL3 clipboard, cursor and IME glue; other hosts pass their own RgGuiPlatformServices.
 //   - Requires rg_text.h for font measurement and renderer cache identity.
 //   - Ordinary label and dynamic-value APIs snapshot text in the current frame.
 //     Use rg_gui_label_static for constant labels to skip text copies.
@@ -87,7 +88,7 @@
 #include "rg_defs.h"
 #include "rg_bin.h"
 #include "rg_hash.h"
-#include "rg_input.h"
+#include "rg_input_core.h"
 #include "rg_math_vec.h"
 #include "rg_sprintf_hybrid.h"
 #include "rg_text.h"
@@ -1484,6 +1485,20 @@ typedef enum RgGuiMouseCursor
 	RG_GUI_CURSOR_RESIZE_V = 4
 } RgGuiMouseCursor;
 
+/**
+ * Optional host services. Clipboard text is UTF-8. clipboard_get returns a
+ * buffer the GUI hands back to clipboard_free (NULL or "" when nothing is
+ * available). A NULL `platform` or NULL function disables the feature: copy
+ * returns 0 and paste does nothing. rg_gui_sdl.h provides the SDL3 set.
+ */
+typedef struct RgGuiPlatformServices
+{
+	void* user;
+	int (*clipboard_set)(void* user, const char* utf8);
+	char* (*clipboard_get)(void* user);
+	void (*clipboard_free)(void* user, char* text);
+} RgGuiPlatformServices;
+
 typedef struct RgGuiPlatformOutput
 {
 	RgGuiMouseCursor cursor;
@@ -1624,6 +1639,7 @@ typedef struct RgGuiContext
 	const RgTextFont* font;
 	RgGuiImeCallback ime_callback;
 	void* ime_callback_user;
+	RgGuiPlatformServices platform; // copied at init; all NULL when the host gave none
 	RgGuiTextMeasureCacheEntry* text_measure_cache;
 	u32 text_measure_cache_capacity;
 	u32 text_measure_cache_mask;
@@ -1777,6 +1793,7 @@ typedef struct RgGuiInitDesc
 	size_t text_buffer_size;
 	RgGuiImeCallback ime_callback;
 	void* ime_callback_user;
+	const RgGuiPlatformServices* platform; // Optional; copied by rg_gui_init. NULL disables clipboard.
 	u32 value_cache_size;
 	u32 text_measure_cache_size;
 	u32 text_length_cache_size;
@@ -4635,7 +4652,7 @@ RGINLINE const char* rg_gui_scancode_name(RgKey scancode, char* buffer, size_t b
 		return buffer;
 	}
 
-	const char* name = SDL_GetScancodeName(scancode);
+	const char* name = rg_key_name(scancode);
 	if (name && name[0] != '\0')
 	{
 		return name;
@@ -7731,7 +7748,7 @@ RGINLINE void rg_gui_text_edit_normalize_clipboard_text(char* text, int allow_ne
 	text[write] = '\0';
 }
 
-RGINLINE int rg_gui_text_edit_copy_selection(RgGuiTextEditState* edit)
+RGINLINE int rg_gui_text_edit_copy_selection(const RgGuiPlatformServices* platform, RgGuiTextEditState* edit)
 {
 	if (!rg_gui_text_edit_has_selection(edit))
 	{
@@ -7747,7 +7764,7 @@ RGINLINE int rg_gui_text_edit_copy_selection(RgGuiTextEditState* edit)
 
 	char saved = edit->buffer[end];
 	edit->buffer[end] = '\0';
-	int copied = SDL_SetClipboardText(edit->buffer + start) ? 1 : 0;
+	int copied = (platform && platform->clipboard_set) ? (platform->clipboard_set(platform->user, edit->buffer + start) ? 1 : 0) : 0;
 	edit->buffer[end] = saved;
 	return copied;
 }
@@ -8154,12 +8171,12 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 
 		if (rg_input_is_key_pressed(ctx->input, RG_KEY_C))
 		{
-			rg_gui_text_edit_copy_selection(edit);
+			rg_gui_text_edit_copy_selection(&ctx->platform, edit);
 		}
 
 		if (!read_only && rg_input_is_key_pressed(ctx->input, RG_KEY_X))
 		{
-			if (rg_gui_text_edit_copy_selection(edit))
+			if (rg_gui_text_edit_copy_selection(&ctx->platform, edit))
 			{
 				changed |= rg_gui_text_edit_delete_range(edit, edit->selection_start, edit->selection_end);
 			}
@@ -8167,15 +8184,15 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 
 		if (!read_only && rg_input_is_key_pressed(ctx->input, RG_KEY_V))
 		{
-			char* clip = SDL_GetClipboardText();
+			char* clip = ctx->platform.clipboard_get ? ctx->platform.clipboard_get(ctx->platform.user) : NULL;
 			if (clip && clip[0])
 			{
 				rg_gui_text_edit_normalize_clipboard_text(clip, allow_newline);
 				changed |= rg_gui_text_edit_insert_filtered(ctx, edit, clip, filter_flags);
 			}
-			if (clip)
+			if (clip && ctx->platform.clipboard_free)
 			{
-				SDL_free(clip);
+				ctx->platform.clipboard_free(ctx->platform.user, clip);
 			}
 		}
 	}
@@ -10291,6 +10308,7 @@ RGINLINE int rg_gui_init_desc_resolve(const RgGuiInitDesc* desc, RgGuiInitDesc* 
 	out->text_buffer_size = desc->text_buffer_size ? desc->text_buffer_size : RG_GUI_TEXT_BUFFER_SIZE;
 	out->ime_callback = desc->ime_callback;
 	out->ime_callback_user = desc->ime_callback_user;
+	out->platform = desc->platform;
 	out->value_cache_size = desc->value_cache_size ? desc->value_cache_size : RG_GUI_VALUE_CACHE_SIZE;
 	out->text_measure_cache_size = desc->text_measure_cache_size ? desc->text_measure_cache_size : RG_GUI_TEXT_MEASURE_CACHE_SIZE;
 	out->text_length_cache_size = desc->text_length_cache_size ? desc->text_length_cache_size : RG_GUI_TEXT_LENGTH_CACHE_SIZE;
@@ -10449,6 +10467,8 @@ RGINLINE int rg_gui_init(RgGuiContext* ctx, RgArena* arena, const RgGuiInitDesc*
 	ctx->text_lookup = init.text_lookup;
 	ctx->ime_callback = init.ime_callback;
 	ctx->ime_callback_user = init.ime_callback_user;
+	memset(&ctx->platform, 0, sizeof(ctx->platform));
+	if (init.platform) ctx->platform = *init.platform;
 	ctx->text_measure_cache = NULL;
 	ctx->text_measure_cache_capacity = 0u;
 	ctx->text_measure_cache_mask = 0u;
