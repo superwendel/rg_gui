@@ -17839,6 +17839,7 @@ RGINLINE int rg_gui_splitter_v(RgGuiContext* ctx, RgGuiRect rect, f32* size, f32
 		}
 	}
 
+	if (enabled && (hovered || ctx->active_id == id)) ctx->mouse_cursor = RG_GUI_CURSOR_RESIZE_H;
 	rg_vec4 color = ctx->style.color_border;
 	if (enabled && ctx->active_id == id)
 	{
@@ -17912,6 +17913,7 @@ RGINLINE int rg_gui_splitter_h(RgGuiContext* ctx, RgGuiRect rect, f32* size, f32
 		}
 	}
 
+	if (enabled && (hovered || ctx->active_id == id)) ctx->mouse_cursor = RG_GUI_CURSOR_RESIZE_V;
 	rg_vec4 color = ctx->style.color_border;
 	if (enabled && ctx->active_id == id)
 	{
