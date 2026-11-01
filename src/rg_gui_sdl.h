@@ -76,7 +76,7 @@ RGINLINE RgGuiPlatformServices rg_gui_sdl_platform_services(void)
 // CURSORS AND TEXT INPUT
 // =============================================================================
 
-#define RG_GUI_SDL_CURSOR_COUNT 5u
+#define RG_GUI_SDL_CURSOR_COUNT ((u32)RG_GUI_CURSOR_COUNT)
 
 typedef struct RgGuiSdlPlatform
 {
@@ -98,6 +98,9 @@ RGINLINE SDL_SystemCursor rg_gui_sdl_system_cursor(RgGuiMouseCursor cursor)
 		case RG_GUI_CURSOR_MOVE: return SDL_SYSTEM_CURSOR_MOVE;
 		case RG_GUI_CURSOR_RESIZE_H: return SDL_SYSTEM_CURSOR_EW_RESIZE;
 		case RG_GUI_CURSOR_RESIZE_V: return SDL_SYSTEM_CURSOR_NS_RESIZE;
+		case RG_GUI_CURSOR_HAND: return SDL_SYSTEM_CURSOR_POINTER;
+		case RG_GUI_CURSOR_RESIZE_NWSE: return SDL_SYSTEM_CURSOR_NWSE_RESIZE;
+		case RG_GUI_CURSOR_RESIZE_NESW: return SDL_SYSTEM_CURSOR_NESW_RESIZE;
 		default: return SDL_SYSTEM_CURSOR_DEFAULT;
 	}
 }

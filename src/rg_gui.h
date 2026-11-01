@@ -1482,7 +1482,11 @@ typedef enum RgGuiMouseCursor
 	RG_GUI_CURSOR_TEXT = 1,
 	RG_GUI_CURSOR_MOVE = 2,
 	RG_GUI_CURSOR_RESIZE_H = 3,
-	RG_GUI_CURSOR_RESIZE_V = 4
+	RG_GUI_CURSOR_RESIZE_V = 4,
+	RG_GUI_CURSOR_HAND = 5,        // links, drag handles
+	RG_GUI_CURSOR_RESIZE_NWSE = 6, // diagonal resize: top-left / bottom-right
+	RG_GUI_CURSOR_RESIZE_NESW = 7,
+	RG_GUI_CURSOR_COUNT = 8
 } RgGuiMouseCursor;
 
 /**
