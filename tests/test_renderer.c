@@ -707,6 +707,36 @@ static f32 test_mono_layout(void* user, const char* text, size_t length, f32 sca
 	return pen;
 }
 
+/* Three ink quads per byte: a provider that emits more glyphs than bytes
+ * (decompositions, split matras), defeating the byte-count reservation. */
+static f32 test_expand_layout(void* user, const char* text, size_t length, f32 scale,
+                              RgGuiTextEmitFn emit, void* emit_user)
+{
+	(void)user;
+	(void)text;
+	f32 pen = 0.0f;
+	for (size_t i = 0u; i < length; i++)
+	{
+		for (u32 k = 0u; k < 3u; k++)
+		{
+			RgGuiTextGlyph glyph;
+			memset(&glyph, 0, sizeof(glyph));
+			glyph.x = pen;
+			glyph.w = 2.0f * scale;
+			glyph.h = 8.0f * scale;
+			glyph.u1 = 2u;
+			glyph.v1 = 8u;
+			glyph.pen_x = pen;
+			glyph.advance = 2.0f * scale;
+			glyph.cluster = (u32)i;
+			glyph.ink = 1u;
+			if (emit && !emit(emit_user, &glyph)) return pen;
+			pen += glyph.advance;
+		}
+	}
+	return pen;
+}
+
 static f32 test_mono_line_height(void* user, f32 scale)
 {
 	(void)user;
@@ -774,6 +804,32 @@ static void test_renderer_text_provider(void)
 	                rg_gui_renderer_stats(&renderer)->frame_cache_hits == 1u &&
 	                rg_gui_renderer_stats(&renderer)->total_cache_resets == resets + 1u,
 	            "an unchanged generation keeps the cache");
+
+	/* A provider emitting more glyphs than bytes: "a" is one byte, so the
+	 * optimistic reservation is one page of two quads; the run must still be
+	 * cached with all three quads. "ab" (six quads) exercises the multi-page writer. */
+	renderer.core.provider.layout = test_expand_layout; /* the renderer copied the provider at init */
+	rg_gui_renderer_clear_cache(&renderer);
+	cmd = test_text_cmd("a", 0.0f, 0.0f, 1.0f, 1, 1, 1, 1);
+	list = test_draw_list(&cmd, 1u);
+	rg_gui_renderer_begin_frame(&renderer);
+	TEST_ASSERT(rg_gui_renderer_prepare(&renderer, &list, list.count), "expanding provider prepare");
+	prepared = rg_gui_renderer_prepared(&renderer);
+	TEST_ASSERT(prepared->glyph_count == 3u, "a glyph count above the byte count is not truncated");
+	TEST_ASSERT(rg_gui_renderer_stats(&renderer)->frame_cache_bypasses == 0u &&
+	                rg_gui_renderer_allocator_stats(&renderer)->allocated_pages == 2u,
+	            "the run is cached on exactly the pages it needs");
+	rg_gui_renderer_begin_frame(&renderer);
+	TEST_ASSERT(rg_gui_renderer_prepare(&renderer, &list, list.count) &&
+	                rg_gui_renderer_prepared(&renderer)->glyph_count == 3u &&
+	                rg_gui_renderer_stats(&renderer)->frame_cache_hits == 1u,
+	            "the cached run keeps all three quads");
+	cmd = test_text_cmd("ab", 0.0f, 0.0f, 1.0f, 1, 1, 1, 1);
+	list = test_draw_list(&cmd, 1u);
+	rg_gui_renderer_begin_frame(&renderer);
+	TEST_ASSERT(rg_gui_renderer_prepare(&renderer, &list, list.count) &&
+	                rg_gui_renderer_prepared(&renderer)->glyph_count == 6u,
+	            "six quads from two bytes across three pages");
 	free(memory);
 	TEST_PASS();
 }

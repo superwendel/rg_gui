@@ -1765,8 +1765,11 @@ static RgGuiRendererBaseRunResult rg_gui_renderer_get_run(RgGuiRenderer* ctx, co
 	u32 first_page = UINT32_MAX;
 	int built_optimistically = 0;
 	u32 reclaim_level = 0u;
-	// Every emitted glyph consumes at least one UTF-8 byte. Reserve this bounded
-	// upper limit only from available pages; overestimation must not evict runs.
+	u32 exact_count = UINT32_MAX; // counted once if the optimistic build may have been cut short
+	// The bitmap provider emits at most one glyph per UTF-8 byte; shaped
+	// providers nearly always do too. Reserve that many quads only from available
+	// pages (overestimation must not evict runs) and verify after building: a
+	// build that filled the reservation exactly may have been truncated.
 	u32 optimistic_pages = text_size && scale != 0.0f &&
 	                       text_size <= RG_GUI_RENDERER_OPTIMISTIC_TEXT_BYTES &&
 	                       text_size <= UINT32_MAX
@@ -1793,6 +1796,18 @@ static RgGuiRendererBaseRunResult rg_gui_renderer_get_run(RgGuiRenderer* ctx, co
 		{
 			quad_count = rg_gui_renderer_build_pages(
 			    ctx, text, text_size, scale, first_page, optimistic_pages * ctx->page_quads);
+			if (quad_count == optimistic_pages * ctx->page_quads)
+			{
+				exact_count = rg_gui_renderer_base_count_quads(core, text, text_size, scale);
+				if (exact_count > quad_count)
+				{
+					// The provider emitted more glyphs than bytes: rebuild exactly.
+					rg_gui_renderer_free_pages(ctx, first_page, optimistic_pages, 0u);
+					first_page = UINT32_MAX;
+					quad_count = 0u;
+					goto exact;
+				}
+			}
 			page_count = rg_gui_renderer_pages_required(ctx, quad_count);
 			if (page_count < optimistic_pages)
 			{
@@ -1812,9 +1827,11 @@ static RgGuiRendererBaseRunResult rg_gui_renderer_get_run(RgGuiRenderer* ctx, co
 			built_optimistically = 1;
 		}
 	}
+exact:
 	if (!built_optimistically)
 	{
-		quad_count = rg_gui_renderer_base_count_quads(core, text, text_size, scale);
+		quad_count = exact_count != UINT32_MAX ? exact_count
+		                                       : rg_gui_renderer_base_count_quads(core, text, text_size, scale);
 		page_count = rg_gui_renderer_pages_required(ctx, quad_count);
 	}
 	core->stats.frame_laid_out_glyphs = rg_gui_renderer_base_u32_add_saturate(
