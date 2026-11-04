@@ -482,6 +482,11 @@ typedef struct RgGuiTextProvider
 	u32 (*atlas_generation)(void* user); /* Optional; NULL means the atlas never changes. */
 	u32 atlas_width;
 	u32 atlas_height;
+	/* Optional, for editing over shaped text: the caret x of a byte offset into
+	 * `text` (0..length) and the byte offset whose caret is nearest pixel x. NULL:
+	 * the context measures source-order prefixes, right only for left-to-right text. */
+	f32 (*caret_x)(void* user, const char* text, size_t length, f32 scale, size_t byte_offset);
+	size_t (*hit_test)(void* user, const char* text, size_t length, f32 scale, f32 x);
 } RgGuiTextProvider;
 
 /** State of the bitmap-font provider; the renderer owns one, the context builds one per call. */
@@ -4332,6 +4337,42 @@ RGINLINE f32 rg_gui_text_layout(const RgGuiContext* ctx, const char* text, size_
 	return rg_gui_text_bitmap_layout(&bitmap, text, length, scale, emit, emit_user);
 }
 
+/** Caret x of `offset` (0..length) in `text`, relative to the text origin. */
+RGINLINE f32 rg_gui_text_caret_x(const RgGuiContext* ctx, const char* text, size_t length, size_t offset)
+{
+	if (!ctx || !text)
+	{
+		return 0.0f;
+	}
+	if (offset > length) offset = length;
+	if (ctx->text_provider.caret_x && length)
+	{
+		return ctx->text_provider.caret_x(ctx->text_provider.user, text, length, rg_gui_text_base_scale(ctx), offset);
+	}
+	return rg_gui_text_layout(ctx, text, offset, NULL, NULL);
+}
+
+/** Caret x of `offset` in the part of `text` drawn from `display_start` to `length`. */
+RGINLINE f32 rg_gui_text_offset_x(const RgGuiContext* ctx, const char* text, size_t length,
+                                  size_t display_start, size_t offset)
+{
+	if (display_start > length) display_start = length;
+	if (offset < display_start) offset = display_start;
+	return rg_gui_text_caret_x(ctx, text + display_start, length - display_start, offset - display_start);
+}
+
+/** Provider hit test: 1 and the offset nearest x when the provider has one. */
+RGINLINE int rg_gui_text_hit_test(const RgGuiContext* ctx, const char* text, size_t length, f32 x, size_t* out_offset)
+{
+	if (!ctx || !text || !ctx->text_provider.hit_test)
+	{
+		return 0;
+	}
+	*out_offset = length ? ctx->text_provider.hit_test(ctx->text_provider.user, text, length, rg_gui_text_base_scale(ctx), x) : 0u;
+	if (*out_offset > length) *out_offset = length;
+	return 1;
+}
+
 RGINLINE u32 rg_gui_text_scale_bits(const RgGuiContext* ctx)
 {
 	f32 scale = rg_gui_text_base_scale(ctx);
@@ -7996,6 +8037,13 @@ RGINLINE size_t rg_gui_text_edit_pick_cursor(const RgGuiContext* ctx, const char
 
 	size_t length = strlen(buffer);
 	f32 local_x = ctx->mouse_pos.x - (field.x + ctx->style.padding);
+	{
+		size_t hit; /* shaped text: the provider knows where each offset is drawn */
+		if (rg_gui_text_hit_test(ctx, buffer, length, local_x, &hit))
+		{
+			return hit;
+		}
+	}
 	if (local_x <= 0.0f)
 	{
 		return 0u;
@@ -8798,7 +8846,18 @@ RGINLINE f32 rg_gui_text_area_measure_range(const RgGuiContext* ctx, const char*
 
 RGINLINE size_t rg_gui_text_area_pick_column(const RgGuiContext* ctx, const char* line, size_t line_len, f32 local_x)
 {
-	if (!ctx || !line || line_len == 0u || local_x <= 0.0f)
+	if (!ctx || !line || line_len == 0u)
+	{
+		return 0u;
+	}
+	{
+		size_t hit;
+		if (rg_gui_text_hit_test(ctx, line, line_len, local_x, &hit))
+		{
+			return hit;
+		}
+	}
+	if (local_x <= 0.0f)
 	{
 		return 0u;
 	}
@@ -8872,6 +8931,9 @@ typedef struct RgGuiTextWrapScan
 	f32 previous_lines; /* widest completed hard line */
 	u32 line;
 	u32 overflowed;
+	u32 reordered;      /* visual order is not source order (a right-to-left run) */
+	u32 seen;
+	u32 last_cluster;
 	size_t overflow;    /* range-relative cluster byte of the first glyph that does not fit */
 } RgGuiTextWrapScan;
 
@@ -8884,6 +8946,10 @@ RGINLINE int rg_gui_text_wrap_scan_emit(void* user, const RgGuiTextGlyph* glyph)
 		scan->line = glyph->line;
 	}
 	scan->line_width = glyph->pen_x + glyph->advance;
+	/* In source order the first glyph starts at byte 0 and clusters never decrease. */
+	if (glyph->cluster < scan->last_cluster || (!scan->seen && glyph->cluster != 0u)) scan->reordered = 1u;
+	scan->seen = 1u;
+	scan->last_cluster = glyph->cluster;
 	f32 width = scan->line_width > scan->previous_lines ? scan->line_width : scan->previous_lines;
 	if (width <= scan->wrap_width)
 	{
@@ -8920,6 +8986,31 @@ RGINLINE size_t rg_gui_text_area_wrap_line_end(const RgGuiContext* ctx, const ch
 	// The boundary before the first glyph that does not fit ends the widest fitting
 	// prefix. Break after the last blank at or before it when there is one.
 	size_t best = rg_gui_utf8_boundary_before_or_at(buffer, hard_end, start + scan.overflow);
+	if (scan.reordered)
+	{
+		// Glyphs were reordered (a right-to-left run): the visual overflow point says
+		// nothing about which logical prefix fits. Wrapped lines are laid out on
+		// their own, so find the widest prefix that fits by measuring prefixes.
+		size_t low = start;
+		size_t high = hard_end;
+		while (low < high)
+		{
+			size_t mid = rg_gui_utf8_midpoint_boundary(buffer, hard_end, low, high);
+			if (mid >= high)
+			{
+				break;
+			}
+			if (rg_gui_text_layout(ctx, buffer + start, mid - start, NULL, NULL) <= wrap_width)
+			{
+				low = mid;
+			}
+			else
+			{
+				high = mid;
+			}
+		}
+		best = low;
+	}
 	for (size_t i = best; i > start; i--)
 	{
 		if (buffer[i] == ' ' || buffer[i] == '\t')
@@ -20081,9 +20172,8 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 		{
 			rg_vec2 text_pos = rg_vec2(field.x + ctx->style.padding,
 			                           field.y + (field.h - ctx->style.text_height) * 0.5f);
-			f32 base = rg_gui_text_measure_prefix(ctx, render_buffer, display_start);
-			f32 x0 = text_pos.x + rg_gui_text_measure_prefix(ctx, render_buffer, sel_start) - base;
-			f32 x1 = text_pos.x + rg_gui_text_measure_prefix(ctx, render_buffer, sel_end) - base;
+			f32 x0 = text_pos.x + rg_gui_text_offset_x(ctx, render_buffer, display_end, display_start, sel_start);
+			f32 x1 = text_pos.x + rg_gui_text_offset_x(ctx, render_buffer, display_end, display_start, sel_end);
 			if (x1 < x0)
 			{
 				f32 tmp = x0;
@@ -20111,11 +20201,16 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 	{
 		size_t preedit_start = preedit_layout.preedit_start;
 		size_t preedit_end = preedit_layout.preedit_end;
-		f32 base = rg_gui_text_measure_prefix(ctx, render_buffer, display_start);
 		f32 x0 = field.x + ctx->style.padding +
-		         rg_gui_text_measure_prefix(ctx, render_buffer, preedit_start) - base;
+		         rg_gui_text_offset_x(ctx, render_buffer, display_end, display_start, preedit_start);
 		f32 x1 = field.x + ctx->style.padding +
-		         rg_gui_text_measure_prefix(ctx, render_buffer, preedit_end) - base;
+		         rg_gui_text_offset_x(ctx, render_buffer, display_end, display_start, preedit_end);
+		if (x1 < x0)
+		{
+			f32 tmp = x0;
+			x0 = x1;
+			x1 = tmp;
+		}
 		f32 min_x = field.x + ctx->style.padding;
 		f32 max_x = field.x + field.w - ctx->style.padding;
 		if (x0 < min_x) x0 = min_x;
@@ -20149,11 +20244,11 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 			}
 			size_t render_cursor = preedit_length > 0u ? preedit_layout.caret : cursor;
 
-			f32 base = rg_gui_text_measure_prefix(ctx, render_buffer, display_start);
 			f32 cursor_x = text_pos.x +
-			               rg_gui_text_measure_prefix(ctx, render_buffer, render_cursor) - base;
-			if (rg_gui_text_available(ctx))
+			               rg_gui_text_offset_x(ctx, render_buffer, display_end, display_start, render_cursor);
+			if (rg_gui_text_available(ctx) && !ctx->text_provider.caret_x)
 			{
+				f32 base = rg_gui_text_measure_prefix(ctx, render_buffer, display_start);
 				if (preedit_length == 0u)
 				{
 					if (ctx->text_edit_state->dirty ||

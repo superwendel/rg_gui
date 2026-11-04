@@ -11,6 +11,7 @@ typedef struct MonoProvider
 	u32 generation;
 	u32 layout_calls;
 	u32 emitted;
+	int rtl; /* lay the text out right-to-left: byte i at pen (n-1-i) units, emitted in visual order */
 } MonoProvider;
 
 /* Six pixels per codepoint at scale 1, five-by-eight ink quads, blanks without ink. */
@@ -24,6 +25,33 @@ static f32 mono_provider_layout(void* user, const char* text, size_t length, f32
 	f32 line_y = 0.0f;
 	u32 line = 0u;
 	size_t offset = 0u;
+	if (mono->rtl)
+	{
+		/* One line of single-byte text, mirrored: visual position v holds byte n-1-v. */
+		size_t v;
+		for (v = 0u; v < length; v++)
+		{
+			size_t byte = length - 1u - v;
+			RgGuiTextGlyph glyph;
+			memset(&glyph, 0, sizeof(glyph));
+			glyph.x = pen;
+			glyph.w = 5.0f * scale;
+			glyph.h = 8.0f * scale;
+			glyph.u1 = 5u;
+			glyph.v1 = 8u;
+			glyph.pen_x = pen;
+			glyph.advance = 6.0f * scale;
+			glyph.cluster = (u32)byte;
+			glyph.ink = text[byte] != ' ';
+			if (emit)
+			{
+				mono->emitted++;
+				if (!emit(emit_user, &glyph)) break;
+			}
+			pen += glyph.advance;
+		}
+		return pen;
+	}
 	while (offset < length)
 	{
 		size_t cluster = offset;
@@ -57,6 +85,26 @@ static f32 mono_provider_layout(void* user, const char* text, size_t length, f32
 		pen += glyph.advance;
 	}
 	return pen > max_width ? pen : max_width;
+}
+
+/* RTL caret and hit test for the mirrored layout: offset b sits at (n-b) units. */
+static f32 mono_rtl_caret_x(void* user, const char* text, size_t length, f32 scale, size_t byte_offset)
+{
+	(void)user;
+	(void)text;
+	return (f32)(length - byte_offset) * 6.0f * scale;
+}
+
+static size_t mono_rtl_hit_test(void* user, const char* text, size_t length, f32 scale, f32 x)
+{
+	f32 unit = 6.0f * scale;
+	f32 from_right = (f32)length * unit - x;
+	size_t b;
+	(void)user;
+	(void)text;
+	if (from_right <= 0.0f) return 0u;
+	b = (size_t)(from_right / unit + 0.5f);
+	return b > length ? length : b;
 }
 
 static f32 mono_provider_line_height(void* user, f32 scale)
@@ -134,6 +182,46 @@ static int test_text_provider(void)
 	// Caret placement rounds to the nearest boundary.
 	TEXT_PROVIDER_CHECK(rg_gui_text_area_pick_column(gui, words, len, 2.9f * unit) == 3u);
 	TEXT_PROVIDER_CHECK(rg_gui_text_area_pick_column(gui, words, len, 2.4f * unit) == 2u);
+	// Without provider carets, offsets are prefix widths.
+	TEXT_PROVIDER_CHECK(fabsf(rg_gui_text_caret_x(gui, words, len, 4u) - 4.0f * unit) < 1e-4f);
+	TEXT_PROVIDER_CHECK(fabsf(rg_gui_text_offset_x(gui, words, len, 5u, 9u) - 4.0f * unit) < 1e-4f);
+
+	// Right-to-left text through the provider's caret and hit test: the logical
+	// start is at the right edge, so a click at the left edge is the end.
+	mono.rtl = 1;
+	gui->text_provider.caret_x = mono_rtl_caret_x;
+	gui->text_provider.hit_test = mono_rtl_hit_test;
+	TEXT_PROVIDER_CHECK(fabsf(rg_gui_text_caret_x(gui, words, len, 0u) - (f32)len * unit) < 1e-4f);
+	TEXT_PROVIDER_CHECK(fabsf(rg_gui_text_caret_x(gui, words, len, len) - 0.0f) < 1e-4f);
+	TEXT_PROVIDER_CHECK(fabsf(rg_gui_text_offset_x(gui, words, len, 5u, 5u) - 9.0f * unit) < 1e-4f);
+	{
+		RgGuiRect field = rg_gui_make_rect(10.0f, 0.0f, 400.0f, 20.0f);
+		f32 origin = field.x + gui->style.padding;
+		gui->mouse_pos = rg_vec2(origin + 0.5f, 5.0f);
+		TEXT_PROVIDER_CHECK(rg_gui_text_edit_pick_cursor(gui, words, field) == len);
+		gui->mouse_pos = rg_vec2(origin - 5.0f, 5.0f); /* left of the text: still the logical end */
+		TEXT_PROVIDER_CHECK(rg_gui_text_edit_pick_cursor(gui, words, field) == len);
+		gui->mouse_pos = rg_vec2(origin + (f32)len * unit - 0.5f, 5.0f);
+		TEXT_PROVIDER_CHECK(rg_gui_text_edit_pick_cursor(gui, words, field) == 0u);
+		gui->mouse_pos = rg_vec2(origin + 4.0f * unit, 5.0f); /* 4 units from the left: 10 from the right */
+		TEXT_PROVIDER_CHECK(rg_gui_text_edit_pick_cursor(gui, words, field) == len - 4u);
+	}
+	TEXT_PROVIDER_CHECK(rg_gui_text_area_pick_column(gui, words, len, 0.5f) == len);
+	TEXT_PROVIDER_CHECK(rg_gui_text_area_pick_column(gui, words, len, -2.0f) == len);
+	// Wrapping a reordered line measures logical prefixes (each wrapped line is laid
+	// out on its own), so the breaks match the left-to-right ones and every line fits.
+	TEXT_PROVIDER_CHECK(rg_gui_text_area_wrap_line_end(gui, words, 0u, len, 9.5f * unit) == 10u);
+	TEXT_PROVIDER_CHECK(rg_gui_text_area_wrap_line_end(gui, words, 0u, len, 4.5f * unit) == 5u);
+	TEXT_PROVIDER_CHECK(rg_gui_text_area_wrap_line_end(gui, words, 0u, len, 3.5f * unit) == 3u);
+	TEXT_PROVIDER_CHECK(rg_gui_text_area_wrap_line_end(gui, words, 0u, len, 1.0f) == 1u);
+	TEXT_PROVIDER_CHECK(rg_gui_text_area_wrap_line_end(gui, words, 0u, len, 14.0f * unit) == len);
+	{
+		size_t end = rg_gui_text_area_wrap_line_end(gui, words, 0u, len, 1.7f * unit);
+		TEXT_PROVIDER_CHECK(end == 1u && rg_gui_text_measure_prefix(gui, words, end) <= 1.7f * unit);
+	}
+	mono.rtl = 0;
+	gui->text_provider.caret_x = NULL;
+	gui->text_provider.hit_test = NULL;
 
 	// A provider without layout is refused, and the bitmap default still needs a font.
 	RgGuiTextProvider broken = provider;
