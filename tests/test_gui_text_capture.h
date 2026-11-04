@@ -167,5 +167,72 @@ cleanup:
 	return passed;
 }
 
+// A drag past either edge of a clipped single-line field keeps extending the
+// selection, and the view scrolls after the cursor.
+static int test_text_drag_scroll(const RgTextFont* font)
+{
+	int passed = 0;
+	unsigned checks = 0u;
+	void* memory = NULL;
+	RgGuiInitDesc desc = {0};
+	desc.font = font;
+	desc.max_draw_cmds = 128u;
+	desc.text_buffer_size = KB(4);
+	size_t bytes = rg_gui_memory_required(&desc);
+	TEXT_CAPTURE_CHECK(bytes > 0u);
+	memory = malloc(bytes);
+	TEXT_CAPTURE_CHECK(memory != NULL);
+	{
+		RgArena arena = {(char*)memory, bytes, 0u, bytes};
+		RgGuiContext gui;
+		TEXT_CAPTURE_CHECK(rg_gui_init(&gui, &arena, &desc));
+		gui.style.text_height = 10.0f;
+		gui.style.padding = 0.0f;
+		gui.style.border_thickness = 0.0f;
+		char buffer[64];
+		strcpy(buffer, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ");
+		RgGuiRect rect = rg_gui_make_rect(20, 20, 80, 20);
+		TEXT_CAPTURE_CHECK(rg_gui_text_measure_prefix(&gui, buffer, 52u) > 2.0f * rect.w);
+		RgInputState input;
+		rg_input_init(&input);
+		RgInputEvent event_storage[8];
+		char event_text[32];
+		RgInputEventQueue events;
+		rg_input_event_queue_init(&events, event_storage, RG_ARRAY_COUNT(event_storage),
+		                          event_text, sizeof(event_text));
+		// Press at the start, then hold the button 40 px right of the field.
+		for (int frame = 0; frame < 40; frame++)
+		{
+			text_capture_input_frame(&input, &events, frame == 0 ? 21 : 140, 25, 1);
+			rg_gui_begin_frame_ex(&gui, &input, &events, 0u, 1.0f / 60.0f);
+			(void)rg_gui_text_input(&gui, NULL, buffer, sizeof(buffer), rect, 0x7132u, NULL);
+			rg_gui_end_frame(&gui);
+		}
+		TEXT_CAPTURE_CHECK(gui.text_edit_state->cursor == 52u);
+		TEXT_CAPTURE_CHECK(gui.text_edit_state->selection_start == 0u &&
+		                   gui.text_edit_state->selection_end == 52u);
+		TEXT_CAPTURE_CHECK(gui.text_edit_state->view_start > 0u);
+		// Back past the left edge: the cursor returns to the start and the view follows.
+		for (int frame = 0; frame < 40; frame++)
+		{
+			text_capture_input_frame(&input, &events, 0, 25, 1);
+			rg_gui_begin_frame_ex(&gui, &input, &events, 0u, 1.0f / 60.0f);
+			(void)rg_gui_text_input(&gui, NULL, buffer, sizeof(buffer), rect, 0x7132u, NULL);
+			rg_gui_end_frame(&gui);
+		}
+		TEXT_CAPTURE_CHECK(gui.text_edit_state->cursor == 0u && gui.text_edit_state->view_start == 0u);
+		text_capture_input_frame(&input, &events, 0, 25, 0);
+		rg_gui_begin_frame_ex(&gui, &input, &events, 0u, 1.0f / 60.0f);
+		(void)rg_gui_text_input(&gui, NULL, buffer, sizeof(buffer), rect, 0x7132u, NULL);
+		rg_gui_end_frame(&gui);
+		TEXT_CAPTURE_CHECK(gui.active_id == 0u && rg_gui_diagnostics(&gui)->flags == 0u);
+	}
+	passed = 1;
+	printf("Text drag scroll: %u checks passed\n", checks);
+cleanup:
+	free(memory);
+	return passed;
+}
+
 #undef TEXT_CAPTURE_CHECK
 #endif

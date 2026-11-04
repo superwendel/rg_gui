@@ -10683,13 +10683,22 @@ RGINLINE void rg_gui_text_edit_update_view(RgGuiContext* ctx, RgGuiTextEditState
 
 /** Click-to-caret over the part of the focused field that is drawn: from the view
  *  start to the widest span that fits. Shaped text is laid out per displayed span,
- *  so hit testing the rest of the buffer would map clicks onto text not shown. */
-RGINLINE size_t rg_gui_text_edit_pick_visible(RgGuiContext* ctx, const char* buffer, RgGuiRect field)
+ *  so hit testing the rest of the buffer would map clicks onto text not shown.
+ *  A drag past either edge hit-tests the whole buffer placed where the view puts
+ *  it, so the cursor leaves the view and the view scrolls after it. */
+RGINLINE size_t rg_gui_text_edit_pick_visible(RgGuiContext* ctx, const char* buffer, RgGuiRect field, int dragging)
 {
 	size_t length = strlen(buffer);
 	size_t start = ctx->text_edit_state->view_start;
 	if (start > length) start = length;
 	f32 available = field.w - ctx->style.padding * 2.0f;
+	f32 local_x = ctx->mouse_pos.x - (field.x + ctx->style.padding);
+	if (dragging && (local_x < 0.0f || local_x > available))
+	{
+		RgGuiRect placed = field;
+		placed.x -= rg_gui_text_measure_span(ctx, buffer, 0u, start);
+		return rg_gui_text_edit_pick_cursor_n(ctx, buffer, length, placed);
+	}
 	size_t end = available > 0.0f ? rg_gui_text_end_for_width(ctx, buffer, length, start, available) : start;
 	if (end < start) end = start;
 	return start + rg_gui_text_edit_pick_cursor_n(ctx, buffer + start, end - start, field);
@@ -20271,7 +20280,7 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 			ctx->text_edit_state->content_version++;
 			rg_gui_text_prefix_cache_reset(ctx->text_edit_state, buffer);
 
-			size_t cursor = rg_gui_text_edit_pick_visible(ctx, buffer, field);
+			size_t cursor = rg_gui_text_edit_pick_visible(ctx, buffer, field, 0);
 			int click_count = rg_gui_text_edit_update_click(ctx, ctx->text_edit_state, id, ctx->mouse_pos);
 			if (click_count == 1)
 			{
@@ -20325,7 +20334,7 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 	if (focused && ctx->active_id == id && ctx->text_edit_state->active &&
 	    ctx->text_edit_state->id == id && ctx->mouse_down)
 	{
-		size_t cursor = rg_gui_text_edit_pick_visible(ctx, buffer, field);
+		size_t cursor = rg_gui_text_edit_pick_visible(ctx, buffer, field, 1);
 		rg_gui_text_edit_set_cursor(ctx->text_edit_state, cursor, 1);
 		ctx->text_edit_state->dirty = 1;
 		ctx->cursor_visible = 1;
