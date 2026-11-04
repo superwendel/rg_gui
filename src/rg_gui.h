@@ -9184,7 +9184,11 @@ RGINLINE size_t rg_gui_text_area_wrap_line_end(const RgGuiContext* ctx, const ch
 	}
 	for (size_t i = best; i > start; i--)
 	{
-		if (buffer[i] == ' ' || buffer[i] == '\t')
+		// A mark can continue a blank's grapheme, so with a provider the break after
+		// the blank must be a caret stop. ASCII never continues a grapheme (UAX #29).
+		if ((buffer[i] == ' ' || buffer[i] == '\t') &&
+		    (!ctx->text_provider.layout || i + 1u >= hard_end || (u8)buffer[i + 1u] < 0x80u ||
+		     rg_gui_text_caret_stop(ctx, buffer + start, hard_end - start, i + 1u - start, 0) == i + 1u - start))
 		{
 			return i + 1u;
 		}

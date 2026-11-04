@@ -77,7 +77,8 @@ static f32 mono_provider_layout(void* user, const char* text, size_t length, f32
 		glyph.cluster = (u32)cluster;
 		glyph.line = line;
 		glyph.ink = cp != ' ';
-		glyph.continues = cp == '~'; /* '~' stands for a spacing vowel sign: no caret stop before it */
+		/* '~' stands for a spacing vowel sign and U+0301 is a combining acute: no caret stop before either */
+		glyph.continues = cp == '~' || cp == 0x0301u;
 		if (emit)
 		{
 			mono->emitted++;
@@ -246,6 +247,13 @@ static int test_text_provider(void)
 		TEXT_PROVIDER_CHECK(rg_gui_text_area_wrap_line_end(gui, signs, 0u, 6u, 2.5f * unit) == 2u);
 		TEXT_PROVIDER_CHECK(rg_gui_text_area_wrap_line_end(gui, signs, 0u, 6u, 4.5f * unit) == 4u);
 		TEXT_PROVIDER_CHECK(rg_gui_text_area_wrap_line_end(gui, signs, 0u, 6u, 0.0f) == 2u);
+		// A break after a blank is a caret stop too: in "a" blank acute "b" the acute
+		// continues the blank, so the line keeps all three and breaks before b (byte 4),
+		// not between the blank and its mark (byte 2); otherwise an earlier blank.
+		static const char blank_mark[] = "a \xCC\x81" "b";
+		TEXT_PROVIDER_CHECK(rg_gui_text_area_wrap_line_end(gui, blank_mark, 0u, 5u, 3.5f * unit) == 4u);
+		static const char blanks[] = "ab cd \xCC\x81" "e";
+		TEXT_PROVIDER_CHECK(rg_gui_text_area_wrap_line_end(gui, blanks, 0u, 9u, 7.5f * unit) == 3u);
 		// The scroll window: spans are measured on their own and end on stops.
 		TEXT_PROVIDER_CHECK(rg_gui_text_end_for_width(gui, signs, 6u, 0u, 3.5f * unit) == 2u);
 		TEXT_PROVIDER_CHECK(rg_gui_text_end_for_width(gui, signs, 6u, 2u, 4.0f * unit) == 6u);
