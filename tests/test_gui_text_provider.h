@@ -77,6 +77,7 @@ static f32 mono_provider_layout(void* user, const char* text, size_t length, f32
 		glyph.cluster = (u32)cluster;
 		glyph.line = line;
 		glyph.ink = cp != ' ';
+		glyph.continues = cp == '~'; /* '~' stands for a spacing vowel sign: no caret stop before it */
 		if (emit)
 		{
 			mono->emitted++;
@@ -222,6 +223,35 @@ static int test_text_provider(void)
 	mono.rtl = 0;
 	gui->text_provider.caret_x = NULL;
 	gui->text_provider.hit_test = NULL;
+
+	// Caret stops: '~' continues the previous grapheme, line breaks are stops.
+	{
+		static const char sign[] = "a~b";
+		static const char lines[] = "ab\ncd";
+		static const char crlf[] = "ab\r\ncd";
+		TEXT_PROVIDER_CHECK(rg_gui_text_caret_stop(gui, sign, 3u, 0u, 1) == 2u);
+		TEXT_PROVIDER_CHECK(rg_gui_text_caret_stop(gui, sign, 3u, 3u, -1) == 2u);
+		TEXT_PROVIDER_CHECK(rg_gui_text_caret_stop(gui, sign, 3u, 2u, -1) == 0u);
+		TEXT_PROVIDER_CHECK(rg_gui_text_caret_stop(gui, sign, 3u, 1u, 0) == 0u);
+		TEXT_PROVIDER_CHECK(rg_gui_text_caret_stop(gui, sign, 3u, 2u, 1) == 3u);
+		TEXT_PROVIDER_CHECK(rg_gui_text_caret_stop(gui, lines, 5u, 3u, -1) == 2u);
+		TEXT_PROVIDER_CHECK(rg_gui_text_caret_stop(gui, lines, 5u, 2u, 1) == 3u);
+		TEXT_PROVIDER_CHECK(rg_gui_text_caret_stop(gui, lines, 5u, 2u, -1) == 1u);
+		TEXT_PROVIDER_CHECK(rg_gui_text_caret_stop(gui, crlf, 6u, 4u, -1) == 2u);
+		TEXT_PROVIDER_CHECK(rg_gui_text_caret_stop(gui, crlf, 6u, 2u, 1) == 4u);
+		// Wrap breaks never split a sign from its base: at 1.5 units the first
+		// grapheme "a~" is the unavoidable unit, at 2.5 units it is the fitting one.
+		static const char signs[] = "a~a~a~";
+		TEXT_PROVIDER_CHECK(rg_gui_text_area_wrap_line_end(gui, signs, 0u, 6u, 1.5f * unit) == 2u);
+		TEXT_PROVIDER_CHECK(rg_gui_text_area_wrap_line_end(gui, signs, 0u, 6u, 2.5f * unit) == 2u);
+		TEXT_PROVIDER_CHECK(rg_gui_text_area_wrap_line_end(gui, signs, 0u, 6u, 4.5f * unit) == 4u);
+		TEXT_PROVIDER_CHECK(rg_gui_text_area_wrap_line_end(gui, signs, 0u, 6u, 0.0f) == 2u);
+		// The scroll window: spans are measured on their own and end on stops.
+		TEXT_PROVIDER_CHECK(rg_gui_text_end_for_width(gui, signs, 6u, 0u, 3.5f * unit) == 2u);
+		TEXT_PROVIDER_CHECK(rg_gui_text_end_for_width(gui, signs, 6u, 2u, 4.0f * unit) == 6u);
+		TEXT_PROVIDER_CHECK(rg_gui_text_start_for_cursor_width(gui, signs, 6u, 0u, 6u, 2.5f * unit) == 4u);
+		TEXT_PROVIDER_CHECK(fabsf(rg_gui_text_measure_span(gui, signs, 2u, 5u) - 3.0f * unit) < 1e-4f);
+	}
 
 	// A provider without layout is refused, and the bitmap default still needs a font.
 	RgGuiTextProvider broken = provider;

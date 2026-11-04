@@ -470,6 +470,9 @@ typedef struct RgGuiTextGlyph
 	u32 cluster;         /* first source byte of the glyph's cluster */
 	u32 line;            /* zero-based hard line index */
 	u32 ink;             /* nonzero when the quad covers texels */
+	u32 continues;       /* nonzero when the cluster continues the previous grapheme (a vowel
+	                        sign, a mark): its first byte is no caret stop. Zero: every
+	                        emitted cluster starts a grapheme (the bitmap provider). */
 } RgGuiTextGlyph;
 
 typedef int (*RgGuiTextEmitFn)(void* user, const RgGuiTextGlyph* glyph);
@@ -4268,6 +4271,7 @@ RGINLINE f32 rg_gui_text_bitmap_layout(void* user, const char* text, size_t leng
 			out.cluster = (u32)cluster;
 			out.line = line;
 			out.ink = glyph->w > 0 && glyph->h > 0;
+			out.continues = 0u;
 			if (!emit(emit_user, &out))
 			{
 				break;
@@ -8028,14 +8032,182 @@ RGINLINE void rg_gui_text_edit_select_all(RgGuiTextEditState* edit)
 	rg_gui_text_edit_set_cursor(edit, edit->length, 1);
 }
 
-RGINLINE size_t rg_gui_text_edit_pick_cursor(const RgGuiContext* ctx, const char* buffer, RgGuiRect field)
+/* Shaped text is only roughly prefix-monotonic (joining, ligatures): searches
+ * that bisect on width look this many caret stops past their result. */
+#ifndef RG_GUI_TEXT_WRAP_REFINE_STOPS
+#define RG_GUI_TEXT_WRAP_REFINE_STOPS 3u
+#endif
+/* Caret stops are found by laying out the hard line up to this many bytes past
+ * the queried offset; grapheme starts depend only on nearby text. */
+#ifndef RG_GUI_TEXT_STOP_LOOKAHEAD
+#define RG_GUI_TEXT_STOP_LOOKAHEAD 64u
+#endif
+
+typedef struct RgGuiTextStopScan
+{
+	size_t target;
+	size_t best;
+	int dir;
+} RgGuiTextStopScan;
+
+RGINLINE int rg_gui_text_stop_scan_emit(void* user, const RgGuiTextGlyph* glyph)
+{
+	RgGuiTextStopScan* scan = (RgGuiTextStopScan*)user;
+	size_t cluster = glyph->cluster;
+	if (glyph->continues)
+	{
+		return 1;
+	}
+	if (scan->dir > 0)
+	{
+		if (cluster > scan->target && cluster < scan->best) scan->best = cluster;
+	}
+	else if (scan->dir < 0)
+	{
+		if (cluster < scan->target && cluster > scan->best) scan->best = cluster;
+	}
+	else if (cluster <= scan->target && cluster > scan->best)
+	{
+		scan->best = cluster;
+	}
+	return 1;
+}
+
+/** The caret stop after (dir > 0), before (dir < 0) or at or before (dir == 0)
+ *  `offset` in `text`. With a provider, stops are the clusters its layout emits
+ *  without `continues`, hard line breaks, 0 and `length`: positions inside a
+ *  grapheme (a vowel sign, a mark) or a ligature are not stops. Without a
+ *  provider, stops are codepoint boundaries. */
+RGINLINE size_t rg_gui_text_caret_stop(const RgGuiContext* ctx, const char* text, size_t length, size_t offset, int dir)
+{
+	if (!text)
+	{
+		return 0u;
+	}
+	if (offset > length) offset = length;
+	if (!ctx || !ctx->text_provider.layout)
+	{
+		if (dir > 0) return offset < length ? rg_gui_utf8_next_boundary(text, length, offset) : length;
+		if (dir < 0) return offset > 0u ? rg_gui_utf8_previous_boundary(text, length, offset) : 0u;
+		return rg_gui_utf8_boundary_before_or_at(text, length, offset);
+	}
+	size_t line_start = offset;
+	size_t line_end = offset;
+	while (line_start > 0u && text[line_start - 1u] != '\n' && text[line_start - 1u] != '\r') line_start--;
+	while (line_end < length && text[line_end] != '\n' && text[line_end] != '\r') line_end++;
+	if (dir < 0 && offset == line_start)
+	{
+		if (offset >= 2u && text[offset - 1u] == '\n' && text[offset - 2u] == '\r') return offset - 2u;
+		return offset > 0u ? offset - 1u : 0u;
+	}
+	if (dir > 0 && offset == line_end)
+	{
+		if (offset + 1u < length && text[offset] == '\r' && text[offset + 1u] == '\n') return offset + 2u;
+		return offset < length ? offset + 1u : length;
+	}
+	if (dir == 0 && (offset == line_start || offset == line_end))
+	{
+		return offset;
+	}
+	size_t window = line_end;
+	if (offset + RG_GUI_TEXT_STOP_LOOKAHEAD < line_end)
+	{
+		window = rg_gui_utf8_boundary_before_or_at(text, line_end, offset + RG_GUI_TEXT_STOP_LOOKAHEAD);
+	}
+	for (;;)
+	{
+		RgGuiTextStopScan scan;
+		scan.target = offset - line_start;
+		scan.dir = dir;
+		scan.best = dir > 0 ? window - line_start : 0u;
+		rg_gui_text_layout(ctx, text + line_start, window - line_start, rg_gui_text_stop_scan_emit, &scan);
+		if (dir > 0 && scan.best == window - line_start && window < line_end)
+		{
+			window = line_end; /* the window may have cut a long grapheme: use the whole line */
+			continue;
+		}
+		return line_start + scan.best;
+	}
+}
+
+/** A caret stop between `low` and `high` for bisection; returns `high` or more
+ *  when there is none strictly inside. */
+RGINLINE size_t rg_gui_text_stop_midpoint(const RgGuiContext* ctx, const char* text, size_t length, size_t low, size_t high)
+{
+	if (!ctx || !ctx->text_provider.layout)
+	{
+		return rg_gui_utf8_midpoint_boundary(text, length, low, high);
+	}
+	if (low >= high)
+	{
+		return high;
+	}
+	size_t mid = rg_gui_text_caret_stop(ctx, text, length, low + (high - low) / 2u, 0);
+	if (mid <= low)
+	{
+		mid = rg_gui_text_caret_stop(ctx, text, length, low, 1);
+	}
+	return mid;
+}
+
+/** Width of text[start, end) as drawn on its own. With a provider the span is laid
+ *  out by itself (shaping is contextual); the bitmap path subtracts prefixes. */
+RGINLINE f32 rg_gui_text_measure_span(const RgGuiContext* ctx, const char* text, size_t start, size_t end)
+{
+	if (!ctx || !text || end <= start)
+	{
+		return 0.0f;
+	}
+	if (ctx->text_provider.layout)
+	{
+		return rg_gui_text_layout(ctx, text + start, end - start, NULL, NULL);
+	}
+	return rg_gui_text_measure_prefix(ctx, text, end) - rg_gui_text_measure_prefix(ctx, text, start);
+}
+
+/** The largest caret stop `b` with text[0, b) no wider than `width`, for text whose
+ *  prefix widths are only roughly monotonic: bisect over stops, then look a few
+ *  stops further (a lam that turns into a lam-alef ligature gets narrower). */
+RGINLINE size_t rg_gui_text_fit_stops(const RgGuiContext* ctx, const char* text, size_t length, f32 width)
+{
+	size_t low = 0u;
+	size_t high = length;
+	while (low < high)
+	{
+		size_t mid = rg_gui_text_stop_midpoint(ctx, text, length, low, high);
+		if (mid >= high)
+		{
+			break;
+		}
+		if (rg_gui_text_layout(ctx, text, mid, NULL, NULL) <= width)
+		{
+			low = mid;
+		}
+		else
+		{
+			high = mid;
+		}
+	}
+	size_t probe = low;
+	for (u32 k = 0u; k < RG_GUI_TEXT_WRAP_REFINE_STOPS && probe < length; k++)
+	{
+		probe = rg_gui_text_caret_stop(ctx, text, length, probe, 1);
+		if (rg_gui_text_layout(ctx, text, probe, NULL, NULL) <= width)
+		{
+			low = probe;
+		}
+	}
+	return low;
+}
+
+/** Click-to-caret over text[0, length) drawn at the field's text origin. */
+RGINLINE size_t rg_gui_text_edit_pick_cursor_n(const RgGuiContext* ctx, const char* buffer, size_t length, RgGuiRect field)
 {
 	if (!ctx || !buffer)
 	{
 		return 0u;
 	}
 
-	size_t length = strlen(buffer);
 	f32 local_x = ctx->mouse_pos.x - (field.x + ctx->style.padding);
 	{
 		size_t hit; /* shaped text: the provider knows where each offset is drawn */
@@ -8112,6 +8284,11 @@ RGINLINE size_t rg_gui_text_edit_pick_cursor(const RgGuiContext* ctx, const char
 	}
 
 	return 0u;
+}
+
+RGINLINE size_t rg_gui_text_edit_pick_cursor(const RgGuiContext* ctx, const char* buffer, RgGuiRect field)
+{
+	return buffer ? rg_gui_text_edit_pick_cursor_n(ctx, buffer, strlen(buffer), field) : 0u;
 }
 
 RGINLINE int rg_gui_text_edit_insert(RgGuiTextEditState* edit, const char* text)
@@ -8563,7 +8740,7 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 		}
 		else if (cursor > 0u)
 		{
-			cursor = rg_gui_utf8_previous_boundary(edit->buffer, edit->length, cursor);
+			cursor = rg_gui_text_caret_stop(ctx, edit->buffer, edit->length, cursor, -1);
 		}
 		rg_gui_text_edit_set_cursor(edit, cursor, has_shift ? 1 : 0);
 	}
@@ -8577,7 +8754,7 @@ RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEd
 		}
 		else if (cursor < edit->length)
 		{
-			cursor = rg_gui_utf8_next_boundary(edit->buffer, edit->length, cursor);
+			cursor = rg_gui_text_caret_stop(ctx, edit->buffer, edit->length, cursor, 1);
 		}
 		rg_gui_text_edit_set_cursor(edit, cursor, has_shift ? 1 : 0);
 	}
@@ -8934,6 +9111,7 @@ typedef struct RgGuiTextWrapScan
 	u32 reordered;      /* visual order is not source order (a right-to-left run) */
 	u32 seen;
 	u32 last_cluster;
+	u32 overflow_continues; /* the first glyph that does not fit continues a grapheme */
 	size_t overflow;    /* range-relative cluster byte of the first glyph that does not fit */
 } RgGuiTextWrapScan;
 
@@ -8956,6 +9134,7 @@ RGINLINE int rg_gui_text_wrap_scan_emit(void* user, const RgGuiTextGlyph* glyph)
 		return 1;
 	}
 	scan->overflow = glyph->cluster;
+	scan->overflow_continues = glyph->continues;
 	scan->overflowed = 1u;
 	return 0;
 }
@@ -8968,10 +9147,10 @@ RGINLINE size_t rg_gui_text_area_wrap_line_end(const RgGuiContext* ctx, const ch
 		return start;
 	}
 
-	// Nothing fits in a non-positive or NaN width: one character still advances.
+	// Nothing fits in a non-positive or NaN width: one grapheme still advances.
 	if (!(wrap_width > 0.0f))
 	{
-		return rg_gui_utf8_next_boundary(buffer, hard_end, start);
+		return start + rg_gui_text_caret_stop(ctx, buffer + start, hard_end - start, 0u, 1);
 	}
 
 	RgGuiTextWrapScan scan;
@@ -8986,30 +9165,22 @@ RGINLINE size_t rg_gui_text_area_wrap_line_end(const RgGuiContext* ctx, const ch
 	// The boundary before the first glyph that does not fit ends the widest fitting
 	// prefix. Break after the last blank at or before it when there is one.
 	size_t best = rg_gui_utf8_boundary_before_or_at(buffer, hard_end, start + scan.overflow);
-	if (scan.reordered)
+	if (ctx->text_provider.layout)
 	{
-		// Glyphs were reordered (a right-to-left run): the visual overflow point says
-		// nothing about which logical prefix fits. Wrapped lines are laid out on
-		// their own, so find the widest prefix that fits by measuring prefixes.
-		size_t low = start;
-		size_t high = hard_end;
-		while (low < high)
+		// Wrapped lines are laid out on their own and shaping is contextual: the
+		// visual overflow point is a hint. Breaks go on caret stops (never between
+		// a consonant and its vowel sign), and the hinted prefix is measured; when
+		// it does not fit or glyphs were reordered (a right-to-left run), search.
+		const char* line = buffer + start;
+		size_t line_len = hard_end - start;
+		if (scan.overflow_continues)
 		{
-			size_t mid = rg_gui_utf8_midpoint_boundary(buffer, hard_end, low, high);
-			if (mid >= high)
-			{
-				break;
-			}
-			if (rg_gui_text_layout(ctx, buffer + start, mid - start, NULL, NULL) <= wrap_width)
-			{
-				low = mid;
-			}
-			else
-			{
-				high = mid;
-			}
+			best = start + rg_gui_text_caret_stop(ctx, line, line_len, best - start, 0);
 		}
-		best = low;
+		if (scan.reordered || rg_gui_text_layout(ctx, line, best - start, NULL, NULL) > wrap_width)
+		{
+			best = start + rg_gui_text_fit_stops(ctx, line, line_len, wrap_width);
+		}
 	}
 	for (size_t i = best; i > start; i--)
 	{
@@ -9022,7 +9193,7 @@ RGINLINE size_t rg_gui_text_area_wrap_line_end(const RgGuiContext* ctx, const ch
 	{
 		return best;
 	}
-	return rg_gui_utf8_next_boundary(buffer, hard_end, start);
+	return start + rg_gui_text_caret_stop(ctx, buffer + start, hard_end - start, 0u, 1);
 }
 
 RGINLINE u32 rg_gui_text_area_build_visual_lines(const RgGuiContext* ctx,
@@ -10285,6 +10456,17 @@ RGINLINE size_t rg_gui_text_end_for_width(RgGuiContext* ctx, const char* text, s
 		return start;
 	}
 
+	if (ctx->text_provider.layout)
+	{
+		// The shown part is laid out on its own: measure it, never prefix differences.
+		start = rg_gui_text_caret_stop(ctx, text, length, start, 0);
+		if (rg_gui_text_measure_span(ctx, text, start, length) <= width)
+		{
+			return length;
+		}
+		return start + rg_gui_text_fit_stops(ctx, text + start, length - start, width);
+	}
+
 	if (rg_gui_text_available(ctx))
 	{
 		start = rg_gui_utf8_boundary_before_or_at(text, length, start);
@@ -10336,11 +10518,39 @@ RGINLINE size_t rg_gui_text_start_for_cursor_width(RgGuiContext* ctx,
 		return 0u;
 	}
 
-	start = rg_gui_utf8_boundary_before_or_at(text, length, start);
-	cursor = rg_gui_utf8_boundary_before_or_at(text, length, cursor);
+	start = rg_gui_text_caret_stop(ctx, text, length, start, 0);
+	cursor = rg_gui_text_caret_stop(ctx, text, length, cursor, 0);
 	if (cursor < start || width <= 0.0f)
 	{
 		return cursor;
+	}
+
+	if (ctx->text_provider.layout)
+	{
+		// The smallest start whose span to the cursor, laid out on its own, fits.
+		if (rg_gui_text_measure_span(ctx, text, start, cursor) <= width)
+		{
+			return start;
+		}
+		size_t low = 0u;
+		size_t high = cursor;
+		while (low < high)
+		{
+			size_t mid = rg_gui_text_stop_midpoint(ctx, text, length, low, high);
+			if (mid >= high)
+			{
+				break;
+			}
+			if (rg_gui_text_measure_span(ctx, text, mid, cursor) > width)
+			{
+				low = mid;
+			}
+			else
+			{
+				high = mid;
+			}
+		}
+		return high;
 	}
 
 	f32 cursor_width = rg_gui_text_measure_prefix(ctx, text, cursor);
@@ -10394,6 +10604,25 @@ RGINLINE void rg_gui_text_edit_update_view(RgGuiContext* ctx, RgGuiTextEditState
 	if (edit->view_start > length)
 	{
 		edit->view_start = length;
+	}
+
+	if (ctx->text_provider.layout)
+	{
+		// Shaped: the view is the drawn substring, so measure substrings.
+		size_t cursor = rg_gui_text_caret_stop(ctx, buffer, length, edit->cursor, 0);
+		if (rg_gui_text_measure_span(ctx, buffer, 0u, length) <= available)
+		{
+			edit->view_start = 0u;
+		}
+		else if (cursor < edit->view_start)
+		{
+			edit->view_start = cursor;
+		}
+		else if (rg_gui_text_measure_span(ctx, buffer, edit->view_start, cursor) > available)
+		{
+			edit->view_start = rg_gui_text_start_for_cursor_width(ctx, buffer, length, edit->view_start, cursor, available);
+		}
+		return;
 	}
 
 	f32 full_width = rg_gui_text_measure_prefix_input(ctx, edit, buffer, length);
@@ -10450,6 +10679,20 @@ RGINLINE void rg_gui_text_edit_update_view(RgGuiContext* ctx, RgGuiTextEditState
 			edit->view_start = view_start;
 		}
 	}
+}
+
+/** Click-to-caret over the part of the focused field that is drawn: from the view
+ *  start to the widest span that fits. Shaped text is laid out per displayed span,
+ *  so hit testing the rest of the buffer would map clicks onto text not shown. */
+RGINLINE size_t rg_gui_text_edit_pick_visible(RgGuiContext* ctx, const char* buffer, RgGuiRect field)
+{
+	size_t length = strlen(buffer);
+	size_t start = ctx->text_edit_state->view_start;
+	if (start > length) start = length;
+	f32 available = field.w - ctx->style.padding * 2.0f;
+	size_t end = available > 0.0f ? rg_gui_text_end_for_width(ctx, buffer, length, start, available) : start;
+	if (end < start) end = start;
+	return start + rg_gui_text_edit_pick_cursor_n(ctx, buffer + start, end - start, field);
 }
 
 RGINLINE void rg_gui_copy_value_buffer(char* dst, size_t dst_size, const char* src)
@@ -20028,8 +20271,7 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 			ctx->text_edit_state->content_version++;
 			rg_gui_text_prefix_cache_reset(ctx->text_edit_state, buffer);
 
-			size_t pick_start = ctx->text_edit_state->view_start;
-			size_t cursor = rg_gui_text_edit_pick_cursor(ctx, buffer + pick_start, field) + pick_start;
+			size_t cursor = rg_gui_text_edit_pick_visible(ctx, buffer, field);
 			int click_count = rg_gui_text_edit_update_click(ctx, ctx->text_edit_state, id, ctx->mouse_pos);
 			if (click_count == 1)
 			{
@@ -20083,8 +20325,7 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 	if (focused && ctx->active_id == id && ctx->text_edit_state->active &&
 	    ctx->text_edit_state->id == id && ctx->mouse_down)
 	{
-		size_t pick_start = ctx->text_edit_state->view_start;
-		size_t cursor = rg_gui_text_edit_pick_cursor(ctx, buffer + pick_start, field) + pick_start;
+		size_t cursor = rg_gui_text_edit_pick_visible(ctx, buffer, field);
 		rg_gui_text_edit_set_cursor(ctx->text_edit_state, cursor, 1);
 		ctx->text_edit_state->dirty = 1;
 		ctx->cursor_visible = 1;
