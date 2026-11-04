@@ -1411,6 +1411,7 @@ typedef struct RgGuiTextEditState
 	size_t length;
 	size_t cursor;
 	size_t view_start;
+	f32 view_x; /* shaped single-line text: scroll of the line's layout under the field, in pixels */
 	size_t selection_anchor;
 	size_t selection_start;
 	size_t selection_end;
@@ -8200,15 +8201,14 @@ RGINLINE size_t rg_gui_text_fit_stops(const RgGuiContext* ctx, const char* text,
 	return low;
 }
 
-/** Click-to-caret over text[0, length) drawn at the field's text origin. */
-RGINLINE size_t rg_gui_text_edit_pick_cursor_n(const RgGuiContext* ctx, const char* buffer, size_t length, RgGuiRect field)
+/** Caret offset nearest `local_x` (relative to the text origin) in text[0, length). */
+RGINLINE size_t rg_gui_text_edit_pick_x(const RgGuiContext* ctx, const char* buffer, size_t length, f32 local_x)
 {
 	if (!ctx || !buffer)
 	{
 		return 0u;
 	}
 
-	f32 local_x = ctx->mouse_pos.x - (field.x + ctx->style.padding);
 	{
 		size_t hit; /* shaped text: the provider knows where each offset is drawn */
 		if (rg_gui_text_hit_test(ctx, buffer, length, local_x, &hit))
@@ -8284,6 +8284,16 @@ RGINLINE size_t rg_gui_text_edit_pick_cursor_n(const RgGuiContext* ctx, const ch
 	}
 
 	return 0u;
+}
+
+/** Click-to-caret over text[0, length) drawn at the field's text origin. */
+RGINLINE size_t rg_gui_text_edit_pick_cursor_n(const RgGuiContext* ctx, const char* buffer, size_t length, RgGuiRect field)
+{
+	if (!ctx || !buffer)
+	{
+		return 0u;
+	}
+	return rg_gui_text_edit_pick_x(ctx, buffer, length, ctx->mouse_pos.x - (field.x + ctx->style.padding));
 }
 
 RGINLINE size_t rg_gui_text_edit_pick_cursor(const RgGuiContext* ctx, const char* buffer, RgGuiRect field)
@@ -10585,6 +10595,48 @@ RGINLINE size_t rg_gui_text_start_for_cursor_width(RgGuiContext* ctx,
 	return high;
 }
 
+/* A drag past the edge of a shaped field scrolls this many times its distance
+ * beyond the edge per second (40 px out: 600 px/s), counting at most
+ * RG_GUI_TEXT_DRAG_SCROLL_MAX_DT of each frame so an idle gap does not jump. */
+#ifndef RG_GUI_TEXT_DRAG_SCROLL_RATE
+#define RG_GUI_TEXT_DRAG_SCROLL_RATE 15.0f
+#endif
+#define RG_GUI_TEXT_DRAG_SCROLL_MAX_DT 0.05f
+
+/* Shaped single-line fields are a window onto one layout of the whole line,
+ * `view_x` pixels in from its left end: what is on screen is that layout, so
+ * right-to-left and mixed text scroll and hit-test as drawn. */
+RGINLINE f32 rg_gui_text_view_clamp(f32 view_x, f32 line_width, f32 available)
+{
+	f32 max_x = line_width - available;
+	if (!(max_x > 0.0f) || view_x < 0.0f)
+	{
+		return 0.0f;
+	}
+	return view_x > max_x ? max_x : view_x;
+}
+
+/** The view nearest `view_x` that shows the caret at `offset`. */
+RGINLINE f32 rg_gui_text_view_follow(const RgGuiContext* ctx, const char* text, size_t length, size_t offset,
+                                     f32 view_x, f32 line_width, f32 available)
+{
+	f32 caret = rg_gui_text_caret_x(ctx, text, length, offset);
+	if (caret < view_x) view_x = caret;
+	else if (caret > view_x + available) view_x = caret - available;
+	return rg_gui_text_view_clamp(view_x, line_width, available);
+}
+
+/** The view of a field at rest: the start of the text (for right-to-left text,
+ *  its right end). */
+RGINLINE f32 rg_gui_text_view_home(const RgGuiContext* ctx, const char* text, size_t length, f32 available)
+{
+	if (!ctx || !text || !ctx->text_provider.layout || length == 0u)
+	{
+		return 0.0f;
+	}
+	return rg_gui_text_view_follow(ctx, text, length, 0u, 0.0f, rg_gui_text_layout(ctx, text, length, NULL, NULL), available);
+}
+
 RGINLINE void rg_gui_text_edit_update_view(RgGuiContext* ctx, RgGuiTextEditState* edit, const char* buffer, RgGuiRect field)
 {
 	if (!ctx || !edit || !buffer)
@@ -10602,6 +10654,7 @@ RGINLINE void rg_gui_text_edit_update_view(RgGuiContext* ctx, RgGuiTextEditState
 	if (length == 0u)
 	{
 		edit->view_start = 0u;
+		edit->view_x = 0.0f;
 		return;
 	}
 
@@ -10612,19 +10665,19 @@ RGINLINE void rg_gui_text_edit_update_view(RgGuiContext* ctx, RgGuiTextEditState
 
 	if (ctx->text_provider.layout)
 	{
-		// Shaped: the view is the drawn substring, so measure substrings.
-		size_t cursor = rg_gui_text_caret_stop(ctx, buffer, length, edit->cursor, 0);
-		if (rg_gui_text_measure_span(ctx, buffer, 0u, length) <= available)
+		// Shaped: the view follows the caret, except while the mouse drags. Then the
+		// drag scrolls it (rg_gui_text_edit_pick_visible): an offset where the
+		// direction changes has two places on screen, so following it could fight
+		// the mouse.
+		f32 width = rg_gui_text_layout(ctx, buffer, length, NULL, NULL);
+		edit->view_start = 0u;
+		if (ctx->active_id == edit->id && ctx->mouse_down)
 		{
-			edit->view_start = 0u;
+			edit->view_x = rg_gui_text_view_clamp(edit->view_x, width, available);
 		}
-		else if (cursor < edit->view_start)
+		else
 		{
-			edit->view_start = cursor;
-		}
-		else if (rg_gui_text_measure_span(ctx, buffer, edit->view_start, cursor) > available)
-		{
-			edit->view_start = rg_gui_text_start_for_cursor_width(ctx, buffer, length, edit->view_start, cursor, available);
+			edit->view_x = rg_gui_text_view_follow(ctx, buffer, length, edit->cursor, edit->view_x, width, available);
 		}
 		return;
 	}
@@ -10685,27 +10738,49 @@ RGINLINE void rg_gui_text_edit_update_view(RgGuiContext* ctx, RgGuiTextEditState
 	}
 }
 
-/** Click-to-caret over the part of the focused field that is drawn: from the view
- *  start to the widest span that fits. Shaped text is laid out per displayed span,
- *  so hit testing the rest of the buffer would map clicks onto text not shown.
- *  A drag past either edge hit-tests the whole buffer placed where the view puts
- *  it, so the cursor leaves the view and the view scrolls after it. */
+/** Click-to-caret in the focused field, over what is drawn. Shaped text: the
+ *  field is a window onto the line's layout, so x maps into it at `view_x`; a
+ *  drag past either edge scrolls the view toward the mouse (faster the farther
+ *  out) and picks the text at that edge. Bitmap text: the drawn span from the
+ *  view start; a drag past an edge picks in the whole buffer placed where the
+ *  view puts it, and the view follows the cursor. */
 RGINLINE size_t rg_gui_text_edit_pick_visible(RgGuiContext* ctx, const char* buffer, RgGuiRect field, int dragging)
 {
+	RgGuiTextEditState* edit = ctx->text_edit_state;
 	size_t length = strlen(buffer);
-	size_t start = ctx->text_edit_state->view_start;
-	if (start > length) start = length;
 	f32 available = field.w - ctx->style.padding * 2.0f;
 	f32 local_x = ctx->mouse_pos.x - (field.x + ctx->style.padding);
-	if (dragging && (local_x < 0.0f || local_x > available))
+	int outside = dragging && (local_x < 0.0f || local_x > available);
+	if (available < 0.0f)
 	{
-		RgGuiRect placed = field;
-		placed.x -= rg_gui_text_measure_span(ctx, buffer, 0u, start);
-		return rg_gui_text_edit_pick_cursor_n(ctx, buffer, length, placed);
+		available = 0.0f;
+	}
+	if (ctx->text_provider.layout)
+	{
+		if (outside)
+		{
+			f32 beyond = local_x < 0.0f ? local_x : local_x - available;
+			f32 dt = ctx->delta_time < RG_GUI_TEXT_DRAG_SCROLL_MAX_DT ? ctx->delta_time : RG_GUI_TEXT_DRAG_SCROLL_MAX_DT;
+			f32 width = rg_gui_text_layout(ctx, buffer, length, NULL, NULL);
+			f32 view_x = rg_gui_text_view_clamp(edit->view_x + beyond * RG_GUI_TEXT_DRAG_SCROLL_RATE * dt, width, available);
+			if (view_x != edit->view_x)
+			{
+				ctx->platform_output.wants_redraw = 1; /* keep scrolling while the mouse rests */
+			}
+			edit->view_x = view_x;
+			local_x = local_x < 0.0f ? 0.0f : available;
+		}
+		return rg_gui_text_edit_pick_x(ctx, buffer, length, local_x + edit->view_x);
+	}
+	size_t start = edit->view_start;
+	if (start > length) start = length;
+	if (outside)
+	{
+		return rg_gui_text_edit_pick_x(ctx, buffer, length, local_x + rg_gui_text_measure_span(ctx, buffer, 0u, start));
 	}
 	size_t end = available > 0.0f ? rg_gui_text_end_for_width(ctx, buffer, length, start, available) : start;
 	if (end < start) end = start;
-	return start + rg_gui_text_edit_pick_cursor_n(ctx, buffer + start, end - start, field);
+	return start + rg_gui_text_edit_pick_x(ctx, buffer + start, end - start, local_x);
 }
 
 RGINLINE void rg_gui_copy_value_buffer(char* dst, size_t dst_size, const char* src)
@@ -20203,6 +20278,7 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 		ctx->text_edit_state->length = strlen(buffer);
 		ctx->text_edit_state->cursor = ctx->text_edit_state->length;
 		ctx->text_edit_state->view_start = 0u;
+		ctx->text_edit_state->view_x = 0.0f;
 		rg_gui_text_edit_clear_selection(ctx->text_edit_state);
 		rg_gui_text_edit_undo_clear(ctx->text_edit_state);
 #if RG_GUI_TEXT_VALUE_UNDO_ENTRY_SIZE > 0
@@ -20267,6 +20343,9 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 			if (!was_active)
 			{
 				ctx->text_edit_state->view_start = 0u;
+				/* the click lands on the view drawn while the field was at rest */
+				ctx->text_edit_state->view_x = rg_gui_text_view_home(
+				    ctx, buffer, ctx->text_edit_state->length, field.w - ctx->style.padding * 2.0f);
 				ctx->text_edit_state->backspace_hold_time = 0.0f;
 				ctx->text_edit_state->backspace_repeat_time = 0.0f;
 				rg_gui_text_edit_undo_clear(ctx->text_edit_state);
@@ -20362,17 +20441,28 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 		available_width = 0.0f;
 	}
 
+	// Shaped text draws the whole line, `view_x` pixels in and clipped to the field;
+	// bitmap text draws the span from display_start that fits.
+	int shaped = ctx->text_provider.layout != NULL;
+	f32 view_x = 0.0f;
 	if (focused && ctx->text_edit_state->active && ctx->text_edit_state->id == id)
 	{
 		text_length = ctx->text_edit_state->length;
 		rg_gui_text_edit_update_view(ctx, ctx->text_edit_state, buffer, field);
 		display_start = ctx->text_edit_state->view_start;
+		view_x = shaped ? ctx->text_edit_state->view_x : 0.0f;
 		preedit_layout = rg_gui_text_edit_preedit_layout(
 		    ctx->text_edit_state, ctx->text_edit_state->length);
 		render_buffer = rg_gui_text_edit_display_text(
 		    ctx, ctx->text_edit_state, buffer, ctx->text_edit_state->length,
 		    &text_length, &preedit_length);
-		if (preedit_length > 0u)
+		if (preedit_length > 0u && shaped)
+		{
+			view_x = rg_gui_text_view_follow(ctx, render_buffer, text_length, preedit_layout.caret, view_x,
+			                                 rg_gui_text_layout(ctx, render_buffer, text_length, NULL, NULL),
+			                                 available_width);
+		}
+		else if (preedit_length > 0u)
 		{
 			display_start = rg_gui_text_edit_display_offset(
 			    preedit_layout, display_start);
@@ -20381,9 +20471,14 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 			    preedit_layout.caret, available_width);
 		}
 	}
+	else if (shaped)
+	{
+		view_x = rg_gui_text_view_home(ctx, buffer, text_length, available_width);
+	}
+	f32 text_x = field.x + ctx->style.padding - view_x;
 
-	size_t display_end = rg_gui_text_end_for_width(
-	    ctx, render_buffer, text_length, display_start, available_width);
+	size_t display_end = shaped ? text_length
+	                            : rg_gui_text_end_for_width(ctx, render_buffer, text_length, display_start, available_width);
 	const char* display_text = render_buffer;
 	int display_copy = RG_GUI_COPY_DYNAMIC_TEXT;
 	if (display_start != 0u || display_end != text_length)
@@ -20424,10 +20519,8 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 
 		if (sel_start != sel_end)
 		{
-			rg_vec2 text_pos = rg_vec2(field.x + ctx->style.padding,
-			                           field.y + (field.h - ctx->style.text_height) * 0.5f);
-			f32 x0 = text_pos.x + rg_gui_text_offset_x(ctx, render_buffer, display_end, display_start, sel_start);
-			f32 x1 = text_pos.x + rg_gui_text_offset_x(ctx, render_buffer, display_end, display_start, sel_end);
+			f32 x0 = text_x + rg_gui_text_offset_x(ctx, render_buffer, display_end, display_start, sel_start);
+			f32 x1 = text_x + rg_gui_text_offset_x(ctx, render_buffer, display_end, display_start, sel_end);
 			if (x1 < x0)
 			{
 				f32 tmp = x0;
@@ -20455,10 +20548,8 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 	{
 		size_t preedit_start = preedit_layout.preedit_start;
 		size_t preedit_end = preedit_layout.preedit_end;
-		f32 x0 = field.x + ctx->style.padding +
-		         rg_gui_text_offset_x(ctx, render_buffer, display_end, display_start, preedit_start);
-		f32 x1 = field.x + ctx->style.padding +
-		         rg_gui_text_offset_x(ctx, render_buffer, display_end, display_start, preedit_end);
+		f32 x0 = text_x + rg_gui_text_offset_x(ctx, render_buffer, display_end, display_start, preedit_start);
+		f32 x1 = text_x + rg_gui_text_offset_x(ctx, render_buffer, display_end, display_start, preedit_end);
 		if (x1 < x0)
 		{
 			f32 tmp = x0;
@@ -20482,8 +20573,11 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 
 	if (buffer)
 	{
-		rg_vec2 text_pos = rg_vec2(field.x + ctx->style.padding,
-		                           field.y + (field.h - ctx->style.text_height) * 0.5f);
+		rg_vec2 text_pos = rg_vec2(text_x, field.y + (field.h - ctx->style.text_height) * 0.5f);
+		if (shaped)
+		{
+			rg_gui_push_clip(ctx, field); /* the line and its caret, cut at the field */
+		}
 		if (display_text)
 		{
 			rg_gui_push_text_ex(ctx, display_text, text_pos, ctx->style.color_text, display_copy);
@@ -20536,6 +20630,10 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 			{
 				rg_gui_push_rect(ctx, caret, ctx->style.color_caret);
 			}
+		}
+		if (shaped)
+		{
+			rg_gui_pop_clip(ctx);
 		}
 	}
 

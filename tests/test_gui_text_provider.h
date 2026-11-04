@@ -281,4 +281,111 @@ cleanup:
 	return passed;
 }
 
+// A shaped field is a window onto one layout of the line. Dragging past either
+// edge scrolls that window toward the mouse, monotonically, until the line's end
+// on that side shows, and the caret goes to the text at that edge; right-to-left
+// text scrolls the same way on screen. The mono provider is 6 px per byte.
+static int test_text_provider_drag_one(int rtl, unsigned* out_checks)
+{
+	int passed = 0;
+	unsigned checks = 0u;
+	void* memory = NULL;
+	MonoProvider mono = {0};
+	mono.rtl = rtl;
+	RgGuiTextProvider provider = mono_provider_make(&mono);
+	if (rtl)
+	{
+		provider.caret_x = mono_rtl_caret_x;
+		provider.hit_test = mono_rtl_hit_test;
+	}
+	RgGuiContext* gui = (RgGuiContext*)calloc(1u, sizeof(RgGuiContext));
+	RgGuiInitDesc desc = {0};
+	desc.text_provider = &provider;
+	desc.max_draw_cmds = 128u;
+	desc.text_buffer_size = KB(4);
+	TEXT_PROVIDER_CHECK(gui != NULL);
+	size_t bytes = rg_gui_memory_required(&desc);
+	memory = malloc(bytes);
+	TEXT_PROVIDER_CHECK(memory != NULL);
+	RgArena arena = {(char*)memory, bytes, 0u, bytes};
+	TEXT_PROVIDER_CHECK(rg_gui_init(gui, &arena, &desc));
+	gui->style.text_height = 10.0f; /* 6 px per byte */
+	gui->style.padding = 0.0f;
+	gui->style.border_thickness = 0.0f;
+	{
+		char buffer[64];
+		memset(buffer, 'a', 40u);
+		buffer[40] = '\0';
+		RgGuiRect rect = rg_gui_make_rect(20, 20, 80, 20); /* 240 px of text, 80 px shown */
+		const f32 max_view = 160.0f;
+		RgInputState input;
+		rg_input_init(&input);
+		RgInputEvent event_storage[8];
+		char event_text[32];
+		RgInputEventQueue events;
+		rg_input_event_queue_init(&events, event_storage, RG_ARRAY_COUNT(event_storage), event_text, sizeof(event_text));
+		RgGuiTextEditState* edit = gui->text_edit_state;
+		// At rest the field shows the logical start: the left end, or for
+		// right-to-left text the right end. A click maps onto what is shown.
+		for (int frame = 0; frame < 2; frame++)
+		{
+			text_capture_input_frame(&input, &events, frame == 0 ? 0 : (rtl ? 99 : 21), 25, frame);
+			rg_gui_begin_frame_ex(gui, &input, &events, 0u, 1.0f / 60.0f);
+			(void)rg_gui_text_input(gui, NULL, buffer, sizeof(buffer), rect, 0x7133u, NULL);
+			rg_gui_end_frame(gui);
+		}
+		TEXT_PROVIDER_CHECK(edit->active && edit->cursor == 0u);
+		TEXT_PROVIDER_CHECK(edit->view_x == (rtl ? max_view : 0.0f));
+		// Toward the side the text starts on: nothing more to show, nothing moves.
+		for (int frame = 0; frame < 10; frame++)
+		{
+			text_capture_input_frame(&input, &events, rtl ? 102 : 18, 25, 1);
+			rg_gui_begin_frame_ex(gui, &input, &events, 0u, 1.0f / 60.0f);
+			(void)rg_gui_text_input(gui, NULL, buffer, sizeof(buffer), rect, 0x7133u, NULL);
+			rg_gui_end_frame(gui);
+			TEXT_PROVIDER_CHECK(edit->cursor == 0u && edit->view_x == (rtl ? max_view : 0.0f));
+		}
+		// Then 40 px past the other edge and back: the view moves one way only.
+		for (int leg = 0; leg < 2; leg++)
+		{
+			int toward_end = leg == 0;
+			int mouse_x = (toward_end == !rtl) ? 140 : -20;
+			f32 last_view = edit->view_x;
+			int redraws = 0;
+			for (int frame = 0; frame < 60; frame++)
+			{
+				text_capture_input_frame(&input, &events, mouse_x, 25, 1);
+				rg_gui_begin_frame_ex(gui, &input, &events, 0u, 1.0f / 60.0f);
+				(void)rg_gui_text_input(gui, NULL, buffer, sizeof(buffer), rect, 0x7133u, NULL);
+				rg_gui_end_frame(gui);
+				TEXT_PROVIDER_CHECK(mouse_x > 100 ? edit->view_x >= last_view : edit->view_x <= last_view);
+				redraws += rg_gui_platform_output(gui)->wants_redraw;
+				last_view = edit->view_x;
+			}
+			TEXT_PROVIDER_CHECK(edit->view_x == (mouse_x > 100 ? max_view : 0.0f));
+			TEXT_PROVIDER_CHECK(edit->cursor == (toward_end ? 40u : 0u));
+			TEXT_PROVIDER_CHECK(redraws > 0 && !rg_gui_platform_output(gui)->wants_redraw);
+		}
+		TEXT_PROVIDER_CHECK(edit->selection_anchor == 0u);
+	}
+	passed = 1;
+	*out_checks += checks;
+
+cleanup:
+	free(memory);
+	free(gui);
+	return passed;
+}
+
+static int test_text_provider_drag(void)
+{
+	unsigned checks = 0u;
+	if (!test_text_provider_drag_one(0, &checks) || !test_text_provider_drag_one(1, &checks))
+	{
+		return 0;
+	}
+	printf("text provider drag checks passed (%u)\n", checks);
+	return 1;
+}
+
 #endif

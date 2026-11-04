@@ -1888,7 +1888,8 @@ int main(void)
 	    !test_viewport_and_input_router(&gui) || !test_viewport_storage(&font) ||
 	    !test_incremental_text_wrapping() || !test_text_area_layout_edits(&gui) ||
 	    !test_text_lookup() || !test_text_lifetimes(&font) || !test_text_mouse_capture(&font) ||
-	    !test_text_drag_scroll(&font) || !test_text_area_cache() || !test_text_provider())
+	    !test_text_drag_scroll(&font) || !test_text_area_cache() || !test_text_provider() ||
+	    !test_text_provider_drag())
 	{
 		free(memory);
 		return 1;
