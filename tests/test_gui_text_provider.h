@@ -467,9 +467,43 @@ static int test_text_provider_click_side(unsigned* out_checks)
 			TEXT_PROVIDER_CHECK(edit->cursor == 30u && edit->view_x == 160.0f);
 			TEXT_PROVIDER_CHECK(rg_gui_platform_output(gui)->ime_caret_rect.x == 40.0f);
 		}
-		// Moving the cursor by other means drops the remembered side.
-		edit->cursor = 31u;
-		TEXT_PROVIDER_CHECK(!rg_gui_text_edit_caret_hint(edit, &(f32){0.0f}));
+		// A text scale change (DPI) moves the glyph: the click is scaled and hit-tested
+		// again, so the caret follows byte 30 to 360 px, and back at the old scale.
+		for (int pass = 0; pass < 2; pass++)
+		{
+			f32 hint = 0.0f;
+			gui->style.text_height = pass == 0 ? 20.0f : 10.0f;
+			text_capture_input_frame(&input, &events, 40, 25, 0);
+			rg_gui_begin_frame_ex(gui, &input, &events, 0u, 1.0f / 60.0f);
+			(void)rg_gui_text_input(gui, NULL, buffer, sizeof(buffer), rect, 0x7134u, NULL);
+			rg_gui_end_frame(gui);
+			TEXT_PROVIDER_CHECK(edit->cursor == 30u && rg_gui_text_edit_caret_hint(edit, &hint));
+			TEXT_PROVIDER_CHECK(hint == (pass == 0 ? 360.0f : 180.0f));
+		}
+		TEXT_PROVIDER_CHECK(edit->view_x == 160.0f);
+		// Left then Right in one frame brings the cursor back to byte 30 by keyboard:
+		// the click's side is gone for good, and the view follows caret_x (0) again.
+		{
+			static const SDL_Scancode keys[] = {SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT};
+			text_capture_input_frame(&input, &events, 40, 25, 0);
+			for (int k = 0; k < 2; k++)
+			{
+				SDL_Event key = {0};
+				key.type = SDL_EVENT_KEY_DOWN;
+				key.key.scancode = keys[k];
+				key.key.down = true;
+				rg_input_process_event_ex(&input, &key, &events);
+				key.type = SDL_EVENT_KEY_UP;
+				key.key.down = false;
+				rg_input_process_event_ex(&input, &key, &events);
+			}
+			rg_gui_begin_frame_ex(gui, &input, &events, 0u, 1.0f / 60.0f);
+			(void)rg_gui_text_input(gui, NULL, buffer, sizeof(buffer), rect, 0x7134u, NULL);
+			rg_gui_end_frame(gui);
+			f32 hint = 0.0f;
+			TEXT_PROVIDER_CHECK(edit->cursor == 30u && !rg_gui_text_edit_caret_hint(edit, &hint));
+			TEXT_PROVIDER_CHECK(edit->view_x == 0.0f);
+		}
 	}
 	passed = 1;
 	*out_checks += checks;

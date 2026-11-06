@@ -1418,8 +1418,12 @@ typedef struct RgGuiTextEditState
 	/* Shaped text: where the mouse put the caret, in line layout x. Where the
 	 * direction changes an offset has two places on screen; the click chose one.
 	 * Valid while the cursor is caret_hint_cursor and caret_hint_version is
-	 * content_version + 1 (0: none). */
+	 * content_version + 1 (0: none); dropped for good when the cursor leaves, and
+	 * re-hit-tested from the click at caret_hint_click_x when the text scale moves
+	 * off caret_hint_scale. */
 	f32 caret_hint_x;
+	f32 caret_hint_click_x;
+	f32 caret_hint_scale;
 	size_t caret_hint_cursor;
 	u32 caret_hint_version;
 	size_t selection_anchor;
@@ -8572,9 +8576,9 @@ RGINLINE int rg_gui_text_edit_delete_forward(RgGuiTextEditState* edit)
 	return rg_gui_text_edit_replace_internal(edit, edit->cursor, end, NULL, 0u, 1);
 }
 
-RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEditState* edit,
-                                                  int* out_submit, int read_only,
-                                                  int allow_newline, u32 filter_flags)
+RGINLINE int rg_gui_text_edit_process_snapshot_keys(RgGuiContext* ctx, RgGuiTextEditState* edit,
+                                                    int* out_submit, int read_only,
+                                                    int allow_newline, u32 filter_flags)
 {
 	int changed = 0;
 	if (!ctx->input)
@@ -8883,6 +8887,22 @@ typedef void (*RgGuiTextEditOrderedKeyFn)(RgGuiContext* ctx,
                                           RgGuiTextEditState* edit,
                                           const RgInputEvent* event,
                                           void* user);
+
+/** Keys from the input snapshot. A key that moves the cursor drops the caret hint
+ *  for good: the mouse placed that caret, and coming back to the same offset by
+ *  keyboard must not revive the click's side. */
+RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEditState* edit,
+                                                  int* out_submit, int read_only,
+                                                  int allow_newline, u32 filter_flags)
+{
+	size_t cursor = edit->cursor;
+	int changed = rg_gui_text_edit_process_snapshot_keys(ctx, edit, out_submit, read_only, allow_newline, filter_flags);
+	if (edit->cursor != cursor)
+	{
+		edit->caret_hint_version = 0u;
+	}
+	return changed;
+}
 
 RGINLINE int rg_gui_text_edit_process_ordered_with_key_ex(
     RgGuiContext* ctx, RgGuiTextEditState* edit, int* out_submit,
@@ -10649,6 +10669,37 @@ RGINLINE f32 rg_gui_text_view_follow(const RgGuiContext* ctx, const char* text, 
 	return rg_gui_text_view_follow_x(rg_gui_text_caret_x(ctx, text, length, offset), view_x, line_width, available);
 }
 
+/** Keeps the caret hint true to the layout, once per frame: dropped for good once
+ *  the cursor has left it or the text changed; after a text scale change (DPI) the
+ *  click is scaled and hit-tested again, kept only if it lands on the cursor. The
+ *  click, not the caret edge, is re-hit: at a direction boundary the edge is
+ *  shared with the neighbouring group. */
+RGINLINE void rg_gui_text_edit_refresh_caret_hint(const RgGuiContext* ctx, RgGuiTextEditState* edit, const char* text, size_t length)
+{
+	f32 scale = rg_gui_text_base_scale(ctx);
+	if (edit->caret_hint_version != edit->content_version + 1u || edit->caret_hint_cursor != edit->cursor)
+	{
+		edit->caret_hint_version = 0u;
+		return;
+	}
+	if (edit->caret_hint_scale != scale)
+	{
+		size_t hit;
+		f32 caret;
+		f32 click = edit->caret_hint_scale > 0.0f ? edit->caret_hint_click_x * (scale / edit->caret_hint_scale) : 0.0f;
+		if (edit->caret_hint_scale > 0.0f && rg_gui_text_hit_test(ctx, text, length, click, &hit, &caret) && hit == edit->cursor)
+		{
+			edit->caret_hint_x = caret;
+			edit->caret_hint_click_x = click;
+			edit->caret_hint_scale = scale;
+		}
+		else
+		{
+			edit->caret_hint_version = 0u;
+		}
+	}
+}
+
 /** The caret x the mouse chose for the cursor, while cursor and text are unchanged. */
 RGINLINE int rg_gui_text_edit_caret_hint(const RgGuiTextEditState* edit, f32* out_x)
 {
@@ -10712,6 +10763,7 @@ RGINLINE void rg_gui_text_edit_update_view(RgGuiContext* ctx, RgGuiTextEditState
 		// the mouse. After a click the caret stays on the side the click chose.
 		f32 width = rg_gui_text_layout(ctx, buffer, length, NULL, NULL);
 		edit->view_start = 0u;
+		rg_gui_text_edit_refresh_caret_hint(ctx, edit, buffer, length);
 		if (ctx->active_id == edit->id && ctx->mouse_down)
 		{
 			edit->view_x = rg_gui_text_view_clamp(edit->view_x, width, available);
@@ -10818,6 +10870,8 @@ RGINLINE size_t rg_gui_text_edit_pick_visible(RgGuiContext* ctx, const char* buf
 		{
 			// Remember the side: the cursor is set to `hit` by the caller.
 			edit->caret_hint_x = caret;
+			edit->caret_hint_click_x = local_x + edit->view_x;
+			edit->caret_hint_scale = rg_gui_text_base_scale(ctx);
 			edit->caret_hint_cursor = hit;
 			edit->caret_hint_version = edit->content_version + 1u;
 			return hit;
