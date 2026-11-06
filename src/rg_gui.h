@@ -33740,6 +33740,18 @@ RGINLINE u32 rg_gui_table_internal(RgGuiContext* ctx, RgGuiTableState* table, co
 
 	u32 result = RG_GUI_TABLE_RESULT_NONE;
 
+	if (focused && row_count > 0u && multi && ctx->input && rg_gui_input_has_ctrl(ctx->input) &&
+	    !rg_gui_input_has_alt(ctx->input) && !rg_gui_input_has_shift(ctx->input) &&
+	    rg_input_is_key_pressed(ctx->input, RG_KEY_A))
+	{
+		/* Ctrl+A selects every row; the cursor and anchor stay. (Alt excluded:
+		 * AltGr arrives as Ctrl+Alt and types characters on some layouts.) */
+		if (rg_gui_selection_set_range_internal(selection_ops, selection_user, 0u, row_count - 1u, 1))
+		{
+			result |= RG_GUI_TABLE_RESULT_SELECTION;
+		}
+	}
+
 	if (focused && row_count > 0u && (selected || multi))
 	{
 		int visible = rg_gui_nonnegative_f32_to_int_bounded(body_rect.h / row_stride);

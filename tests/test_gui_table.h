@@ -212,6 +212,18 @@ static int test_gui_table(void)
 	TABLE_CHECK(table_rig_key(&rig, RG_KEY_PAGEDOWN, NULL) & RG_GUI_TABLE_RESULT_SELECTION);
 	TABLE_CHECK(rig.selection.cursor >= (int)visible_rows - 1 && rig.selection.cursor <= (int)visible_rows + 1);
 
+	// Ctrl+A selects every row and keeps the cursor; Ctrl+Alt+A (AltGr on some
+	// layouts) does not.
+	{
+		static const RgKey ctrl_alt[] = {RG_KEY_LCTRL, RG_KEY_LALT, RG_KEY_UNKNOWN};
+		int cursor = rig.selection.cursor;
+		TABLE_CHECK(table_rig_key(&rig, RG_KEY_A, ctrl_alt) == RG_GUI_TABLE_RESULT_NONE && rig.selected_count == 1u);
+		TABLE_CHECK(table_rig_key(&rig, RG_KEY_A, ctrl) & RG_GUI_TABLE_RESULT_SELECTION);
+		TABLE_CHECK(rig.selected_count == TABLE_ROWS && rig.selection.cursor == cursor);
+		TABLE_CHECK(table_rig_key(&rig, RG_KEY_HOME, NULL) & RG_GUI_TABLE_RESULT_SELECTION);
+		TABLE_CHECK(table_rig_only(&rig, 0u, 0u));
+	}
+
 	// A table without focus ignores keys.
 	rig.gui->focus_id = 0u;
 	TABLE_CHECK(table_rig_key(&rig, RG_KEY_DOWN, NULL) == RG_GUI_TABLE_RESULT_NONE);
