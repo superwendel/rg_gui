@@ -135,6 +135,20 @@ static u32 table_rig_click(TableRig* rig, u32 row, const RgKey* keys)
 	return result;
 }
 
+/* Press and release the right button at (x, y). */
+static u32 table_rig_right_click_at(TableRig* rig, f32 x, f32 y)
+{
+	u32 result = table_rig_frame_ex(rig, x, y, 0, 1, NULL);
+	(void)table_rig_frame_ex(rig, x, y, 0, 0, NULL);
+	return result;
+}
+
+static u32 table_rig_right_click(TableRig* rig, u32 row)
+{
+	const RgGuiRect body = rig->table.panel.inner_rect;
+	return table_rig_right_click_at(rig, body.x + 30.0f, body.y + ((f32)row + 0.5f) * rig->row_h - rig->table.panel.scroll_y);
+}
+
 /* Press and release `key` (with `mods` held throughout) away from the table. */
 static u32 table_rig_key(TableRig* rig, RgKey key, const RgKey* mods)
 {
@@ -266,6 +280,29 @@ static int test_gui_table(void)
 		r = table_rig_click(&rig, 4u, NULL);
 		rig.press_clicks = 0u;
 		TABLE_CHECK((r & RG_GUI_TABLE_RESULT_ACTIVATE) && rig.table.activated_row == 4 && table_rig_only(&rig, 4u, 4u));
+	}
+
+	// A right-click on an unselected row selects it alone; on a selected row it
+	// keeps the selection and moves the cursor. Both report the row.
+	{
+		u32 r = table_rig_right_click(&rig, 6u);
+		TABLE_CHECK((r & RG_GUI_TABLE_RESULT_CONTEXT) && (r & RG_GUI_TABLE_RESULT_SELECTION));
+		TABLE_CHECK(rig.table.context_row == 6 && table_rig_only(&rig, 6u, 6u) && rig.selection.cursor == 6);
+		TABLE_CHECK(table_rig_click(&rig, 8u, ctrl) & RG_GUI_TABLE_RESULT_SELECTION);
+		r = table_rig_right_click(&rig, 6u);
+		TABLE_CHECK((r & RG_GUI_TABLE_RESULT_CONTEXT) && !(r & RG_GUI_TABLE_RESULT_SELECTION));
+		TABLE_CHECK(rig.table.context_row == 6 && rig.selected_count == 2u && rig.selected[6] && rig.selected[8]);
+		TABLE_CHECK(rig.selection.cursor == 6);
+		// Below the last row: row -1, the selection stays.
+		rig.row_count = 10u;
+		table_rig_frame(&rig, -100.0f, -100.0f, 0, NULL);
+		r = table_rig_right_click_at(&rig, rig.table.panel.inner_rect.x + 30.0f,
+		                             rig.table.panel.inner_rect.y + rig.table.panel.inner_rect.h - 4.0f);
+		TABLE_CHECK((r & RG_GUI_TABLE_RESULT_CONTEXT) && rig.table.context_row == -1 && rig.selected_count == 2u);
+		rig.row_count = TABLE_ROWS;
+		// Left clicks never report a context request.
+		r = table_rig_click(&rig, 4u, NULL);
+		TABLE_CHECK(!(r & RG_GUI_TABLE_RESULT_CONTEXT) && table_rig_only(&rig, 4u, 4u));
 	}
 
 	// A table without focus ignores keys.

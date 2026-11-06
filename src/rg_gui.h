@@ -1234,6 +1234,7 @@ typedef struct RgGuiTableState
 	int header_popup_selected;
 	int header_popup_scroll;
 	int activated_row; /* the row of the last RG_GUI_TABLE_RESULT_ACTIVATE */
+	int context_row;   /* the row of the last RG_GUI_TABLE_RESULT_CONTEXT, -1 below the rows */
 } RgGuiTableState;
 
 typedef struct RgGuiWindowState
@@ -1970,7 +1971,8 @@ typedef enum RgGuiTableResult
 	RG_GUI_TABLE_RESULT_SELECTION = 1u << 0,
 	RG_GUI_TABLE_RESULT_SORT = 1u << 1,
 	RG_GUI_TABLE_RESULT_RESIZE = 1u << 2,
-	RG_GUI_TABLE_RESULT_ACTIVATE = 1u << 3 /* Enter on the cursor row or a double-click: see activated_row */
+	RG_GUI_TABLE_RESULT_ACTIVATE = 1u << 3, /* Enter on the cursor row or a double-click: see activated_row */
+	RG_GUI_TABLE_RESULT_CONTEXT = 1u << 4   /* right-click on a row or below the rows: see context_row */
 } RgGuiTableResult;
 
 typedef enum RgGuiTreeNodeResult
@@ -34485,6 +34487,8 @@ RGINLINE u32 rg_gui_table_internal(RgGuiContext* ctx, RgGuiTableState* table, co
 	}
 
 	f32 row_y = ctx->layout.cursor_y;
+	int right_pressed = enabled && ctx->input && rg_input_is_mouse_button_pressed(ctx->input, RG_MOUSE_BUTTON_RIGHT);
+	int context_on_row = 0;
 	for (u32 i = start; i < start + visible; i++)
 	{
 		f32 row_span = row_stride;
@@ -34543,6 +34547,36 @@ RGINLINE u32 rg_gui_table_internal(RgGuiContext* ctx, RgGuiTableState* table, co
 			}
 		}
 
+		if (row_hovered && right_pressed && (selected || multi))
+		{
+			/* A right-click on an unselected row selects it alone; on a selected row
+			 * the selection stays and the cursor moves there. */
+			if (multi)
+			{
+				if (!selection_ops->is_selected(selection_user, i))
+				{
+					if (rg_gui_selection_apply(selection, selection_ops, selection_user, row_count, i, RG_GUI_SELECTION_NONE))
+					{
+						result |= RG_GUI_TABLE_RESULT_SELECTION;
+					}
+				}
+				else
+				{
+					selection->cursor = (int)i;
+				}
+				cursor = selection->cursor;
+			}
+			else if (sel != (int)i)
+			{
+				sel = (int)i;
+				result |= RG_GUI_TABLE_RESULT_SELECTION;
+			}
+			ctx->focus_id = id;
+			context_on_row = 1;
+			table->context_row = (int)i;
+			result |= RG_GUI_TABLE_RESULT_CONTEXT;
+		}
+
 		int row_selected = multi ? (selection_ops->is_selected(selection_user, i) ? 1 : 0) : ((int)i == sel);
 		rg_vec4 row_bg = ctx->style.color_bg;
 		if (row_selected)
@@ -34561,6 +34595,15 @@ RGINLINE u32 rg_gui_table_internal(RgGuiContext* ctx, RgGuiTableState* table, co
 		}
 
 		row_y += row_span;
+	}
+
+	if (right_pressed && !context_on_row &&
+	    rg_gui_point_in_rect(ctx->mouse_pos.x, ctx->mouse_pos.y, table->panel.inner_rect))
+	{
+		/* Below the rows: the selection stays; the application decides. */
+		ctx->focus_id = id;
+		table->context_row = -1;
+		result |= RG_GUI_TABLE_RESULT_CONTEXT;
 	}
 
 	rg_gui_panel_end(ctx, &table->panel);
