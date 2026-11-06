@@ -11685,10 +11685,14 @@ RGINLINE void rg_gui_end_frame_state(RgGuiContext* ctx)
 		return;
 	}
 
+	/* A click elsewhere unfocuses the widget that had focus when the frame began.
+	 * A click on that widget (it is hot) keeps it, also when the widget takes
+	 * focus without becoming active (table and list rows, tree nodes). */
 	if (ctx->mouse_pressed && ctx->input_events &&
 	    ctx->input_event_focus_id != 0u &&
 	    ctx->focus_id == ctx->input_event_focus_id &&
-	    ctx->active_id != ctx->input_event_focus_id)
+	    ctx->active_id != ctx->input_event_focus_id &&
+	    ctx->hot_id != ctx->input_event_focus_id)
 	{
 		ctx->focus_id = 0u;
 		rg_gui_text_edit_clear_preedit(ctx->text_edit_state);

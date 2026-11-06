@@ -213,10 +213,25 @@ static int test_gui_table(void)
 	TABLE_CHECK(rig.row_min == 0u && rig.row_max < visible_rows + 2u);
 	TABLE_CHECK(rig.selected_count == 0u && rig.result == RG_GUI_TABLE_RESULT_NONE);
 
-	// A click selects one row, sets the cursor and focuses the table.
+	// A click selects one row, sets the cursor and focuses the table; a click
+	// on the table while it has focus keeps it (with ordered events, the
+	// end-of-frame rule used to drop the focus of a widget that was not active).
 	TABLE_CHECK(table_rig_click(&rig, 3u, NULL) & RG_GUI_TABLE_RESULT_SELECTION);
 	TABLE_CHECK(table_rig_only(&rig, 3u, 3u) && rig.selection.cursor == 3 && rig.selection.anchor == 3);
 	TABLE_CHECK(rig.gui->focus_id != 0u);
+	{
+		RgGuiId table_focus = rig.gui->focus_id;
+		TABLE_CHECK(table_rig_click(&rig, 4u, NULL) & RG_GUI_TABLE_RESULT_SELECTION);
+		TABLE_CHECK(rig.gui->focus_id == table_focus);
+		TABLE_CHECK(table_rig_key(&rig, RG_KEY_UP, NULL) & RG_GUI_TABLE_RESULT_SELECTION);
+		TABLE_CHECK(table_rig_only(&rig, 3u, 3u) && rig.gui->focus_id == table_focus);
+		// A click outside every widget still drops it.
+		table_rig_frame(&rig, 600.0f, 600.0f, 1, NULL);
+		table_rig_frame(&rig, 600.0f, 600.0f, 0, NULL);
+		TABLE_CHECK(rig.gui->focus_id == 0u);
+		(void)table_rig_click(&rig, 3u, NULL);
+		TABLE_CHECK(rig.gui->focus_id == table_focus);
+	}
 	// Ctrl+click adds a row; Shift+click selects from the anchor (the last
 	// Ctrl+clicked row) to the clicked row, replacing the rest.
 	TABLE_CHECK(table_rig_click(&rig, 5u, ctrl) & RG_GUI_TABLE_RESULT_SELECTION);
