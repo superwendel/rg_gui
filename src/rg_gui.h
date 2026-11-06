@@ -487,9 +487,12 @@ typedef struct RgGuiTextProvider
 	u32 atlas_height;
 	/* Optional, for editing over shaped text: the caret x of a byte offset into
 	 * `text` (0..length) and the byte offset whose caret is nearest pixel x. NULL:
-	 * the context measures source-order prefixes, right only for left-to-right text. */
+	 * the context measures source-order prefixes, right only for left-to-right text.
+	 * hit_test may also store in *out_caret_x (when not NULL) the x of that caret on
+	 * the side x hit: where the direction changes an offset has two places on screen,
+	 * caret_x gives one, and the editor draws the caret where the user clicked. */
 	f32 (*caret_x)(void* user, const char* text, size_t length, f32 scale, size_t byte_offset);
-	size_t (*hit_test)(void* user, const char* text, size_t length, f32 scale, f32 x);
+	size_t (*hit_test)(void* user, const char* text, size_t length, f32 scale, f32 x, f32* out_caret_x);
 } RgGuiTextProvider;
 
 /** State of the bitmap-font provider; the renderer owns one, the context builds one per call. */
@@ -1412,6 +1415,13 @@ typedef struct RgGuiTextEditState
 	size_t cursor;
 	size_t view_start;
 	f32 view_x; /* shaped single-line text: scroll of the line's layout under the field, in pixels */
+	/* Shaped text: where the mouse put the caret, in line layout x. Where the
+	 * direction changes an offset has two places on screen; the click chose one.
+	 * Valid while the cursor is caret_hint_cursor and caret_hint_version is
+	 * content_version + 1 (0: none). */
+	f32 caret_hint_x;
+	size_t caret_hint_cursor;
+	u32 caret_hint_version;
 	size_t selection_anchor;
 	size_t selection_start;
 	size_t selection_end;
@@ -4366,15 +4376,23 @@ RGINLINE f32 rg_gui_text_offset_x(const RgGuiContext* ctx, const char* text, siz
 	return rg_gui_text_caret_x(ctx, text + display_start, length - display_start, offset - display_start);
 }
 
-/** Provider hit test: 1 and the offset nearest x when the provider has one. */
-RGINLINE int rg_gui_text_hit_test(const RgGuiContext* ctx, const char* text, size_t length, f32 x, size_t* out_offset)
+/** Provider hit test: 1 and the offset nearest x when the provider has one. With
+ *  `out_caret_x`, also the x where that caret is drawn on the side x hit (the
+ *  provider's answer, else caret_x of the offset). */
+RGINLINE int rg_gui_text_hit_test(const RgGuiContext* ctx, const char* text, size_t length, f32 x, size_t* out_offset,
+                                  f32* out_caret_x)
 {
+	const f32 unset = -1e30f;
 	if (!ctx || !text || !ctx->text_provider.hit_test)
 	{
 		return 0;
 	}
-	*out_offset = length ? ctx->text_provider.hit_test(ctx->text_provider.user, text, length, rg_gui_text_base_scale(ctx), x) : 0u;
+	if (out_caret_x) *out_caret_x = unset;
+	*out_offset = length ? ctx->text_provider.hit_test(ctx->text_provider.user, text, length, rg_gui_text_base_scale(ctx), x,
+	                                                   out_caret_x)
+	                     : 0u;
 	if (*out_offset > length) *out_offset = length;
+	if (out_caret_x && *out_caret_x == unset) *out_caret_x = rg_gui_text_caret_x(ctx, text, length, *out_offset);
 	return 1;
 }
 
@@ -8211,7 +8229,7 @@ RGINLINE size_t rg_gui_text_edit_pick_x(const RgGuiContext* ctx, const char* buf
 
 	{
 		size_t hit; /* shaped text: the provider knows where each offset is drawn */
-		if (rg_gui_text_hit_test(ctx, buffer, length, local_x, &hit))
+		if (rg_gui_text_hit_test(ctx, buffer, length, local_x, &hit, NULL))
 		{
 			return hit;
 		}
@@ -9039,7 +9057,7 @@ RGINLINE size_t rg_gui_text_area_pick_column(const RgGuiContext* ctx, const char
 	}
 	{
 		size_t hit;
-		if (rg_gui_text_hit_test(ctx, line, line_len, local_x, &hit))
+		if (rg_gui_text_hit_test(ctx, line, line_len, local_x, &hit, NULL))
 		{
 			return hit;
 		}
@@ -10616,14 +10634,37 @@ RGINLINE f32 rg_gui_text_view_clamp(f32 view_x, f32 line_width, f32 available)
 	return view_x > max_x ? max_x : view_x;
 }
 
+/** The view nearest `view_x` that shows a caret at layout x `caret`. */
+RGINLINE f32 rg_gui_text_view_follow_x(f32 caret, f32 view_x, f32 line_width, f32 available)
+{
+	if (caret < view_x) view_x = caret;
+	else if (caret > view_x + available) view_x = caret - available;
+	return rg_gui_text_view_clamp(view_x, line_width, available);
+}
+
 /** The view nearest `view_x` that shows the caret at `offset`. */
 RGINLINE f32 rg_gui_text_view_follow(const RgGuiContext* ctx, const char* text, size_t length, size_t offset,
                                      f32 view_x, f32 line_width, f32 available)
 {
-	f32 caret = rg_gui_text_caret_x(ctx, text, length, offset);
-	if (caret < view_x) view_x = caret;
-	else if (caret > view_x + available) view_x = caret - available;
-	return rg_gui_text_view_clamp(view_x, line_width, available);
+	return rg_gui_text_view_follow_x(rg_gui_text_caret_x(ctx, text, length, offset), view_x, line_width, available);
+}
+
+/** The caret x the mouse chose for the cursor, while cursor and text are unchanged. */
+RGINLINE int rg_gui_text_edit_caret_hint(const RgGuiTextEditState* edit, f32* out_x)
+{
+	if (edit->caret_hint_version != edit->content_version + 1u || edit->caret_hint_cursor != edit->cursor)
+	{
+		return 0;
+	}
+	*out_x = edit->caret_hint_x;
+	return 1;
+}
+
+/** Caret x of the cursor in the line's layout: where the mouse put it, else caret_x. */
+RGINLINE f32 rg_gui_text_edit_cursor_x(const RgGuiContext* ctx, const RgGuiTextEditState* edit, const char* text, size_t length)
+{
+	f32 x;
+	return rg_gui_text_edit_caret_hint(edit, &x) ? x : rg_gui_text_caret_x(ctx, text, length, edit->cursor);
 }
 
 /** The view of a field at rest: the start of the text (for right-to-left text,
@@ -10668,7 +10709,7 @@ RGINLINE void rg_gui_text_edit_update_view(RgGuiContext* ctx, RgGuiTextEditState
 		// Shaped: the view follows the caret, except while the mouse drags. Then the
 		// drag scrolls it (rg_gui_text_edit_pick_visible): an offset where the
 		// direction changes has two places on screen, so following it could fight
-		// the mouse.
+		// the mouse. After a click the caret stays on the side the click chose.
 		f32 width = rg_gui_text_layout(ctx, buffer, length, NULL, NULL);
 		edit->view_start = 0u;
 		if (ctx->active_id == edit->id && ctx->mouse_down)
@@ -10677,7 +10718,8 @@ RGINLINE void rg_gui_text_edit_update_view(RgGuiContext* ctx, RgGuiTextEditState
 		}
 		else
 		{
-			edit->view_x = rg_gui_text_view_follow(ctx, buffer, length, edit->cursor, edit->view_x, width, available);
+			edit->view_x = rg_gui_text_view_follow_x(rg_gui_text_edit_cursor_x(ctx, edit, buffer, length), edit->view_x, width,
+			                                         available);
 		}
 		return;
 	}
@@ -10769,6 +10811,16 @@ RGINLINE size_t rg_gui_text_edit_pick_visible(RgGuiContext* ctx, const char* buf
 			}
 			edit->view_x = view_x;
 			local_x = local_x < 0.0f ? 0.0f : available;
+		}
+		size_t hit;
+		f32 caret;
+		if (rg_gui_text_hit_test(ctx, buffer, length, local_x + edit->view_x, &hit, &caret))
+		{
+			// Remember the side: the cursor is set to `hit` by the caller.
+			edit->caret_hint_x = caret;
+			edit->caret_hint_cursor = hit;
+			edit->caret_hint_version = edit->content_version + 1u;
+			return hit;
 		}
 		return rg_gui_text_edit_pick_x(ctx, buffer, length, local_x + edit->view_x);
 	}
@@ -20521,6 +20573,13 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 		{
 			f32 x0 = text_x + rg_gui_text_offset_x(ctx, render_buffer, display_end, display_start, sel_start);
 			f32 x1 = text_x + rg_gui_text_offset_x(ctx, render_buffer, display_end, display_start, sel_end);
+			f32 hint;
+			if (shaped && preedit_length == 0u && rg_gui_text_edit_caret_hint(ctx->text_edit_state, &hint))
+			{
+				// The end at the cursor is drawn where the mouse put it.
+				if (sel_start == ctx->text_edit_state->cursor) x0 = text_x + hint;
+				else if (sel_end == ctx->text_edit_state->cursor) x1 = text_x + hint;
+			}
 			if (x1 < x0)
 			{
 				f32 tmp = x0;
@@ -20612,6 +20671,18 @@ RGINLINE int rg_gui_text_input_ex_internal(RgGuiContext* ctx, const char* label,
 					}
 					cursor_x = text_pos.x + ctx->text_edit_state->cached_cursor_x - base;
 				}
+			}
+			f32 hint;
+			if (shaped && preedit_length == 0u && rg_gui_text_edit_caret_hint(ctx->text_edit_state, &hint))
+			{
+				cursor_x = text_pos.x + hint;
+			}
+			if (shaped)
+			{
+				// The 1 px caret stays inside the clip when the line ends at the field's
+				// edge (no padding, scrolled to the end).
+				if (cursor_x > field.x + field.w - 1.0f) cursor_x = field.x + field.w - 1.0f;
+				if (cursor_x < field.x) cursor_x = field.x;
 			}
 			f32 cursor_y = field.y + ctx->style.padding * 0.5f;
 			f32 cursor_h = field.h - ctx->style.padding;

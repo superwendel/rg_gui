@@ -97,16 +97,39 @@ static f32 mono_rtl_caret_x(void* user, const char* text, size_t length, f32 sca
 	return (f32)(length - byte_offset) * 6.0f * scale;
 }
 
-static size_t mono_rtl_hit_test(void* user, const char* text, size_t length, f32 scale, f32 x)
+static size_t mono_rtl_hit_test(void* user, const char* text, size_t length, f32 scale, f32 x, f32* out_caret_x)
 {
 	f32 unit = 6.0f * scale;
 	f32 from_right = (f32)length * unit - x;
 	size_t b;
 	(void)user;
 	(void)text;
-	if (from_right <= 0.0f) return 0u;
-	b = (size_t)(from_right / unit + 0.5f);
-	return b > length ? length : b;
+	b = from_right <= 0.0f ? 0u : (size_t)(from_right / unit + 0.5f);
+	if (b > length) b = length;
+	if (out_caret_x) *out_caret_x = (f32)(length - b) * unit;
+	return b;
+}
+
+/* Left-to-right mono text where byte 30 has a second place on screen, as at a
+ * direction boundary: caret_x puts it at the line start, while a click on its
+ * own spot (180 px at scale 1) reports that spot. */
+static f32 mono_split_caret_x(void* user, const char* text, size_t length, f32 scale, size_t byte_offset)
+{
+	(void)user;
+	(void)text;
+	(void)length;
+	return byte_offset == 30u ? 0.0f : (f32)byte_offset * 6.0f * scale;
+}
+
+static size_t mono_split_hit_test(void* user, const char* text, size_t length, f32 scale, f32 x, f32* out_caret_x)
+{
+	f32 unit = 6.0f * scale;
+	size_t b = x <= 0.0f ? 0u : (size_t)(x / unit + 0.5f);
+	(void)user;
+	(void)text;
+	if (b > length) b = length;
+	if (out_caret_x) *out_caret_x = (f32)b * unit;
+	return b;
 }
 
 static f32 mono_provider_line_height(void* user, f32 scale)
@@ -377,10 +400,91 @@ cleanup:
 	return passed;
 }
 
+// A click keeps the caret on the side it chose: releasing the button must not
+// scroll to the offset's other place on screen. With no padding the End caret
+// stays inside the field's clip.
+static int test_text_provider_click_side(unsigned* out_checks)
+{
+	int passed = 0;
+	unsigned checks = 0u;
+	void* memory = NULL;
+	MonoProvider mono = {0};
+	RgGuiTextProvider provider = mono_provider_make(&mono);
+	provider.caret_x = mono_split_caret_x;
+	provider.hit_test = mono_split_hit_test;
+	RgGuiContext* gui = (RgGuiContext*)calloc(1u, sizeof(RgGuiContext));
+	RgGuiInitDesc desc = {0};
+	desc.text_provider = &provider;
+	desc.max_draw_cmds = 128u;
+	desc.text_buffer_size = KB(4);
+	TEXT_PROVIDER_CHECK(gui != NULL);
+	size_t bytes = rg_gui_memory_required(&desc);
+	memory = malloc(bytes);
+	TEXT_PROVIDER_CHECK(memory != NULL);
+	RgArena arena = {(char*)memory, bytes, 0u, bytes};
+	TEXT_PROVIDER_CHECK(rg_gui_init(gui, &arena, &desc));
+	gui->style.text_height = 10.0f;
+	gui->style.padding = 0.0f;
+	gui->style.border_thickness = 0.0f;
+	{
+		char buffer[64];
+		memset(buffer, 'a', 40u);
+		buffer[40] = '\0';
+		RgGuiRect rect = rg_gui_make_rect(20, 20, 80, 20);
+		RgInputState input;
+		rg_input_init(&input);
+		RgInputEvent event_storage[8];
+		char event_text[32];
+		RgInputEventQueue events;
+		rg_input_event_queue_init(&events, event_storage, RG_ARRAY_COUNT(event_storage), event_text, sizeof(event_text));
+		RgGuiTextEditState* edit = gui->text_edit_state;
+		// Rest, press at the start, drag 40 px past the right edge to the end, release.
+		static const int xs[] = {0, 21, 140, 140};
+		static const int downs[] = {0, 1, 1, 0};
+		for (int step = 0; step < 4; step++)
+		{
+			for (int frame = 0; frame < (step == 2 ? 60 : 1); frame++)
+			{
+				text_capture_input_frame(&input, &events, xs[step], 25, downs[step]);
+				rg_gui_begin_frame_ex(gui, &input, &events, 0u, 1.0f / 60.0f);
+				(void)rg_gui_text_input(gui, NULL, buffer, sizeof(buffer), rect, 0x7134u, NULL);
+				rg_gui_end_frame(gui);
+			}
+		}
+		TEXT_PROVIDER_CHECK(edit->cursor == 40u && edit->view_x == 160.0f);
+		{
+			RgGuiRect caret = rg_gui_platform_output(gui)->ime_caret_rect;
+			TEXT_PROVIDER_CHECK(caret.x >= rect.x && caret.x + caret.w <= rect.x + rect.w); /* inside the clip */
+		}
+		// Click byte 30 where it is drawn (20 px into the field, 180 px into the line)
+		// and release there: the view stays, and so does the caret.
+		for (int frame = 0; frame < 2; frame++)
+		{
+			text_capture_input_frame(&input, &events, 40, 25, frame == 0);
+			rg_gui_begin_frame_ex(gui, &input, &events, 0u, 1.0f / 60.0f);
+			(void)rg_gui_text_input(gui, NULL, buffer, sizeof(buffer), rect, 0x7134u, NULL);
+			rg_gui_end_frame(gui);
+			TEXT_PROVIDER_CHECK(edit->cursor == 30u && edit->view_x == 160.0f);
+			TEXT_PROVIDER_CHECK(rg_gui_platform_output(gui)->ime_caret_rect.x == 40.0f);
+		}
+		// Moving the cursor by other means drops the remembered side.
+		edit->cursor = 31u;
+		TEXT_PROVIDER_CHECK(!rg_gui_text_edit_caret_hint(edit, &(f32){0.0f}));
+	}
+	passed = 1;
+	*out_checks += checks;
+
+cleanup:
+	free(memory);
+	free(gui);
+	return passed;
+}
+
 static int test_text_provider_drag(void)
 {
 	unsigned checks = 0u;
-	if (!test_text_provider_drag_one(0, &checks) || !test_text_provider_drag_one(1, &checks))
+	if (!test_text_provider_drag_one(0, &checks) || !test_text_provider_drag_one(1, &checks) ||
+	    !test_text_provider_click_side(&checks))
 	{
 		return 0;
 	}
