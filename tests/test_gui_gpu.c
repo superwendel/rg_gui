@@ -198,6 +198,51 @@ static int test_item(const RgGuiGpuItem* item, u32 type, u32 first, u32 count,
 	                     item->clip.w == 30.0f && item->clip.h == 40.0f));
 }
 
+/* snap_text_origins rounds each packed run origin to whole pixels (half up);
+ * off, the packed origin is the layout position unchanged. */
+static int test_snap_text_origins(void)
+{
+	TestGpuFixture fixture;
+	TEST_CHECK(test_fixture_init(&fixture, test_limits()));
+	RgGuiDrawCmd cmds[2];
+	cmds[0] = test_text_command("A", 1.0f, 0);
+	cmds[0].data.text.pos = rg_vec2(10.4f, 20.5f);
+	cmds[1] = test_text_command("AA", 1.0f, 0);
+	cmds[1].data.text.pos = rg_vec2(-3.5f, 7.49f);
+	RgGuiDrawList list = {cmds, 2u, 2u};
+	static u8 bytes[4096];
+	RgGuiGpuIndexedBatch batches[16];
+	for (u32 snap = 0u; snap < 2u; snap++)
+	{
+		fixture.gpu.frame.snap_text_origins = snap;
+		rg_gui_renderer_begin_frame(&fixture.text);
+		TEST_CHECK(rg_gui_frame_prepare(&fixture.gpu.frame, &fixture.text, &list, 2u));
+		RgGuiFramePacket packet;
+		memset(&packet, 0, sizeof(packet));
+		packet.batches = batches;
+		packet.batch_capacity = RG_ARRAY_COUNT(batches);
+		TEST_CHECK(fixture.gpu.frame.frame_capacity <= sizeof(bytes));
+		TEST_CHECK(rg_gui_frame_pack(&fixture.gpu.frame, bytes, fixture.gpu.frame.frame_capacity, &packet));
+		TEST_CHECK(packet.run_count == 2u && packet.glyph_count == 3u && packet.batch_count == 1u);
+		RgGuiGpuFrameRun runs[2];
+		memcpy(runs, bytes, sizeof(runs));
+		const RgGuiRendererRun* source = fixture.gpu.frame.text_prepared->runs;
+		if (snap)
+		{
+			TEST_CHECK(runs[0].x == 10.0f && runs[0].y == 21.0f);
+			TEST_CHECK(runs[1].x == -3.0f && runs[1].y == 7.0f);
+		}
+		else
+		{
+			TEST_CHECK(runs[0].x == source[0].x && runs[0].y == source[0].y && runs[0].x == 10.4f);
+			TEST_CHECK(runs[1].x == source[1].x && runs[1].y == source[1].y && runs[1].y == 7.49f);
+		}
+		TEST_CHECK(runs[0].color == source[0].color && runs[1].clip == 0u);
+	}
+	free(fixture.memory);
+	return 1;
+}
+
 static int test_text_command_association(void)
 {
 	TestGpuFixture fixture;
@@ -1569,7 +1614,7 @@ int main(void)
 
 	free(renderer_memory);
 	free(gui_memory);
-	if (!test_index_width_boundaries() || !test_text_command_association() || !test_dropped_text_command_association() ||
+	if (!test_index_width_boundaries() || !test_snap_text_origins() || !test_text_command_association() || !test_dropped_text_command_association() ||
 	    !test_gpu_capacity_recovery() || !test_rect_vertex_packing() ||
 	    !test_upload_packets_and_revisions() || !test_full_upload_packet_lifetime() ||
 	    !test_indexed_triangle_packing_and_empty() || !test_indexed_capacity_rollback() ||

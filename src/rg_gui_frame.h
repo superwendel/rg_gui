@@ -31,6 +31,7 @@
 
 #include "rg_gui_renderer.h"
 
+#include <math.h>
 #include <string.h>
 
 // Optional rectangle/image packing backend. SSE2 is baseline on x64; 32-bit
@@ -202,6 +203,11 @@ typedef struct RgGuiFrameBuilder
 	/* Digest of the last successfully prepared draw list; see rg_gui_frame_signature. */
 	u64 frame_signature;
 	u32 frame_signature_enabled;
+	/* Nonzero rounds text run origins to whole pixels when packing. Glyph quads
+	 * sit on the pixel grid relative to their run's origin, so a fractional
+	 * origin blurs every glyph under linear filtering. Rounding happens before
+	 * the draw offset is added: use whole-pixel offsets with it. */
+	u32 snap_text_origins;
 } RgGuiFrameBuilder;
 
 /** One packed frame. batches/batch_capacity are caller-owned input (one batch
@@ -567,6 +573,20 @@ capacity_failure:
 	return 0;
 }
 
+/* The packed record of a text run: its origin (whole pixels when
+ * snap_text_origins is set), color, and clip-table entry. */
+RGINLINE RgGuiGpuFrameRun rg_gui_frame_run_record(const RgGuiFrameBuilder* builder,
+                                                  const RgGuiRendererRun* run, u32 clip)
+{
+	RgGuiGpuFrameRun record = {run->x, run->y, run->color, clip};
+	if (builder->snap_text_origins)
+	{
+		record.x = floorf(record.x + 0.5f);
+		record.y = floorf(record.y + 0.5f);
+	}
+	return record;
+}
+
 RGINLINE int rg_gui_frame_pack(const RgGuiFrameBuilder* builder,
                                u8* frame, u32 capacity, RgGuiFramePacket* packet)
 {
@@ -617,7 +637,7 @@ RGINLINE int rg_gui_frame_pack(const RgGuiFrameBuilder* builder,
 				    run->first_cached_quad > builder->cached_quad_capacity ||
 				    run->quad_count > builder->cached_quad_capacity - run->first_cached_quad)
 					goto failure;
-				RgGuiGpuFrameRun record = {run->x, run->y, run->color, clip};
+				RgGuiGpuFrameRun record = rg_gui_frame_run_record(builder, run, clip);
 				memcpy(&runs[index], &record, sizeof(record));
 				/* Addition changes only the low cached-quad index. No floats. */
 				const u64 base = ((u64)index << 32u) | run->first_cached_quad;
@@ -685,7 +705,7 @@ RGINLINE int rg_gui_frame_pack(const RgGuiFrameBuilder* builder,
 	for (; cursor < text->run_count; ++cursor)
 	{
 		const RgGuiRendererRun* run = &text->runs[cursor];
-		RgGuiGpuFrameRun record = {run->x, run->y, run->color, 0u};
+		RgGuiGpuFrameRun record = rg_gui_frame_run_record(builder, run, 0u);
 		memcpy(&runs[cursor], &record, sizeof(record));
 	}
 	packet->size = packet->refs_offset + packet->ref_count * 8u;
