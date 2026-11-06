@@ -25,6 +25,12 @@ typedef struct TableRig
 	u32 result;
 	RgGuiRect rect;
 	f32 row_h;
+	/* Ordered events: a left or right press pushes a button-down event with
+	 * this click count (the platform's; 2 is a double-click). */
+	RgInputEventQueue events;
+	RgInputEvent event_storage[16];
+	char event_text[64];
+	u8 press_clicks;
 } TableRig;
 
 static const RgGuiTableColumn table_rig_columns[3] = {
@@ -87,7 +93,25 @@ static u32 table_rig_frame_ex(TableRig* rig, f32 x, f32 y, int left, int right, 
 	rig->row_calls = 0u;
 	rig->row_min = ~0u;
 	rig->row_max = 0u;
-	rg_gui_begin_frame(rig->gui, in, 1.0f / 60.0f);
+	rg_input_event_queue_reset(&rig->events, RG_MOD_NONE);
+	for (int b = 0; b < 2; b++)
+	{
+		int button = b ? RG_MOUSE_BUTTON_RIGHT : RG_MOUSE_BUTTON_LEFT;
+		if (in->current_mouse[button] && !in->previous_mouse[button])
+		{
+			RgInputEvent* ev = rg_input_event_queue_push(&rig->events);
+			if (ev)
+			{
+				ev->kind = RG_INPUT_EVENT_MOUSE_BUTTON_DOWN;
+				ev->window_id = 1u;
+				ev->data.button.button = (i8)button;
+				ev->data.button.clicks = rig->press_clicks ? rig->press_clicks : 1u;
+				ev->data.button.x = x;
+				ev->data.button.y = y;
+			}
+		}
+	}
+	rg_gui_begin_frame_ex(rig->gui, in, &rig->events, 1u, 1.0f / 60.0f);
 	rig->result = rg_gui_table_multi(rig->gui, &rig->table, table_rig_columns, rig->widths, 3u, rig->row_count,
 	                                 rig->row_h, &rig->selection, &table_rig_ops, rig, rig->rect, 0x7AB1Eu,
 	                                 table_rig_row, rig);
@@ -158,6 +182,7 @@ static int test_gui_table(void)
 	RgArena arena = {(char*)memory, bytes, 0u, bytes};
 	TABLE_CHECK(rg_gui_init(rig.gui, &arena, &desc));
 	rg_input_init(&rig.input);
+	rg_input_event_queue_init(&rig.events, rig.event_storage, 16u, rig.event_text, sizeof(rig.event_text));
 	rig.rect = rg_gui_make_rect(10.0f, 10.0f, 400.0f, 300.0f);
 	rig.row_h = 20.0f;
 	rig.row_count = TABLE_ROWS;
@@ -222,6 +247,25 @@ static int test_gui_table(void)
 		TABLE_CHECK(rig.selected_count == TABLE_ROWS && rig.selection.cursor == cursor);
 		TABLE_CHECK(table_rig_key(&rig, RG_KEY_HOME, NULL) & RG_GUI_TABLE_RESULT_SELECTION);
 		TABLE_CHECK(table_rig_only(&rig, 0u, 0u));
+	}
+
+	// Enter activates the cursor row; Ctrl+Enter is left to the application.
+	{
+		static const RgKey ctrl_only[] = {RG_KEY_LCTRL, RG_KEY_UNKNOWN};
+		rig.table.activated_row = -1;
+		TABLE_CHECK(!(table_rig_key(&rig, RG_KEY_RETURN, ctrl_only) & RG_GUI_TABLE_RESULT_ACTIVATE));
+		TABLE_CHECK((table_rig_key(&rig, RG_KEY_RETURN, NULL) & RG_GUI_TABLE_RESULT_ACTIVATE) && rig.table.activated_row == 0);
+		TABLE_CHECK(table_rig_only(&rig, 0u, 0u));
+	}
+	// A double-click (the platform's click count) activates the row it hits; the
+	// first click only selects.
+	{
+		u32 r = table_rig_click(&rig, 4u, NULL);
+		TABLE_CHECK((r & RG_GUI_TABLE_RESULT_SELECTION) && !(r & RG_GUI_TABLE_RESULT_ACTIVATE));
+		rig.press_clicks = 2u;
+		r = table_rig_click(&rig, 4u, NULL);
+		rig.press_clicks = 0u;
+		TABLE_CHECK((r & RG_GUI_TABLE_RESULT_ACTIVATE) && rig.table.activated_row == 4 && table_rig_only(&rig, 4u, 4u));
 	}
 
 	// A table without focus ignores keys.

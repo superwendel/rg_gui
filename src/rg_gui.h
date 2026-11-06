@@ -1233,6 +1233,7 @@ typedef struct RgGuiTableState
 	RgGuiPopupState header_popup;
 	int header_popup_selected;
 	int header_popup_scroll;
+	int activated_row; /* the row of the last RG_GUI_TABLE_RESULT_ACTIVATE */
 } RgGuiTableState;
 
 typedef struct RgGuiWindowState
@@ -1968,7 +1969,8 @@ typedef enum RgGuiTableResult
 	RG_GUI_TABLE_RESULT_NONE = 0u,
 	RG_GUI_TABLE_RESULT_SELECTION = 1u << 0,
 	RG_GUI_TABLE_RESULT_SORT = 1u << 1,
-	RG_GUI_TABLE_RESULT_RESIZE = 1u << 2
+	RG_GUI_TABLE_RESULT_RESIZE = 1u << 2,
+	RG_GUI_TABLE_RESULT_ACTIVATE = 1u << 3 /* Enter on the cursor row or a double-click: see activated_row */
 } RgGuiTableResult;
 
 typedef enum RgGuiTreeNodeResult
@@ -8875,6 +8877,29 @@ RGINLINE int rg_gui_input_event_matches_window(const RgGuiContext* ctx,
 {
 	return ctx && event &&
 	       (ctx->input_window_id == 0u || event->window_id == ctx->input_window_id);
+}
+
+/* The click count the platform reported for the last press of `button` in this
+ * frame's ordered events (2 for a double-click), 0 when there was none. It
+ * follows the user's double-click settings and does not depend on frame times. */
+RGINLINE u32 rg_gui_mouse_click_count(const RgGuiContext* ctx, int button)
+{
+	u32 clicks = 0u;
+	if (!ctx || !ctx->input_events)
+	{
+		return 0u;
+	}
+	size_t count = rg_gui_input_event_count(ctx->input_events);
+	for (size_t i = 0u; i < count; i++)
+	{
+		const RgInputEvent* event = &ctx->input_events->events[i];
+		if (event->kind == RG_INPUT_EVENT_MOUSE_BUTTON_DOWN && event->data.button.button == button &&
+		    rg_gui_input_event_matches_window(ctx, event))
+		{
+			clicks = event->data.button.clicks;
+		}
+	}
+	return clicks;
 }
 
 RGINLINE void rg_gui_input_state_set_modifiers(RgInputState* input, RgMod modifiers)
@@ -33752,6 +33777,16 @@ RGINLINE u32 rg_gui_table_internal(RgGuiContext* ctx, RgGuiTableState* table, co
 		}
 	}
 
+	if (focused && row_count > 0u && (selected || multi) && ctx->input && cursor >= 0 && cursor < row_count_int &&
+	    !rg_gui_input_has_ctrl(ctx->input) && !rg_gui_input_has_alt(ctx->input) &&
+	    (rg_input_is_key_pressed(ctx->input, RG_KEY_RETURN) || rg_input_is_key_pressed(ctx->input, RG_KEY_KP_ENTER)))
+	{
+		/* Enter activates the cursor row (Ctrl and Alt combinations are left to
+		 * the application). */
+		table->activated_row = cursor;
+		result |= RG_GUI_TABLE_RESULT_ACTIVATE;
+	}
+
 	if (focused && row_count > 0u && (selected || multi))
 	{
 		int visible = rg_gui_nonnegative_f32_to_int_bounded(body_rect.h / row_stride);
@@ -34500,6 +34535,12 @@ RGINLINE u32 rg_gui_table_internal(RgGuiContext* ctx, RgGuiTableState* table, co
 				}
 			}
 			ctx->focus_id = id;
+			if (rg_gui_mouse_click_count(ctx, RG_MOUSE_BUTTON_LEFT) == 2u)
+			{
+				/* A double-click (as the platform counts it) activates the row. */
+				table->activated_row = (int)i;
+				result |= RG_GUI_TABLE_RESULT_ACTIVATE;
+			}
 		}
 
 		int row_selected = multi ? (selection_ops->is_selected(selection_user, i) ? 1 : 0) : ((int)i == sel);
