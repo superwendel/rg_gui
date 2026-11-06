@@ -21,6 +21,7 @@
 #include "test_gui_text_area_cache.h"
 #include "test_gui_viewport_storage.h"
 #include "test_gui_text_provider.h"
+#include "test_gui_table.h"
 
 static int nearly_equal(f32 a, f32 b)
 {
@@ -1889,7 +1890,7 @@ int main(void)
 	    !test_incremental_text_wrapping() || !test_text_area_layout_edits(&gui) ||
 	    !test_text_lookup() || !test_text_lifetimes(&font) || !test_text_mouse_capture(&font) ||
 	    !test_text_drag_scroll(&font) || !test_text_area_cache() || !test_text_provider() ||
-	    !test_text_provider_drag())
+	    !test_text_provider_drag() || !test_gui_table())
 	{
 		free(memory);
 		return 1;
