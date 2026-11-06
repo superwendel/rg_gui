@@ -7267,6 +7267,12 @@ RGINLINE void rg_gui_text_edit_set_cursor(RgGuiTextEditState* edit, size_t curso
 	}
 	cursor = rg_gui_utf8_boundary_before_or_at(edit->buffer, edit->length, cursor);
 
+	// Every move to another offset drops the mouse's caret hint for good, even when
+	// later moves in the same frame come back to the hinted offset.
+	if (cursor != edit->caret_hint_cursor)
+	{
+		edit->caret_hint_version = 0u;
+	}
 	edit->cursor = cursor;
 
 	if (selecting)
@@ -8576,9 +8582,9 @@ RGINLINE int rg_gui_text_edit_delete_forward(RgGuiTextEditState* edit)
 	return rg_gui_text_edit_replace_internal(edit, edit->cursor, end, NULL, 0u, 1);
 }
 
-RGINLINE int rg_gui_text_edit_process_snapshot_keys(RgGuiContext* ctx, RgGuiTextEditState* edit,
-                                                    int* out_submit, int read_only,
-                                                    int allow_newline, u32 filter_flags)
+RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEditState* edit,
+                                                  int* out_submit, int read_only,
+                                                  int allow_newline, u32 filter_flags)
 {
 	int changed = 0;
 	if (!ctx->input)
@@ -8887,22 +8893,6 @@ typedef void (*RgGuiTextEditOrderedKeyFn)(RgGuiContext* ctx,
                                           RgGuiTextEditState* edit,
                                           const RgInputEvent* event,
                                           void* user);
-
-/** Keys from the input snapshot. A key that moves the cursor drops the caret hint
- *  for good: the mouse placed that caret, and coming back to the same offset by
- *  keyboard must not revive the click's side. */
-RGINLINE int rg_gui_text_edit_process_snapshot_ex(RgGuiContext* ctx, RgGuiTextEditState* edit,
-                                                  int* out_submit, int read_only,
-                                                  int allow_newline, u32 filter_flags)
-{
-	size_t cursor = edit->cursor;
-	int changed = rg_gui_text_edit_process_snapshot_keys(ctx, edit, out_submit, read_only, allow_newline, filter_flags);
-	if (edit->cursor != cursor)
-	{
-		edit->caret_hint_version = 0u;
-	}
-	return changed;
-}
 
 RGINLINE int rg_gui_text_edit_process_ordered_with_key_ex(
     RgGuiContext* ctx, RgGuiTextEditState* edit, int* out_submit,

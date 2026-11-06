@@ -481,7 +481,39 @@ static int test_text_provider_click_side(unsigned* out_checks)
 			TEXT_PROVIDER_CHECK(hint == (pass == 0 ? 360.0f : 180.0f));
 		}
 		TEXT_PROVIDER_CHECK(edit->view_x == 160.0f);
-		// Left then Right in one frame brings the cursor back to byte 30 by keyboard:
+		// Snapshot input (no event queue) handles every held key in one call: Left
+		// and Right down together leave the cursor on byte 30, and the hint is gone.
+		{
+			f32 hint = 0.0f;
+			rg_input_begin_frame(&input);
+			rg_input_set_key(&input, RG_KEY_LEFT, true);
+			rg_input_set_key(&input, RG_KEY_RIGHT, true);
+			rg_gui_begin_frame_ex(gui, &input, NULL, 0u, 1.0f / 60.0f);
+			(void)rg_gui_text_input(gui, NULL, buffer, sizeof(buffer), rect, 0x7134u, NULL);
+			rg_gui_end_frame(gui);
+			rg_input_set_key(&input, RG_KEY_LEFT, false);
+			rg_input_set_key(&input, RG_KEY_RIGHT, false);
+			TEXT_PROVIDER_CHECK(edit->cursor == 30u && !rg_gui_text_edit_caret_hint(edit, &hint));
+			TEXT_PROVIDER_CHECK(edit->view_x == 0.0f);
+		}
+		// Click byte 30 again: scroll back to the end by dragging, release, click.
+		{
+			static const int xs2[] = {99, 140, 140, 40, 40}; /* press inside, drag out, release, click */
+			static const int downs2[] = {1, 1, 0, 1, 0};
+			for (int step = 0; step < 5; step++)
+			{
+				for (int frame = 0; frame < (step == 1 ? 60 : 1); frame++)
+				{
+					text_capture_input_frame(&input, &events, xs2[step], 25, downs2[step]);
+					rg_gui_begin_frame_ex(gui, &input, &events, 0u, 1.0f / 60.0f);
+					(void)rg_gui_text_input(gui, NULL, buffer, sizeof(buffer), rect, 0x7134u, NULL);
+					rg_gui_end_frame(gui);
+				}
+			}
+			f32 hint = 0.0f;
+			TEXT_PROVIDER_CHECK(edit->cursor == 30u && edit->view_x == 160.0f && rg_gui_text_edit_caret_hint(edit, &hint));
+		}
+		// Ordered events: Left then Right in one frame brings the cursor back to byte 30 by keyboard:
 		// the click's side is gone for good, and the view follows caret_x (0) again.
 		{
 			static const SDL_Scancode keys[] = {SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT};
