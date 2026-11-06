@@ -1,6 +1,13 @@
-ByteAddressBuffer cached_quads : register(t0, space0);
-ByteAddressBuffer frame : register(t1, space0);
-cbuffer Projection : register(b0, space1)
+// SDL GPU binds resources in register spaces; Direct3D 11 (shader model 5.0,
+// fxc /D RG_D3D11) has none, so the space is dropped there.
+#ifdef RG_D3D11
+#define RG_SPACE(n)
+#else
+#define RG_SPACE(n) , space##n
+#endif
+ByteAddressBuffer cached_quads : register(t0 RG_SPACE(0));
+ByteAddressBuffer frame : register(t1 RG_SPACE(0));
+cbuffer Projection : register(b0 RG_SPACE(1))
 {
 	float2 output_size;
 	float2 draw_offset;
@@ -13,9 +20,10 @@ struct Output
 {
 	float4 position : SV_Position;
 	float4 color : TEXCOORD0;
-	// xy: atlas coordinates; z: 1 when the fragment samples the texture, 0 for
-	// solid geometry. The flag rides in the uv slot because a third fragment
-	// input slot cost about 15% of the GPU pass on Intel (see the audit).
+	// xy: texture coordinates; z: 0 for solid geometry, 1 for an image, 2 for a
+	// glyph (both sample the texture; a coverage atlas reads glyphs differently).
+	// The flag rides in the uv slot because a third fragment input slot cost
+	// about 15% of the GPU pass on Intel (see the audit).
 	float4 uv : TEXCOORD1;
 	// Distances to the four edges of the primitive's clip rectangle. The
 	// rasterizer drops pixels where any is negative, so clipping needs no
@@ -47,7 +55,7 @@ Output main(uint vertex : SV_VertexID)
 		uint2 uv = cached_quads.Load2(quad + 16);
 		result.uv = float4(lerp(float2(uv.x & 65535, uv.x >> 16),
 		                        float2(uv.y & 65535, uv.y >> 16), corner) *
-		                   atlas_inv_size, 1.0, 0.0);
+		                   atlas_inv_size, 2.0, 0.0);
 	}
 	else
 	{
