@@ -40,6 +40,8 @@ if /I "%TARGET%"=="test_gpu_device" goto test_gpu_device
 if /I "%TARGET%"=="test_demo_lifecycle_build" goto test_demo_lifecycle_build
 if /I "%TARGET%"=="test_demo_lifecycle" goto test_demo_lifecycle
 if /I "%TARGET%"=="shaders" goto shaders
+if /I "%TARGET%"=="shaders_d3d11" goto shaders_d3d11
+if /I "%TARGET%"=="test_d3d11" goto test_d3d11
 if /I "%TARGET%"=="demo" goto demo
 if /I "%TARGET%"=="demo_minimal" goto demo_minimal
 if /I "%TARGET%"=="demo_full" goto demo_full
@@ -154,6 +156,9 @@ if not errorlevel 0 exit /b 1
 call "%~f0" test_gpu
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
+call "%~f0" test_d3d11
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
 echo rg_gui host-side and GPU-preparation tests passed. GPU device execution was not run; use test_release.
 exit /b 0
 
@@ -250,6 +255,39 @@ if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
 exit /b 0
 
+
+:shaders_d3d11
+call :setup_host
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+echo Compiling the indexed shaders to DXBC for rg_gui_d3d11.h...
+powershell -NoProfile -ExecutionPolicy Bypass -File shaders\build_d3d11.ps1
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+exit /b 0
+
+:test_d3d11
+call :setup_host
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+echo Checking that src\rg_gui_d3d11_shaders.h matches the shader sources...
+if not exist out mkdir out
+powershell -NoProfile -ExecutionPolicy Bypass -File shaders\build_d3d11.ps1 -Out out\rg_gui_d3d11_shaders.check.h >nul
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+fc /b src\rg_gui_d3d11_shaders.h out\rg_gui_d3d11_shaders.check.h >nul
+if errorlevel 1 (
+	echo src\rg_gui_d3d11_shaders.h is stale: run build.bat shaders_d3d11.
+	exit /b 1
+)
+echo Building Direct3D 11 renderer checks; they run on WARP, no GPU needed...
+cl %HOST_FLAGS% tests\test_gui_d3d11.c /Fe:test_gui_d3d11.exe /link d3d11.lib
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+test_gui_d3d11.exe
+if errorlevel 1 exit /b 1
+if not errorlevel 0 exit /b 1
+exit /b 0
 
 :test_gui_no_sdl
 call :setup
