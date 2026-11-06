@@ -338,6 +338,22 @@ static int test_gui_table(void)
 		table_rig_frame(&rig, name_x, header_y, 1, NULL);
 		r = table_rig_frame(&rig, name_x, header_y, 0, NULL);
 		TABLE_CHECK((r & RG_GUI_TABLE_RESULT_SORT) && rig.table.sort_column == 0 && rig.table.sort_descending);
+		// The second click found the table focused and left it focused: a header
+		// cell is a part with its own id, and the end-of-frame rule used to take
+		// a click on it for a click elsewhere.
+		TABLE_CHECK(rig.gui->focus_id != 0u);
+		TABLE_CHECK(table_rig_key(&rig, RG_KEY_DOWN, NULL) & RG_GUI_TABLE_RESULT_SELECTION);
+		// So does a press on the scrollbar.
+		{
+			RgGuiRect body = rig.table.panel.inner_rect;
+			f32 bar_x = body.x + body.w + rig.gui->style.inner_spacing + rig.gui->style.scroll_bar_width * 0.5f;
+			RgGuiId focus = rig.gui->focus_id;
+			f32 scroll = rig.table.panel.scroll_y;
+			table_rig_frame(&rig, bar_x, body.y + body.h * 0.5f, 1, NULL);
+			table_rig_frame(&rig, bar_x, body.y + body.h * 0.5f, 0, NULL);
+			TABLE_CHECK(rig.table.panel.scroll_y != scroll); // the press landed on the bar
+			TABLE_CHECK(rig.gui->focus_id == focus);
+		}
 		table_rig_frame(&rig, kind_x, header_y, 1, NULL);
 		r = table_rig_frame(&rig, kind_x, header_y, 0, NULL);
 		TABLE_CHECK(!(r & RG_GUI_TABLE_RESULT_SORT) && rig.table.sort_column == 0);

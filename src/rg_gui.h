@@ -1637,6 +1637,7 @@ typedef struct RgGuiViewportStackEntry
 	const RgInputEventQueue* prev_input_events;
 	RgWindowId prev_input_window_id;
 	RgGuiId prev_input_event_focus_id;
+	RgGuiId prev_focus_part_press_id;
 	RgGuiId prev_input_events_processed_id;
 	RgGuiId prev_input_events_changed_id;
 	RgGuiId prev_input_events_submit_id;
@@ -1742,6 +1743,7 @@ typedef struct RgGuiContext
 	const RgInputEventQueue* input_events;
 	RgWindowId input_window_id;
 	RgGuiId input_event_focus_id;
+	RgGuiId focus_part_press_id; /* see rg_gui_focus_part_press */
 	RgGuiId input_events_processed_id;
 	int input_window_focused_at_frame_start;
 	int window_focused;
@@ -8904,6 +8906,16 @@ RGINLINE u32 rg_gui_mouse_click_count(const RgGuiContext* ctx, int button)
 	return clicks;
 }
 
+/* A press on a part of widget `id` that has its own id (a scrollbar, a header
+ * cell, a resize grip): `id` takes focus and, when it already had it, keeps it
+ * through the end of the frame, which would otherwise take the part's id for
+ * another widget. */
+RGINLINE void rg_gui_focus_part_press(RgGuiContext* ctx, RgGuiId id)
+{
+	ctx->focus_id = id;
+	ctx->focus_part_press_id = id;
+}
+
 RGINLINE void rg_gui_input_state_set_modifiers(RgInputState* input, RgMod modifiers)
 {
 	if ((modifiers & RG_MOD_LSHIFT) != 0) input->current_keyboard[RG_KEY_LSHIFT] = true;
@@ -11362,6 +11374,7 @@ RGINLINE int rg_gui_init(RgGuiContext* ctx, RgArena* arena, const RgGuiInitDesc*
 	ctx->input_events = NULL;
 	ctx->input_window_id = 0u;
 	ctx->input_event_focus_id = 0u;
+	ctx->focus_part_press_id = 0u;
 	ctx->input_events_processed_id = 0u;
 	ctx->input_events_changed_id = 0u;
 	ctx->input_events_submit_id = 0u;
@@ -11512,6 +11525,7 @@ RGINLINE void rg_gui_begin_frame_ex(RgGuiContext* ctx, const RgInputState* input
 	ctx->input_events = events;
 	ctx->input_window_id = window_id;
 	ctx->input_event_focus_id = ctx->focus_id;
+	ctx->focus_part_press_id = 0u;
 	ctx->input_events_processed_id = 0u;
 	ctx->input_window_focused_at_frame_start = events ? ctx->window_focused : 1;
 	if (!events)
@@ -11687,12 +11701,14 @@ RGINLINE void rg_gui_end_frame_state(RgGuiContext* ctx)
 
 	/* A click elsewhere unfocuses the widget that had focus when the frame began.
 	 * A click on that widget (it is hot) keeps it, also when the widget takes
-	 * focus without becoming active (table and list rows, tree nodes). */
+	 * focus without becoming active (table and list rows, tree nodes), and so
+	 * does a click on one of its parts (rg_gui_focus_part_press). */
 	if (ctx->mouse_pressed && ctx->input_events &&
 	    ctx->input_event_focus_id != 0u &&
 	    ctx->focus_id == ctx->input_event_focus_id &&
 	    ctx->active_id != ctx->input_event_focus_id &&
-	    ctx->hot_id != ctx->input_event_focus_id)
+	    ctx->hot_id != ctx->input_event_focus_id &&
+	    ctx->focus_part_press_id != ctx->input_event_focus_id)
 	{
 		ctx->focus_id = 0u;
 		rg_gui_text_edit_clear_preedit(ctx->text_edit_state);
@@ -16245,7 +16261,7 @@ RGINLINE int rg_gui_window_begin(RgGuiContext* ctx, RgGuiWindowState* window, co
 	if (enabled && drag_hovered && ctx->mouse_pressed && (flags & RG_GUI_WINDOW_MOVABLE) != 0u)
 	{
 		ctx->active_id = drag_id;
-		ctx->focus_id = id;
+		rg_gui_focus_part_press(ctx, id);
 		window->dock_flags = 0u;
 		window->start_mouse = ctx->mouse_pos;
 		window->start_rect = window->rect;
@@ -16254,7 +16270,7 @@ RGINLINE int rg_gui_window_begin(RgGuiContext* ctx, RgGuiWindowState* window, co
 	if (enabled && resize_flags != 0u && ctx->mouse_pressed)
 	{
 		ctx->active_id = resize_id;
-		ctx->focus_id = id;
+		rg_gui_focus_part_press(ctx, id);
 		window->dock_flags = 0u;
 		window->resize_flags = resize_flags;
 		window->start_mouse = ctx->mouse_pos;
@@ -16778,6 +16794,7 @@ RGINLINE RgGuiViewport* rg_gui_viewport_begin_ordered_ex(
 	entry->prev_input_events = ctx->input_events;
 	entry->prev_input_window_id = ctx->input_window_id;
 	entry->prev_input_event_focus_id = ctx->input_event_focus_id;
+	entry->prev_focus_part_press_id = ctx->focus_part_press_id;
 	entry->prev_input_events_processed_id = ctx->input_events_processed_id;
 	entry->prev_input_events_changed_id = ctx->input_events_changed_id;
 	entry->prev_input_events_submit_id = ctx->input_events_submit_id;
@@ -16846,6 +16863,7 @@ RGINLINE RgGuiViewport* rg_gui_viewport_begin_ordered_ex(
 	ctx->input_events = events;
 	ctx->input_window_id = window_id;
 	ctx->input_event_focus_id = ctx->focus_id;
+	ctx->focus_part_press_id = 0u;
 	ctx->input_events_processed_id = 0u;
 	ctx->input_window_focused_at_frame_start = events ? viewport->window_focused : 1;
 	ctx->window_focused = events ? viewport->window_focused : 1;
@@ -17019,6 +17037,7 @@ RGINLINE void rg_gui_viewport_end(RgGuiContext* ctx, RgGuiViewport* viewport)
 	ctx->input_events = entry->prev_input_events;
 	ctx->input_window_id = entry->prev_input_window_id;
 	ctx->input_event_focus_id = entry->prev_input_event_focus_id;
+	ctx->focus_part_press_id = entry->prev_focus_part_press_id;
 	ctx->input_events_processed_id = entry->prev_input_events_processed_id;
 	ctx->input_events_changed_id = entry->prev_input_events_changed_id;
 	ctx->input_events_submit_id = entry->prev_input_events_submit_id;
@@ -18265,7 +18284,7 @@ RGINLINE void rg_gui_panel_begin_ex(RgGuiContext* ctx, RgGuiPanelState* panel,
 		if (panel->enabled && bar_hovered && ctx->mouse_pressed)
 		{
 			ctx->active_id = bar_id;
-			ctx->focus_id = id;
+			rg_gui_focus_part_press(ctx, id);
 		}
 
 		if (!panel->enabled && ctx->active_id == bar_id)
@@ -25782,7 +25801,7 @@ RGINLINE int rg_gui_color_picker_hsv(RgGuiContext* ctx, rg_vec4* color, RgGuiRec
 		if (sv_hovered && ctx->mouse_pressed)
 		{
 			ctx->active_id = sv_id;
-			ctx->focus_id = id;
+			rg_gui_focus_part_press(ctx, id);
 		}
 		if (ctx->active_id == sv_id)
 		{
@@ -25815,7 +25834,7 @@ RGINLINE int rg_gui_color_picker_hsv(RgGuiContext* ctx, rg_vec4* color, RgGuiRec
 		if (hue_hovered && ctx->mouse_pressed)
 		{
 			ctx->active_id = hue_id;
-			ctx->focus_id = id;
+			rg_gui_focus_part_press(ctx, id);
 		}
 		if (ctx->active_id == hue_id)
 		{
@@ -25847,7 +25866,7 @@ RGINLINE int rg_gui_color_picker_hsv(RgGuiContext* ctx, rg_vec4* color, RgGuiRec
 		if (alpha_hovered && ctx->mouse_pressed)
 		{
 			ctx->active_id = alpha_id;
-			ctx->focus_id = id;
+			rg_gui_focus_part_press(ctx, id);
 		}
 		if (ctx->active_id == alpha_id)
 		{
@@ -27269,7 +27288,7 @@ RGINLINE int rg_gui_node_editor_selection(RgGuiContext* ctx, RgGuiNodeEditorStat
 	    (ctx->active_id == 0u || ctx->active_id == select_id))
 	{
 		ctx->active_id = select_id;
-		ctx->focus_id = id;
+		rg_gui_focus_part_press(ctx, id);
 		editor->select_start = rg_gui_node_editor_to_canvas(editor, ctx->mouse_pos);
 		editor->select_end = editor->select_start;
 	}
@@ -27540,7 +27559,7 @@ RGINLINE int rg_gui_node_begin_ex(RgGuiContext* ctx, RgGuiNodeEditorState* edito
 	    (ctx->active_id == 0u || ctx->active_id == drag_id))
 	{
 		ctx->active_id = drag_id;
-		ctx->focus_id = id;
+		rg_gui_focus_part_press(ctx, id);
 		editor->drag_start_mouse = rg_gui_node_editor_to_canvas(editor, ctx->mouse_pos);
 		editor->drag_start_pos = *pos;
 		clicked = 1;
@@ -30035,7 +30054,7 @@ RGINLINE int rg_gui_node_graph_editor_ex(RgGuiContext* ctx, RgGuiNodeEditorState
 				}
 
 				ctx->active_id = port_drag_id;
-				ctx->focus_id = id;
+				rg_gui_focus_part_press(ctx, id);
 				state->link_drag_active = 1;
 				state->link_drag = drag_port;
 			}
@@ -30101,7 +30120,7 @@ RGINLINE int rg_gui_node_graph_editor_ex(RgGuiContext* ctx, RgGuiNodeEditorState
 			    (ctx->active_id == 0u || ctx->active_id == port_drag_id))
 			{
 				ctx->active_id = port_drag_id;
-				ctx->focus_id = id;
+				rg_gui_focus_part_press(ctx, id);
 				state->link_drag_active = 1;
 				state->link_drag = port;
 				state->link_drag_index = -1;
@@ -31041,7 +31060,7 @@ RGINLINE int rg_gui_list(RgGuiContext* ctx, const char* const* items, u32 count,
 		if (enabled && bar_hovered && ctx->mouse_pressed)
 		{
 			ctx->active_id = bar_id;
-			ctx->focus_id = id;
+			rg_gui_focus_part_press(ctx, id);
 		}
 
 		if (!enabled && ctx->active_id == bar_id)
@@ -31342,7 +31361,7 @@ RGINLINE int rg_gui_list_virtual_multi(RgGuiContext* ctx, RgGuiListItemFn get_it
 		if (enabled && bar_hovered && ctx->mouse_pressed)
 		{
 			ctx->active_id = bar_id;
-			ctx->focus_id = id;
+			rg_gui_focus_part_press(ctx, id);
 		}
 
 		if (!enabled && ctx->active_id == bar_id)
@@ -31691,7 +31710,7 @@ RGINLINE int rg_gui_list_multi(RgGuiContext* ctx, const char* const* items, u32 
 		if (enabled && bar_hovered && ctx->mouse_pressed)
 		{
 			ctx->active_id = bar_id;
-			ctx->focus_id = id;
+			rg_gui_focus_part_press(ctx, id);
 		}
 
 		if (!enabled && ctx->active_id == bar_id)
@@ -32643,7 +32662,7 @@ RGINLINE int rg_gui_menu_popup_icons_ex(RgGuiContext* ctx, const char* const* it
 		if (enabled && bar_hovered && ctx->mouse_pressed)
 		{
 			ctx->active_id = bar_id;
-			ctx->focus_id = id;
+			rg_gui_focus_part_press(ctx, id);
 		}
 
 		if (!enabled && ctx->active_id == bar_id)
@@ -33136,7 +33155,7 @@ RGINLINE int rg_gui_list_virtual(RgGuiContext* ctx, RgGuiListItemFn get_item, co
 		if (enabled && bar_hovered && ctx->mouse_pressed)
 		{
 			ctx->active_id = bar_id;
-			ctx->focus_id = id;
+			rg_gui_focus_part_press(ctx, id);
 		}
 
 		if (!enabled && ctx->active_id == bar_id)
@@ -33693,7 +33712,7 @@ RGINLINE u32 rg_gui_table_internal(RgGuiContext* ctx, RgGuiTableState* table, co
 		if (enabled && bar_hovered && ctx->mouse_pressed)
 		{
 			ctx->active_id = bar_id;
-			ctx->focus_id = id;
+			rg_gui_focus_part_press(ctx, id);
 		}
 
 		if (!enabled && ctx->active_id == bar_id)
@@ -33947,7 +33966,7 @@ RGINLINE u32 rg_gui_table_internal(RgGuiContext* ctx, RgGuiTableState* table, co
 				if (enabled && handle_hovered && ctx->mouse_pressed)
 				{
 					ctx->active_id = handle_id;
-					ctx->focus_id = id;
+					rg_gui_focus_part_press(ctx, id);
 					table->resize_column = (int)real_index;
 					table->resize_start_x = ctx->mouse_pos.x;
 					table->resize_start_width = width;
@@ -34080,7 +34099,7 @@ RGINLINE u32 rg_gui_table_internal(RgGuiContext* ctx, RgGuiTableState* table, co
 			if (enabled && cell_hovered && ctx->mouse_pressed)
 			{
 				ctx->active_id = cell_id;
-				ctx->focus_id = id;
+				rg_gui_focus_part_press(ctx, id);
 			}
 
 			if (!enabled && ctx->active_id == cell_id)
@@ -34207,7 +34226,7 @@ RGINLINE u32 rg_gui_table_internal(RgGuiContext* ctx, RgGuiTableState* table, co
 				if (enabled && handle_hovered && ctx->mouse_pressed)
 				{
 					ctx->active_id = handle_id;
-					ctx->focus_id = id;
+					rg_gui_focus_part_press(ctx, id);
 					table->resize_column = (int)real_index;
 					table->resize_start_x = ctx->mouse_pos.x;
 					table->resize_start_width = width;
@@ -34338,7 +34357,7 @@ RGINLINE u32 rg_gui_table_internal(RgGuiContext* ctx, RgGuiTableState* table, co
 			if (enabled && cell_hovered && ctx->mouse_pressed)
 			{
 				ctx->active_id = cell_id;
-				ctx->focus_id = id;
+				rg_gui_focus_part_press(ctx, id);
 			}
 
 			if (!enabled && ctx->active_id == cell_id)
