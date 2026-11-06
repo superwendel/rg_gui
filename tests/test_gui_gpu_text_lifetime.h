@@ -165,7 +165,7 @@ static int test_gpu_mutable_value_text(SDL_GPUDevice* device, u32 frame_buffer_c
 		if (!rg_gui_gpu_prepare(&gpu, &text, rg_gui_draw_list(&gui),
 		                        rg_gui_draw_list_overlay_start(&gui))) goto cleanup;
 		if (upload.text.glyph_count != 30u || upload.text.run_count != 6u ||
-		    gpu.text_prepared->glyph_count != 1u || gpu.text_prepared->run_count != 1u) goto cleanup;
+		    gpu.frame.text_prepared->glyph_count != 1u || gpu.frame.text_prepared->run_count != 1u) goto cleanup;
 		command = SDL_AcquireGPUCommandBuffer(device);
 		if (!command) goto cleanup;
 		SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(command);

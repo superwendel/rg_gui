@@ -255,7 +255,7 @@ exit /b 0
 call :setup
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1
-echo Checking that rg_gui.h and rg_gui_renderer.h compile without SDL3 headers...
+echo Checking that rg_gui.h, rg_gui_renderer.h and rg_gui_frame.h compile without SDL3 headers...
 cl /nologo /std:c11 /W4 /WX /O2 /D_CRT_SECURE_NO_WARNINGS /I "tests\poison" /I "%RG_CORE_DIR%\src" /I "%RG_TEXT_DIR%\src" /c tests\test_gui_no_sdl.c /Fo:test_gui_no_sdl.obj
 if errorlevel 1 exit /b 1
 if not errorlevel 0 exit /b 1

@@ -613,7 +613,7 @@ RGINLINE void demo_dump_frame_bytes(const RgGuiGpuRenderer* gpu, const RgGuiRend
 		return;
 	}
 	fprintf(demo_dump_meta, "ref_capacity %u\nframe_capacity %u\ncached_quad_capacity %u\nframe_buffer_count %u\n",
-	        gpu->ref_capacity, gpu->frame_capacity, gpu->text.cached_quad_capacity, gpu->frame_buffer_count);
+	        gpu->frame.ref_capacity, gpu->frame.frame_capacity, gpu->text.cached_quad_capacity, gpu->frame_buffer_count);
 	fprintf(demo_dump_meta, "frame_size %u\ngeometry_offset %u\nrefs_offset %u\nclips_offset %u\nclip_count %u\nref_count %u\nvertex_count %u\nitem_count %u\nbatch_count %u\n",
 	        upload->frame.size, upload->geometry_offset, upload->refs_offset, upload->clips_offset, upload->clip_count,
 	        upload->ref_count, upload->vertex_count, upload->item_count, upload->batch_count);

@@ -6,7 +6,9 @@ The stack has three layers:
 2. `rg_gui_renderer.h` turns text commands into persistent cached glyph pages
    and compact frame-local runs.
 3. `rg_gui_gpu.h` uploads geometry and text changes, combines compatible draws,
-   and renders indexed geometry through SDL3 GPU.
+   and renders indexed geometry through SDL3 GPU. Its frame building (prepare
+   and packing) lives in `rg_gui_frame.h`, which has no graphics API, so other
+   backends draw the same packed frame with the same shaders.
 
 `rg_gui.h` uses `rg_text.h` for text measurement and retains the supplied
 `RgTextFont` pointer. Input state comes from `rg_input_core.h`; `rg_gui.h` has no SDL

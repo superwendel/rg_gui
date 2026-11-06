@@ -132,7 +132,7 @@ static int test_gpu_full_cache_ring(SDL_GPUDevice* device, SDL_GPUTexture* targe
 		    upload.text.glyph_count != 64u || upload.vertex_count != 96u || upload.ref_count != 96u ||
 		    upload.text.cached_quads.size != 64u * sizeof(RgGuiRendererCachedQuad) ||
 		    upload.item_count != 16u || upload.clip_count != 17u ||
-		    upload.frame.size != gpu->frame_capacity || used != ring->size)
+		    upload.frame.size != gpu->frame.frame_capacity || used != ring->size)
 		{
 			SDL_SetError("Full-cache packet did not exactly fill its configured upload bound");
 			goto cleanup;
@@ -449,13 +449,13 @@ static int test_gpu_hidden_culling(SDL_GPUDevice* device, RgGuiGpuRenderer* gpu,
 			SDL_SetError("Hidden-draw culling: the pushed list did not prepare");
 			goto cleanup;
 		}
-		const u32 vertex_capacity = gpu->vertex_capacity, item_capacity = gpu->item_capacity;
-		gpu->vertex_capacity = gpu->vertex_count;
-		gpu->item_capacity = gpu->item_count;
+		const u32 vertex_capacity = gpu->frame.vertex_capacity, item_capacity = gpu->frame.item_capacity;
+		gpu->frame.vertex_capacity = gpu->frame.vertex_count;
+		gpu->frame.item_capacity = gpu->frame.item_count;
 		rg_gui_renderer_begin_frame(text);
 		const int fits = rg_gui_gpu_prepare(gpu, text, &culled_list, overlay);
-		gpu->vertex_capacity = vertex_capacity;
-		gpu->item_capacity = item_capacity;
+		gpu->frame.vertex_capacity = vertex_capacity;
+		gpu->frame.item_capacity = item_capacity;
 		if (!fits)
 		{
 			SDL_SetError("Hidden-draw culling: the culled list needs more geometry than the pushed list");

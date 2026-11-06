@@ -117,7 +117,7 @@ RGINLINE u64 rg_gui_tile_mix(u64 hash, u64 value)
 
 RGINLINE u64 rg_gui_tile_mix_rect(u64 hash, RgGuiRect rect)
 {
-	return rg_gui_gpu_signature_bytes(hash, &rect, sizeof(rect));
+	return rg_gui_frame_signature_bytes(hash, &rect, sizeof(rect));
 }
 
 /* Pixel columns/rows a command can touch: the renderer's clipping floors the
@@ -373,9 +373,9 @@ RGINLINE RgGuiTileRedraw rg_gui_tile_cache_update(RgGuiTileCache* cache,
 		{
 			/* bounds.w and bounds.h carry the maximum edges here, not sizes. */
 			bounds = rg_gui_tile_triangle_extents(cmd->data.triangle.a, cmd->data.triangle.b, cmd->data.triangle.c);
-			digest = rg_gui_gpu_signature_bytes(digest, &cmd->data.triangle.a, sizeof(cmd->data.triangle.a));
-			digest = rg_gui_gpu_signature_bytes(digest, &cmd->data.triangle.b, sizeof(cmd->data.triangle.b));
-			digest = rg_gui_gpu_signature_bytes(digest, &cmd->data.triangle.c, sizeof(cmd->data.triangle.c));
+			digest = rg_gui_frame_signature_bytes(digest, &cmd->data.triangle.a, sizeof(cmd->data.triangle.a));
+			digest = rg_gui_frame_signature_bytes(digest, &cmd->data.triangle.b, sizeof(cmd->data.triangle.b));
+			digest = rg_gui_frame_signature_bytes(digest, &cmd->data.triangle.c, sizeof(cmd->data.triangle.c));
 			digest = rg_gui_tile_mix(digest, cmd->color);
 		}
 		else if (cmd->type == RG_GUI_CMD_IMAGE)
@@ -398,7 +398,7 @@ RGINLINE RgGuiTileRedraw rg_gui_tile_cache_update(RgGuiTileCache* cache,
 			}
 			f32 x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
 			int any = 0;
-			digest = rg_gui_gpu_signature_bytes(digest, &cmd->data.text.pos, sizeof(cmd->data.text.pos));
+			digest = rg_gui_frame_signature_bytes(digest, &cmd->data.text.pos, sizeof(cmd->data.text.pos));
 			digest = rg_gui_tile_mix(digest, cmd->color);
 			do
 			{
@@ -409,7 +409,7 @@ RGINLINE RgGuiTileRedraw rg_gui_tile_cache_update(RgGuiTileCache* cache,
 					/* The glyph geometry and atlas coordinates are the pixels; a
 					 * 32-bit content tag alone can collide between two strings. */
 					const RgGuiRendererBaseCachedQuad* quad = &quads[run->first_cached_quad + q];
-					digest = rg_gui_gpu_signature_bytes(digest, quad, sizeof(*quad));
+					digest = rg_gui_frame_signature_bytes(digest, quad, sizeof(*quad));
 					/* The vertex shader forms ((quad + run) + offset) + corner * size. */
 					f32 qx0 = quad->x + run->x + cache->offset_x;
 					f32 qy0 = quad->y + run->y + cache->offset_y;

@@ -62,6 +62,9 @@ Move nodes and connect their ports to build a graph.
   draw-list generation.
 - `src/rg_gui_renderer.h` - persistent page-cached text preparation with
   32-glyph pages by default.
+- `src/rg_gui_frame.h` - renderer-neutral frame building: turns a draw list
+  into one packed buffer and painter-ordered batches for the indexed shader.
+  No graphics API; any GPU backend can draw it.
 - `src/rg_gui_gpu.h` - SDL3 GPU rendering for rectangles, triangles, images,
   application-defined image materials, text, clipping, and draw-list order.
 - `src/rg_gui_gpu_tiles.h` - optional dirty-tile detection for repainting only
