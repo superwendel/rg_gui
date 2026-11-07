@@ -21,8 +21,9 @@
 // NOTES:
 //   - A press on a tab activates it at once; a press on its close button, or a
 //     middle-button press, closes it when released over the same tab.
-//   - While a tab is dragged, a move is reported each time its center passes a
-//     neighbor's; reorder before the next frame (one step per frame).
+//   - While a tab is dragged, a move is reported each time its leading edge
+//     passes a neighbor's center; reorder before the next frame (one step per
+//     frame).
 //   - Not focusable: keyboard switching belongs to the application.
 //   - All functions have internal linkage and work in unity builds.
 //
@@ -222,27 +223,27 @@ RGINLINE u32 rg_gui_tab_strip(RgGuiContext* ctx, RgGuiTabStripState* state, cons
 	}
 
 	/* Dragging: past a few pixels the pressed tab follows the pointer, and moves
-	 * one place whenever its center passes a neighbor's center. */
+	 * one place whenever its leading edge passes a neighbor's center (its center
+	 * could not pass a narrower last tab's: the tab stays inside the strip). The
+	 * gap between tabs keeps a tab from flipping back once moved. */
 	if (state->pressed && !state->closing && ctx->mouse_down)
 	{
 		const u32 t = state->pressed - 1u;
 		const f32 w = x_of[t + 1u] - x_of[t];
-		f32 center;
 		if (!state->dragging && fabsf(mouse.x - state->press_x) > h * 0.2f) state->dragging = 1u;
 		if (state->dragging)
 		{
 			drag_x = mouse.x - state->grab - tabs_rect.x + state->scroll; /* strip coordinates */
 			if (drag_x < 0.0f) drag_x = 0.0f;
 			if (drag_x > total - w) drag_x = total - w;
-			center = drag_x + w * 0.5f;
-			if (t + 1u < count && center > (x_of[t + 1u] + x_of[t + 2u]) * 0.5f)
+			if (t + 1u < count && drag_x + w > (x_of[t + 1u] + x_of[t + 2u]) * 0.5f)
 			{
 				result.events |= RG_GUI_TAB_STRIP_MOVE;
 				result.from = t;
 				result.to = t + 1u;
 				state->pressed = t + 2u;
 			}
-			else if (t > 0u && center < (x_of[t - 1u] + x_of[t]) * 0.5f)
+			else if (t > 0u && drag_x < (x_of[t - 1u] + x_of[t]) * 0.5f)
 			{
 				result.events |= RG_GUI_TAB_STRIP_MOVE;
 				result.from = t;

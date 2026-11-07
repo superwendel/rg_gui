@@ -185,6 +185,34 @@ static int test_gui_tab_strip(void)
 		STRIP_CHECK(strip_frame(&rig, rig.rect.x + x2 + w2, p.y, 0, 0, 0.0f) == 0u);
 	}
 
+	// A wide tab reaches the end past a narrow last tab (it is held inside the
+	// strip, so its center never passes that tab's center; its edge does), and
+	// comes back to the start.
+	{
+		static const char* const wide[3] = {"A rather wide tab label", "One", "X"};
+		f32 w, x;
+		rig.count = 3u;
+		for (i = 0; i < 3u; i++) rig.labels[i] = wide[i];
+		rig.active = 0u;
+		strip_frame(&rig, -100.0f, -100.0f, 0, 0, 0.0f);
+		x = strip_tab_x(&rig, 0u, &w);
+		strip_frame(&rig, rig.rect.x + x + 5.0f, rig.rect.y + 5.0f, 1, 0, 0.0f);
+		for (i = 0; i < 4u; i++) strip_frame(&rig, rig.rect.x + 400.0f, rig.rect.y + 5.0f, 1, 0, 0.0f);
+		STRIP_CHECK(strcmp(rig.labels[2], wide[0]) == 0 && rig.active == 2u);
+		for (i = 0; i < 4u; i++) strip_frame(&rig, rig.rect.x - 50.0f, rig.rect.y + 5.0f, 1, 0, 0.0f);
+		STRIP_CHECK(strcmp(rig.labels[0], wide[0]) == 0 && rig.active == 0u);
+		/* Held still between moves, it does not flip back and forth. */
+		x = strip_tab_x(&rig, 1u, &w);
+		for (i = 0; i < 4u; i++) strip_frame(&rig, rig.rect.x + x + 6.0f, rig.rect.y + 5.0f, 1, 0, 0.0f);
+		{
+			u32 moves = 0u;
+			for (i = 0; i < 6u; i++)
+				if (strip_frame(&rig, rig.rect.x + x + 6.0f, rig.rect.y + 5.0f, 1, 0, 0.0f) & RG_GUI_TAB_STRIP_MOVE) moves++;
+			STRIP_CHECK(moves == 0u);
+		}
+		strip_frame(&rig, -100.0f, -100.0f, 0, 0, 0.0f);
+	}
+
 	// Too many tabs to fit: the active one is scrolled into view, the wheel
 	// scrolls, and the scroll stays within the tabs.
 	{
