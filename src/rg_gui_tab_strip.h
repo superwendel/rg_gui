@@ -21,9 +21,9 @@
 // NOTES:
 //   - A press on a tab activates it at once; a press on its close button, or a
 //     middle-button press, closes it when released over the same tab.
-//   - While a tab is dragged, a move is reported each time its leading edge
-//     passes a neighbor's center; reorder before the next frame (one step per
-//     frame).
+//   - While a tab is dragged (and on its release), a move from its place to
+//     where it now belongs is reported: past every neighbor whose center its
+//     leading edge passed. Apply it before the next frame.
 //   - Not focusable: keyboard switching belongs to the application.
 //   - All functions have internal linkage and work in unity builds.
 //
@@ -77,6 +77,8 @@ typedef struct RgGuiTabStripState
 	u32 pressed;     /* left-pressed tab + 1; 0 none */
 	u32 middle;      /* middle-pressed tab + 1; 0 none */
 	u32 shown_active; /* active tab + 1 last frame (scrolled into view when it changes) */
+	f32 shown_width;  /* the tabs' area and total width last frame: a layout change */
+	f32 shown_total;  /* (a resize, a renamed tab) also scrolls the active tab into view */
 	u8 dragging;
 	u8 closing;      /* the left press began on the pressed tab's close button */
 	u8 new_pressed;
@@ -177,9 +179,12 @@ RGINLINE u32 rg_gui_tab_strip(RgGuiContext* ctx, RgGuiTabStripState* state, cons
 		ctx->hot_id = id;
 		if (ctx->mouse_wheel != 0.0f && max_scroll > 0.0f) state->scroll -= ctx->mouse_wheel * h;
 	}
-	if (count && state->shown_active != active + 1u)
+	if (count && (state->shown_active != active + 1u || state->shown_width != tabs_rect.w || state->shown_total != total))
 	{
-		/* A new active tab (a click, a key, a new tab) scrolls into view. */
+		/* A new active tab (a click, a key, a new tab) or a new layout scrolls the
+		 * active tab into view; wheel scrolling is left alone otherwise. */
+		state->shown_width = tabs_rect.w;
+		state->shown_total = total;
 		if (x_of[active] < state->scroll) state->scroll = x_of[active];
 		else if (x_of[active + 1u] > state->scroll + tabs_rect.w) state->scroll = x_of[active + 1u] - tabs_rect.w;
 		state->shown_active = active + 1u;
@@ -222,33 +227,33 @@ RGINLINE u32 rg_gui_tab_strip(RgGuiContext* ctx, RgGuiTabStripState* state, cons
 		ctx->active_id = id;
 	}
 
-	/* Dragging: past a few pixels the pressed tab follows the pointer, and moves
-	 * one place whenever its leading edge passes a neighbor's center (its center
-	 * could not pass a narrower last tab's: the tab stays inside the strip). The
-	 * gap between tabs keeps a tab from flipping back once moved. */
-	if (state->pressed && !state->closing && ctx->mouse_down)
+	/* Dragging: past a few pixels the pressed tab follows the pointer. It belongs
+	 * past every neighbor whose center its leading edge has passed (its center
+	 * could not pass a narrower last tab's: the tab stays inside the strip), with
+	 * the neighbors already passed shifted out of its way; the gap between tabs
+	 * keeps a moved tab from flipping back. The whole move is reported at once,
+	 * on the release frame too: a fast drag can arrive in one frame, release
+	 * included, and no further frame comes while the pointer rests. */
+	if (state->pressed && !state->closing && (ctx->mouse_down || ctx->mouse_released))
 	{
 		const u32 t = state->pressed - 1u;
 		const f32 w = x_of[t + 1u] - x_of[t];
+		u32 to = t;
 		if (!state->dragging && fabsf(mouse.x - state->press_x) > h * 0.2f) state->dragging = 1u;
 		if (state->dragging)
 		{
 			drag_x = mouse.x - state->grab - tabs_rect.x + state->scroll; /* strip coordinates */
 			if (drag_x < 0.0f) drag_x = 0.0f;
 			if (drag_x > total - w) drag_x = total - w;
-			if (t + 1u < count && drag_x + w > (x_of[t + 1u] + x_of[t + 2u]) * 0.5f)
+			while (to + 1u < count && drag_x + w > (x_of[to + 1u] + x_of[to + 2u]) * 0.5f) to++;
+			if (to == t)
+				while (to > 0u && drag_x < (x_of[to - 1u] + x_of[to]) * 0.5f) to--;
+			if (to != t)
 			{
 				result.events |= RG_GUI_TAB_STRIP_MOVE;
 				result.from = t;
-				result.to = t + 1u;
-				state->pressed = t + 2u;
-			}
-			else if (t > 0u && drag_x < (x_of[t - 1u] + x_of[t]) * 0.5f)
-			{
-				result.events |= RG_GUI_TAB_STRIP_MOVE;
-				result.from = t;
-				result.to = t - 1u;
-				state->pressed = t;
+				result.to = to;
+				state->pressed = to + 1u;
 			}
 		}
 	}

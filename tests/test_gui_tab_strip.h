@@ -47,11 +47,17 @@ static u32 strip_frame(StripRig* rig, f32 x, f32 y, int left, int middle, f32 wh
 	if (rig->result.events & RG_GUI_TAB_STRIP_ACTIVATE) rig->active = rig->result.index;
 	if (rig->result.events & RG_GUI_TAB_STRIP_MOVE)
 	{
-		const char* moved = rig->labels[rig->result.from];
-		rig->labels[rig->result.from] = rig->labels[rig->result.to];
-		rig->labels[rig->result.to] = moved;
-		if (rig->active == rig->result.from) rig->active = rig->result.to;
-		else if (rig->active == rig->result.to) rig->active = rig->result.from;
+		/* Tab `from` moves to `to`, the tabs between shift over by one. */
+		const u32 from = rig->result.from, to = rig->result.to;
+		const char* moved = rig->labels[from];
+		if (from < to)
+			for (i = from; i < to; i++) rig->labels[i] = rig->labels[i + 1u];
+		else
+			for (i = from; i > to; i--) rig->labels[i] = rig->labels[i - 1u];
+		rig->labels[to] = moved;
+		if (rig->active == from) rig->active = to;
+		else if (from < to && rig->active > from && rig->active <= to) rig->active--;
+		else if (to < from && rig->active >= to && rig->active < from) rig->active++;
 	}
 	return rig->result.events;
 }
@@ -213,6 +219,38 @@ static int test_gui_tab_strip(void)
 		strip_frame(&rig, -100.0f, -100.0f, 0, 0, 0.0f);
 	}
 
+	// A fast drag arrives whole: the press, then one frame with the pointer far
+	// away and the button already released (the platform queued the motion and
+	// the release together). The tab still lands where it was dropped.
+	{
+		static const char* const five[5] = {"One", "Two", "Three", "Four", "Five"};
+		f32 w, x;
+		rig.count = 5u;
+		for (i = 0; i < 5u; i++)
+		{
+			rig.labels[i] = five[i];
+			rig.items[i].closable = 1u;
+		}
+		rig.active = 0u;
+		strip_frame(&rig, -100.0f, -100.0f, 0, 0, 0.0f);
+		x = strip_tab_x(&rig, 0u, &w);
+		strip_frame(&rig, rig.rect.x + x + 5.0f, rig.rect.y + 5.0f, 1, 0, 0.0f);
+		x = strip_tab_x(&rig, 3u, &w);
+		events = strip_frame(&rig, rig.rect.x + x + 5.0f, rig.rect.y + 5.0f, 0, 0, 0.0f); /* its left edge at Four's */
+		STRIP_CHECK(events == RG_GUI_TAB_STRIP_MOVE && rig.result.from == 0u && rig.result.to == 3u);
+		STRIP_CHECK(strcmp(rig.labels[3], "One") == 0 && strcmp(rig.labels[0], "Two") == 0 && rig.active == 3u);
+		/* Held: one frame of motion across four tabs moves the whole way, and
+		 * holding still afterwards changes nothing (no frame may come). */
+		strip_frame(&rig, -100.0f, -100.0f, 0, 0, 0.0f); /* the new order laid out */
+		x = strip_tab_x(&rig, 4u, &w);
+		strip_frame(&rig, rig.rect.x + x + 5.0f, rig.rect.y + 5.0f, 1, 0, 0.0f); /* press "Five" */
+		events = strip_frame(&rig, rig.rect.x - 40.0f, rig.rect.y + 5.0f, 1, 0, 0.0f);
+		STRIP_CHECK(events == RG_GUI_TAB_STRIP_MOVE && rig.result.from == 4u && rig.result.to == 0u);
+		STRIP_CHECK(strcmp(rig.labels[0], "Five") == 0 && rig.active == 0u);
+		STRIP_CHECK(strip_frame(&rig, rig.rect.x - 40.0f, rig.rect.y + 5.0f, 1, 0, 0.0f) == 0u);
+		STRIP_CHECK(strip_frame(&rig, rig.rect.x - 40.0f, rig.rect.y + 5.0f, 0, 0, 0.0f) == 0u);
+	}
+
 	// Too many tabs to fit: the active one is scrolled into view, the wheel
 	// scrolls, and the scroll stays within the tabs.
 	{
@@ -238,6 +276,16 @@ static int test_gui_tab_strip(void)
 		/* A click on a tab in view activates that tab, not one under it before the scroll. */
 		events = strip_click(&rig, strip_tab_center(&rig, 18u), 0, &i);
 		STRIP_CHECK((i & RG_GUI_TAB_STRIP_ACTIVATE) && rig.active == 18u);
+		/* The strip narrows (a pane resized): the active tab stays in view... */
+		rig.rect.w = 300.0f;
+		strip_frame(&rig, -100.0f, -100.0f, 0, 0, 0.0f);
+		x = strip_tab_x(&rig, 18u, &w);
+		STRIP_CHECK(x >= rig.state.scroll && x + w <= rig.state.scroll + rig.rect.w - rig.rect.h + 1.0f);
+		/* ...and with the layout unchanged, the wheel still scrolls away from it. */
+		strip_frame(&rig, rig.rect.x + 50.0f, rig.rect.y + 5.0f, 0, 0, 1000.0f);
+		strip_frame(&rig, -100.0f, -100.0f, 0, 0, 0.0f);
+		STRIP_CHECK(rig.state.scroll == 0.0f);
+		rig.rect.w = 600.0f;
 	}
 
 	// A label wider than the widest tab is cut with an ellipsis.
