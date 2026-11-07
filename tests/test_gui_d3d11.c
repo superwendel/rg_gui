@@ -2,8 +2,9 @@
 // rasterizer, so no GPU is needed): the material/clip/alpha/overlay scene of
 // test_gui_gpu_device without image materials, the shader clip rule against the
 // scissor rule, image texture handles (registered, stale, after a device reset),
-// an R8 coverage atlas with snapped text origins, and no live device objects
-// after shutdown.
+// an R8 coverage atlas with snapped text origins, drawing over host state (a
+// bound geometry or hull shader, a depth buffer with the default depth test),
+// and no live device objects after shutdown.
 
 #define RG_SPRINTF_NO_ASM 1
 #define RGINLINE static inline
@@ -11,6 +12,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <d3d11.h>
+#include <d3dcompiler.h>
 #include "../src/rg_gui_d3d11.h"
 
 #include <math.h>
@@ -18,6 +20,7 @@
 #include <stdlib.h>
 
 #pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "d3dcompiler.lib") /* host-state shaders, test only */
 
 #define SIZE 64u
 
@@ -42,6 +45,8 @@ typedef struct Target
 	ID3D11Texture2D* color;
 	ID3D11RenderTargetView* view;
 	ID3D11Texture2D* staging;
+	/* Bound with the color target when set (host-state test). */
+	ID3D11DepthStencilView* depth;
 	u8 pixels[SIZE * SIZE * 4u];
 } Target;
 
@@ -121,7 +126,8 @@ static int render(Target* t, RgGuiD3d11* r, RgGuiRenderer* text, const RgGuiDraw
 	memset(&viewport, 0, sizeof(viewport));
 	viewport.Width = viewport.Height = (FLOAT)SIZE;
 	viewport.MaxDepth = 1.0f;
-	t->context->lpVtbl->OMSetRenderTargets(t->context, 1u, &t->view, NULL);
+	t->context->lpVtbl->OMSetRenderTargets(t->context, 1u, &t->view, t->depth);
+	if (t->depth) t->context->lpVtbl->ClearDepthStencilView(t->context, t->depth, D3D11_CLEAR_DEPTH, 1.0f, 0u);
 	t->context->lpVtbl->RSSetViewports(t->context, 1u, &viewport);
 	t->context->lpVtbl->ClearRenderTargetView(t->context, t->view, black);
 	rg_gui_renderer_begin_frame(text);
@@ -442,6 +448,94 @@ static void test_coverage_atlas(Target* t, RgGuiRenderer* text, RgArena* arena)
 	RG_GUI_D3D11_RELEASE(view);
 }
 
+/* Compile a host shader with D3DCompile (the test may; the library never does). */
+static ID3DBlob* compile(const char* source, const char* target)
+{
+	ID3DBlob* code = NULL;
+	ID3DBlob* errors = NULL;
+	if (FAILED(D3DCompile(source, strlen(source), NULL, NULL, NULL, "main", target, 0u, 0u, &code, &errors)))
+	{
+		if (errors) fprintf(stderr, "  %s\n", (const char*)errors->lpVtbl->GetBufferPointer(errors));
+		RG_GUI_D3D11_RELEASE(code);
+	}
+	RG_GUI_D3D11_RELEASE(errors);
+	return code;
+}
+
+/* State a host may leave bound when it draws its own scene first: a geometry
+ * shader that emits nothing, a hull shader (an invalid draw with a triangle
+ * list), and a depth buffer under the default depth test (LESS, writes on),
+ * where every overlapping UI primitive after the first would fail. Each must
+ * leave the UI as on a clean context: green over red, and an overlay. */
+static void test_host_state(Target* t, RgGuiD3d11* r, RgGuiRenderer* text)
+{
+	static const char* gs_source =
+	    "struct V { float4 p : SV_Position; };\n"
+	    "[maxvertexcount(3)] void main(triangle V v[3], inout TriangleStream<V> s) {}\n";
+	static const char* hs_source =
+	    "struct P { float4 p : SV_Position; };\n"
+	    "struct C { float e[3] : SV_TessFactor; float i : SV_InsideTessFactor; };\n"
+	    "C patch(InputPatch<P, 3> ip) { C c; c.e[0] = c.e[1] = c.e[2] = 1; c.i = 1; return c; }\n"
+	    "[domain(\"tri\")] [partitioning(\"integer\")] [outputtopology(\"triangle_cw\")]\n"
+	    "[outputcontrolpoints(3)] [patchconstantfunc(\"patch\")]\n"
+	    "P main(InputPatch<P, 3> ip, uint i : SV_OutputControlPointID) { return ip[i]; }\n";
+	ID3DBlob* gs_code = compile(gs_source, "gs_5_0");
+	ID3DBlob* hs_code = compile(hs_source, "hs_5_0");
+	ID3D11GeometryShader* gs = NULL;
+	ID3D11HullShader* hs = NULL;
+	ID3D11Texture2D* depth_texture = NULL;
+	RgGuiDrawCmd cmds[3];
+	const RgGuiDrawList list = {cmds, 3u, 3u};
+	cmds[0] = rect_cmd(0, 0, 32, 32, rg_gui_color(1, 0, 0, 1));
+	cmds[1] = rect_cmd(8, 8, 16, 16, rg_gui_color(0, 1, 0, 1));
+	cmds[2] = rect_cmd(4, 4, 8, 8, rg_gui_color(0, 0, 1, 1));
+	CHECK(gs_code && hs_code);
+	if (!gs_code || !hs_code) goto done;
+	CHECK(SUCCEEDED(t->device->lpVtbl->CreateGeometryShader(t->device, gs_code->lpVtbl->GetBufferPointer(gs_code),
+	                                                        gs_code->lpVtbl->GetBufferSize(gs_code), NULL, &gs)));
+	CHECK(SUCCEEDED(t->device->lpVtbl->CreateHullShader(t->device, hs_code->lpVtbl->GetBufferPointer(hs_code),
+	                                                    hs_code->lpVtbl->GetBufferSize(hs_code), NULL, &hs)));
+	{
+		D3D11_TEXTURE2D_DESC td;
+		memset(&td, 0, sizeof(td));
+		td.Width = td.Height = SIZE;
+		td.MipLevels = td.ArraySize = 1u;
+		td.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+		td.SampleDesc.Count = 1u;
+		td.Usage = D3D11_USAGE_DEFAULT;
+		td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+		CHECK(SUCCEEDED(t->device->lpVtbl->CreateTexture2D(t->device, &td, NULL, &depth_texture)) &&
+		      SUCCEEDED(t->device->lpVtbl->CreateDepthStencilView(t->device, (ID3D11Resource*)depth_texture, NULL,
+		                                                          &t->depth)));
+	}
+	if (!gs || !hs || !t->depth) goto done;
+	for (u32 host = 0u; host < 3u; host++)
+	{
+		ID3D11DepthStencilView* depth = t->depth;
+		t->depth = host == 2u ? depth : NULL;
+		t->context->lpVtbl->OMSetDepthStencilState(t->context, NULL, 0u); /* the default: LESS, writes on */
+		if (host == 0u) t->context->lpVtbl->GSSetShader(t->context, gs, NULL, 0u);
+		if (host == 1u) t->context->lpVtbl->HSSetShader(t->context, hs, NULL, 0u);
+		CHECK(render(t, r, text, &list, 3u, 0.0f, 0.0f));
+		{
+			const int same = pixel_is(t, 2, 2, 255, 0, 0) && pixel_is(t, 16, 16, 0, 255, 0) &&
+			                 pixel_is(t, 8, 8, 0, 0, 255);
+			if (!same) fprintf(stderr, "  host state %u (0 geometry shader, 1 hull shader, 2 depth) changed the UI\n", host);
+			CHECK(same);
+		}
+		t->context->lpVtbl->GSSetShader(t->context, NULL, NULL, 0u);
+		t->context->lpVtbl->HSSetShader(t->context, NULL, NULL, 0u);
+		t->depth = depth;
+	}
+done:
+	RG_GUI_D3D11_RELEASE(t->depth);
+	RG_GUI_D3D11_RELEASE(depth_texture);
+	RG_GUI_D3D11_RELEASE(hs);
+	RG_GUI_D3D11_RELEASE(gs);
+	RG_GUI_D3D11_RELEASE(hs_code);
+	RG_GUI_D3D11_RELEASE(gs_code);
+}
+
 int main(void)
 {
 	static Target target;
@@ -520,6 +614,7 @@ int main(void)
 		test_scene(t, &renderer, &text, image, stale, 0);
 		CHECK(renderer.stats.full_cache_upload == 1u);
 
+		test_host_state(t, &renderer, &text);
 		test_coverage_atlas(t, &text, &arena);
 		rg_gui_d3d11_shutdown(&renderer);
 	}

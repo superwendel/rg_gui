@@ -38,8 +38,10 @@
 //     batches are skipped and counted.
 //   - The atlas is RGBA8, or R8 glyph coverage with atlas_coverage (glyphs draw
 //     white at the coverage value; images still sample RGBA).
-//   - rg_gui_d3d11_draw sets the pipeline state it needs (shaders, buffers,
-//     blend, rasterizer, sampler) and does not restore the previous state.
+//   - rg_gui_d3d11_draw sets every pipeline state its draws depend on (all
+//     shader stages, with hull, domain and geometry cleared; buffers; blend;
+//     depth-stencil off; rasterizer; sampler) and does not restore the
+//     previous state. The render target and viewport are the caller's.
 //   - All functions have internal linkage and work in unity builds.
 //
 // Author: Steven Wendel (superwendel)
@@ -112,6 +114,7 @@ typedef struct RgGuiD3d11
 	ID3D11VertexShader* vertex_shader;
 	ID3D11PixelShader* pixel_shader;
 	ID3D11BlendState* blend;
+	ID3D11DepthStencilState* depth;
 	ID3D11RasterizerState* raster;
 	ID3D11SamplerState* sampler;
 	ID3D11Buffer* constants;
@@ -223,6 +226,7 @@ RGINLINE void rg_gui_d3d11_release_device_objects(RgGuiD3d11* r)
 	RG_GUI_D3D11_RELEASE(r->constants);
 	RG_GUI_D3D11_RELEASE(r->sampler);
 	RG_GUI_D3D11_RELEASE(r->raster);
+	RG_GUI_D3D11_RELEASE(r->depth);
 	RG_GUI_D3D11_RELEASE(r->blend);
 	RG_GUI_D3D11_RELEASE(r->pixel_shader);
 	RG_GUI_D3D11_RELEASE(r->vertex_shader);
@@ -292,6 +296,17 @@ RGINLINE int rg_gui_d3d11_create_device_objects(RgGuiD3d11* r)
 		bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
 		bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
 		if (FAILED(device->lpVtbl->CreateBlendState(device, &bd, &r->blend))) return 0;
+	}
+	{
+		/* No depth or stencil test: UI order is painter order, and a depth
+		 * buffer the host left bound must not reject overlapping primitives. */
+		D3D11_DEPTH_STENCIL_DESC dd;
+		memset(&dd, 0, sizeof(dd));
+		dd.DepthEnable = FALSE;
+		dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+		dd.DepthFunc = D3D11_COMPARISON_ALWAYS;
+		dd.StencilEnable = FALSE;
+		if (FAILED(device->lpVtbl->CreateDepthStencilState(device, &dd, &r->depth))) return 0;
 	}
 	{
 		D3D11_RASTERIZER_DESC rd;
@@ -579,11 +594,18 @@ RGINLINE int rg_gui_d3d11_draw(RgGuiD3d11* r, const RgGuiRenderer* text, const R
 
 		context->lpVtbl->RSSetState(context, r->raster);
 		context->lpVtbl->OMSetBlendState(context, r->blend, blend_factor, 0xffffffffu);
+		context->lpVtbl->OMSetDepthStencilState(context, r->depth, 0u);
 		context->lpVtbl->IASetInputLayout(context, NULL);
 		context->lpVtbl->IASetPrimitiveTopology(context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		context->lpVtbl->IASetIndexBuffer(context, r->index_buffer,
 		                                  r->frame.ref_capacity > 16384u ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0u);
+		/* Every stage the draw passes through: a geometry, hull or domain
+		 * shader the host left bound would replace or invalidate the UI's
+		 * triangles. */
 		context->lpVtbl->VSSetShader(context, r->vertex_shader, NULL, 0u);
+		context->lpVtbl->HSSetShader(context, NULL, NULL, 0u);
+		context->lpVtbl->DSSetShader(context, NULL, NULL, 0u);
+		context->lpVtbl->GSSetShader(context, NULL, NULL, 0u);
 		context->lpVtbl->PSSetShader(context, r->pixel_shader, NULL, 0u);
 		context->lpVtbl->VSSetConstantBuffers(context, 0u, 1u, &r->constants);
 		views[0] = r->cached_quads_view;
