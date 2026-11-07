@@ -1,4 +1,4 @@
-/* Compiles rg_gui.h, rg_gui_renderer.h and rg_gui_frame.h with tests/poison
+/* Compiles rg_gui.h, rg_gui_renderer.h, rg_gui_frame.h and rg_gui_tab_strip.h with tests/poison
  * first on the include path and no SDL3 include directory: any SDL include
  * fails the build. Proves the core headers and the renderer-neutral frame
  * builder stay SDL-free (SDL glue lives in rg_gui_sdl.h and rg_gui_gpu.h).
@@ -9,6 +9,7 @@
 #include "../src/rg_gui.h"
 #include "../src/rg_gui_renderer.h"
 #include "../src/rg_gui_frame.h"
+#include "../src/rg_gui_tab_strip.h"
 
 int main(void)
 {
