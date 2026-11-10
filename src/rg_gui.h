@@ -1235,6 +1235,14 @@ typedef struct RgGuiTableState
 	int header_popup_scroll;
 	int activated_row; /* the row of the last RG_GUI_TABLE_RESULT_ACTIVATE */
 	int context_row;   /* the row of the last RG_GUI_TABLE_RESULT_CONTEXT, -1 below the rows */
+	/* Opt-in, set by the caller (multi-selection tables): a plain press on a row
+	 * already selected moves the cursor and keeps the selection; the row is
+	 * selected alone when the button comes up over it without the pointer having
+	 * moved RG_GUI_DRAG_THRESHOLD, so a selection can be dragged (file managers). */
+	u8 defer_selected_press;
+	u8 press_pending; /* internal: such a press waits for its release */
+	int press_row;
+	f32 press_x, press_y;
 } RgGuiTableState;
 
 typedef struct RgGuiWindowState
@@ -34512,6 +34520,7 @@ RGINLINE u32 rg_gui_table_internal(RgGuiContext* ctx, RgGuiTableState* table, co
 	f32 row_y = ctx->layout.cursor_y;
 	int right_pressed = enabled && ctx->input && rg_input_is_mouse_button_pressed(ctx->input, RG_MOUSE_BUTTON_RIGHT);
 	int context_on_row = 0;
+	int released_row = -1;
 	for (u32 i = start; i < start + visible; i++)
 	{
 		f32 row_span = row_stride;
@@ -34533,6 +34542,10 @@ RGINLINE u32 rg_gui_table_internal(RgGuiContext* ctx, RgGuiTableState* table, co
 		{
 			ctx->hot_id = id;
 		}
+		if (row_hovered && ctx->mouse_released)
+		{
+			released_row = (int)i;
+		}
 
 		if (enabled && row_hovered && ctx->mouse_pressed && (selected || multi))
 		{
@@ -34547,7 +34560,18 @@ RGINLINE u32 rg_gui_table_internal(RgGuiContext* ctx, RgGuiTableState* table, co
 				{
 					flags |= RG_GUI_SELECTION_RANGE;
 				}
-				if (rg_gui_selection_apply(selection, selection_ops, selection_user, row_count, i, flags))
+				if (table->defer_selected_press && flags == RG_GUI_SELECTION_NONE &&
+				    selection_ops->is_selected(selection_user, i))
+				{
+					/* Selected alone on release (below), unless it becomes a drag. */
+					rg_gui_selection_state_init(selection);
+					selection->cursor = (int)i;
+					table->press_pending = 1u;
+					table->press_row = (int)i;
+					table->press_x = ctx->mouse_pos.x;
+					table->press_y = ctx->mouse_pos.y;
+				}
+				else if (rg_gui_selection_apply(selection, selection_ops, selection_user, row_count, i, flags))
 				{
 					result |= RG_GUI_TABLE_RESULT_SELECTION;
 				}
@@ -34618,6 +34642,29 @@ RGINLINE u32 rg_gui_table_internal(RgGuiContext* ctx, RgGuiTableState* table, co
 		}
 
 		row_y += row_span;
+	}
+
+	if (table->press_pending)
+	{
+		/* A deferred press: moved past the threshold, it is a drag and the
+		 * selection stays; released over its row first, that row alone. */
+		f32 dx = ctx->mouse_pos.x - table->press_x;
+		f32 dy = ctx->mouse_pos.y - table->press_y;
+		if (dx * dx + dy * dy >= RG_GUI_DRAG_THRESHOLD * RG_GUI_DRAG_THRESHOLD)
+		{
+			table->press_pending = 0u;
+		}
+		else if (!ctx->mouse_down)
+		{
+			table->press_pending = 0u;
+			if (multi && ctx->mouse_released && released_row == table->press_row &&
+			    rg_gui_selection_apply(selection, selection_ops, selection_user, row_count, (u32)released_row,
+			                           RG_GUI_SELECTION_NONE))
+			{
+				result |= RG_GUI_TABLE_RESULT_SELECTION;
+				cursor = selection->cursor;
+			}
+		}
 	}
 
 	if (right_pressed && !context_on_row &&

@@ -320,6 +320,69 @@ static int test_gui_table(void)
 		TABLE_CHECK(!(r & RG_GUI_TABLE_RESULT_CONTEXT) && table_rig_only(&rig, 4u, 4u));
 	}
 
+	// A table that defers presses on selected rows (file managers): a plain
+	// press on a selected row moves the cursor and keeps the selection, which
+	// becomes that row alone when the button comes up over it; moved past the
+	// drag threshold first (a drag), the selection stays. A press on an
+	// unselected row, and Ctrl or Shift presses, act at once; a double-click
+	// still activates. Off (the default), a press selects the row alone at once.
+	{
+		const RgGuiRect body = rig.table.panel.inner_rect;
+		const f32 x = body.x + 30.0f;
+		const f32 y5 = body.y + 5.5f * rig.row_h - rig.table.panel.scroll_y;
+		const f32 y8 = body.y + 8.5f * rig.row_h - rig.table.panel.scroll_y;
+		u32 r;
+		rig.table.defer_selected_press = 1u;
+		(void)table_rig_click(&rig, 4u, NULL);
+		(void)table_rig_click(&rig, 6u, shift);
+		TABLE_CHECK(table_rig_only(&rig, 4u, 6u));
+		r = table_rig_frame(&rig, x, y5, 1, NULL);
+		TABLE_CHECK(!(r & RG_GUI_TABLE_RESULT_SELECTION) && table_rig_only(&rig, 4u, 6u) && rig.selection.cursor == 5);
+		r = table_rig_frame(&rig, x, y5, 0, NULL);
+		TABLE_CHECK((r & RG_GUI_TABLE_RESULT_SELECTION) && table_rig_only(&rig, 5u, 5u) && rig.selection.anchor == 5);
+		// Moved past the threshold while held, then back and released: kept.
+		(void)table_rig_click(&rig, 4u, NULL);
+		(void)table_rig_click(&rig, 6u, shift);
+		(void)table_rig_frame(&rig, x, y5, 1, NULL);
+		(void)table_rig_frame(&rig, x + RG_GUI_DRAG_THRESHOLD + 1.0f, y5, 1, NULL);
+		(void)table_rig_frame(&rig, x, y5, 1, NULL);
+		r = table_rig_frame(&rig, x, y5, 0, NULL);
+		TABLE_CHECK(!(r & RG_GUI_TABLE_RESULT_SELECTION) && table_rig_only(&rig, 4u, 6u));
+		// Released after moving less than the threshold: a click.
+		(void)table_rig_frame(&rig, x, y5, 1, NULL);
+		(void)table_rig_frame(&rig, x + 2.0f, y5 + 1.0f, 0, NULL);
+		TABLE_CHECK(table_rig_only(&rig, 5u, 5u));
+		// Released over the next row (across the edge, under the threshold): kept.
+		(void)table_rig_click(&rig, 4u, NULL);
+		(void)table_rig_click(&rig, 6u, shift);
+		(void)table_rig_frame(&rig, x, y5 + 0.4f * rig.row_h, 1, NULL);
+		r = table_rig_frame(&rig, x, y5 + 0.6f * rig.row_h, 0, NULL);
+		TABLE_CHECK(!(r & RG_GUI_TABLE_RESULT_SELECTION) && table_rig_only(&rig, 4u, 6u));
+		// An unselected row is selected alone at the press.
+		(void)table_rig_click(&rig, 4u, NULL);
+		(void)table_rig_click(&rig, 6u, shift);
+		r = table_rig_frame(&rig, x, y8, 1, NULL);
+		TABLE_CHECK((r & RG_GUI_TABLE_RESULT_SELECTION) && table_rig_only(&rig, 8u, 8u));
+		(void)table_rig_frame(&rig, x, y8, 0, NULL);
+		// Ctrl on a selected row deselects it at the press.
+		(void)table_rig_click(&rig, 6u, shift);
+		r = table_rig_frame(&rig, x, y8, 1, ctrl);
+		TABLE_CHECK((r & RG_GUI_TABLE_RESULT_SELECTION) && rig.selected_count == 2u && !rig.selected[8]);
+		(void)table_rig_frame(&rig, x, y8, 0, ctrl);
+		// A double-click on a selected row activates it.
+		rig.press_clicks = 2u;
+		r = table_rig_click(&rig, 7u, NULL);
+		rig.press_clicks = 0u;
+		TABLE_CHECK((r & RG_GUI_TABLE_RESULT_ACTIVATE) && rig.table.activated_row == 7);
+		// Off: a press on a selected row selects it alone at once.
+		rig.table.defer_selected_press = 0u;
+		(void)table_rig_click(&rig, 4u, NULL);
+		(void)table_rig_click(&rig, 6u, shift);
+		r = table_rig_frame(&rig, x, y5, 1, NULL);
+		TABLE_CHECK((r & RG_GUI_TABLE_RESULT_SELECTION) && table_rig_only(&rig, 5u, 5u));
+		(void)table_rig_frame(&rig, x, y5, 0, NULL);
+	}
+
 	// A table without focus ignores keys.
 	rig.gui->focus_id = 0u;
 	TABLE_CHECK(table_rig_key(&rig, RG_KEY_DOWN, NULL) == RG_GUI_TABLE_RESULT_NONE);
